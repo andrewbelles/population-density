@@ -1,5 +1,5 @@
 {
-  description = "C++ 23 & Python 3.13 Tooling, SQLite Schema Generation";
+  description = "C++ 23 & Python 3.13 Tooling";
 
   inputs = {
     nixpkgs.url     = "github:NixOS/nixpkgs/nixos-unstable"; 
@@ -16,7 +16,7 @@
           };
         };
 
-        llvm   = pkgs.llvmPackages_17; 
+        llvm   = pkgs.llvmPackages_latest; 
         python = pkgs.python313; 
 
       in 
@@ -24,8 +24,8 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             llvm.clang 
-            llvm.libstdcxxClang 
             llvm.clang-tools 
+            llvm.libcxx
             llvm.lld 
             gnumake 
             boost 
@@ -34,7 +34,16 @@
           ];
 
           shellHook = ''
-          [NIX] Development Toolchain Ready...
+            export CC=${llvm.clang}/bin/clang 
+            export CXX=${llvm.clang}/bin/clang++
+            export CXXFLAGS="-std=c++23 ${CXXFLAGS:-}"
+            export LDFLAGGS="${LDFLAGS:-}"
+
+            mkdir -p data/
+            touch data/climate.db 
+            sqlite3 data/climate.db < api_clients/climate_init.sql 
+
+            echo [NIX] Development Toolchain Ready...
           '';
         };
       });
