@@ -82,7 +82,12 @@ public:
     bool active_; 
   };
   
+  /********** SqliteDB Constructor ************************/ 
   /*
+   * Explicit Constructor for Database RAII wrapper over sqlite3 database 
+   * 
+   * Throws: 
+   *   Runtime error for failure to open sqlite connection 
    */ 
   explicit SqliteDB(std::string&& path, 
                    int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
@@ -103,17 +108,25 @@ public:
 
   virtual ~SqliteDB() = default; // leave destructor implementation to child 
 
-  // Mutable reference to database pointer 
+  // Mutable reference to unique database pointer 
   std::unique_ptr<sqlite3, SqliteDeleter>& ptr() noexcept { return db_; }
   
-  void exec(std::string&& sql) 
+  /********** exec() **************************************/ 
+  /* Executes a single query on the intialized database.
+   *
+   * Throws: 
+   *   runtime error for nullptr database uniq ptr
+   *   runtime error for failure to execute query on database  
+   */ 
+  void exec(std::string_view sql) 
   {
     if ( !db_ ) {
       throw std::runtime_error("SqliteDB::exec database handle is nullptr"); 
     }
 
     char* errmsg = nullptr; 
-    const int code = sqlite3_exec(db_.get(), sql.c_str(), nullptr, nullptr, &errmsg); 
+    const int bfr_size = static_cast<int>(sql.size()); 
+    const int code = sqlite3_exec(db_.get(), sql.data(), nullptr, nullptr, &errmsg); 
     if ( code != SQLITE_OK ) {
       std::string err = errmsg? std::string(errmsg) : sqlite3_errmsg(db_.get()); 
 
@@ -124,14 +137,24 @@ public:
     }
   }
 
-  sqlite3_stmt* prepare(std::string&& sql)
+  /********** exec() **************************************/ 
+  /* Prepares an sql statement. Returns a raw pointer to the statement.
+   *
+   * Throws: 
+   *   runtime error for nullptr database uniq ptr
+   *   runtime error for failure to execute query on database  
+   */ 
+  sqlite3_stmt* prepare(std::string_view sql)
   {
     if ( !db_ ) {
       throw std::runtime_error("SqliteDB::prepare database handle is nullptr"); 
     }
     
     sqlite3_stmt* stmt = nullptr; 
-    const int code = sqlite3_prepare_v2(db_.get(), sql.c_str(), -1, &stmt, nullptr); 
+    const int code = sqlite3_prepare_v2(
+      db_.get(), sql.data(), static_cast<int>(sql.size()), &stmt, nullptr
+    ); 
+
     if ( code != SQLITE_OK ) {
       std::string errmsg{sqlite3_errmsg(db_.get())}; 
       if ( stmt ) {
@@ -142,6 +165,9 @@ public:
     return stmt; 
   }
 
+  /********** finalize() **********************************/ 
+  /* Finalizes a given pointer to statement 
+   */ 
   void finalize(sqlite3_stmt* stmt) noexcept
   {
     if ( stmt ) {
@@ -152,7 +178,7 @@ public:
 protected: 
   virtual void sqlite_handler(MapIt first, MapIt last) = 0;// 
   
-  void bind(sqlite3_stmt* stmt, int idx, const std::string& value)
+  void bind(sqlite3_stmt* stmt, int idx, std::string_view value)
   {
     if ( !db_ ) {
       throw std::runtime_error("SqliteDB::bind database handle is nullptr"); 
@@ -162,7 +188,7 @@ protected:
       throw std::runtime_error("SqliteDB::bind statement is nullptr"); 
     }
 
-    const int code = sqlite3_bind_text(stmt, idx, value.c_str(),
+    const int code = sqlite3_bind_text(stmt, idx, value.data(),
         static_cast<int>(value.size()), SQLITE_TRANSIENT);
     if ( code != SQLITE_OK ) {
       std::string errmsg{sqlite3_errmsg(db_.get())}; 
