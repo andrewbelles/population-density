@@ -6,11 +6,15 @@
  *
  */ 
 
+#include <array>
 #include <chrono>
 #include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include <functional> 
+#include <algorithm> 
+#include <sstream> 
 
 #include "crawler/crawler.hpp"
 #include "crawler/database.hpp"
@@ -76,12 +80,18 @@ struct StationRecord {
   double latitude; 
   double longitude; 
   double elevation_m; 
-  json::object metadata; 
+  boost::json::object metadata; 
 };
 
 /************ Type Bindings *******************************/ 
 using StationMap = std::unordered_map<std::string, std::vector<StationRecord>>;
 using StationIterator = StationMap::const_iterator; 
+using Fields = std::vector<crwl::Field>;  
+
+StationRecord parse_station_record(const boost::json::object& row);
+crwl::PageBatch<StationRecord> parse_station_page(const boost::json::object& root,
+                                                  const Fields& fields,
+                                                  const crwl::PaginationState&);
 
 /************ Primary Classes *****************************/ 
 
@@ -153,7 +163,7 @@ private:
         bind_double(5, record.longitude); 
         bind_double(6, record.elevation_m); 
 
-        const std::string metadata = json::serialize(record.metadata); 
+        const std::string metadata = boost::json::serialize(record.metadata); 
         bind(stmt, 7, metadata); 
 
         step(stmt); 
@@ -167,7 +177,6 @@ private:
 
     finalize(stmt); 
   }
-
 };
 
 /************ StationClient *******************************/ 
@@ -258,3 +267,78 @@ private:
     return oss.str(); 
   }
 }; 
+
+crwl::PageBatch<StationRecord> 
+parse_station_page(const boost::json::object& root, const Fields& fields,
+                   const crwl::PaginationState&)
+{
+  crwl::PageBatch<StationRecord> batch{}; 
+  batch.items.resize(fields.size()); 
+
+  const auto* results = root.if_contains("results");
+  if ( !results || !results->is_array() ) {
+    return batch; 
+  }
+
+  std::vector<StationRecord> parsed; 
+  parsed.reserve(results->as_array().size()); 
+  for (const auto& entry : results->as_array()) {
+    if ( entry.is_object() ) {
+      parsed.emplace_back(parse_station_record(entry.as_object()));
+    }
+  }
+
+  for (size_t i = 0; i < fields.size(); i++) {
+    if ( fields[i].name == "stations" ) {
+      batch.items[i] = parsed; 
+    }
+  }
+
+  if ( const auto* metadata = root.if_contains("metadata"); 
+       metadata && metadata->is_object() ) {
+    
+    if ( const auto* resultset = metadata->as_object().if_contains("resultset");
+         resultset && resultset->is_object() ) {
+
+      const auto& rs =resultset->as_object(); 
+      const auto offset = static_cast<size_t>(
+        std::max<int64_t>(0, jsc::get_or<int64_t>(rs, "offset").value_or(0))
+      ); 
+      const auto limit  = static_cast<size_t>(
+        std::max<int64_t>(0, jsc::get_or<int64_t>(rs, "limit").value_or(0))
+      );
+      const auto count  = static_cast<size_t>(
+        std::max<int64_t>(0, jsc::get_or<int64_t>(rs, "count").value_or(0))
+      );
+
+      batch.has_more = (offset + limit) < count; 
+    }
+  }
+
+  return batch; 
+}
+
+StationRecord 
+parse_station_record(const boost::json::object& row)
+{
+  StationRecord rec{}; 
+  rec.station_id  = boost::json::value_to<std::string>(row.at("id"));
+  rec.name        = jsc::get_or<std::string>(row, "name").value_or("");
+  rec.state       = jsc::get_or<std::string>(row, "state").value_or("");
+  rec.latitude    = jsc::get_or<double>(row, "latitude").value_or(0.0); 
+  rec.longitude   = jsc::get_or<double>(row, "longitude").value_or(0.0); 
+  rec.elevation_m = jsc::get_or<double>(row, "elevation").value_or(0.0); 
+
+  rec.metadata = boost::json::object{}; 
+  constexpr std::array<std::string_view, 8> pass = {
+    "mindate", "maxdate", "datacoverage", "elevationUnit", "network",
+    "gsnFlag", "hcnFlag", "wmoID"
+  };
+
+  for (auto& key : pass) {
+    if ( const auto* value = row.if_contains(key) ) {
+      rec.metadata.emplace(std::string(key), *value); 
+    }
+  }
+  return rec;
+}
