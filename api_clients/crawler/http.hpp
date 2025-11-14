@@ -9,10 +9,14 @@
 #pragma once 
 
 #include <string_view> 
+#include <string> 
 
 namespace htc {
 
-struct Url {}; 
+struct Url {
+  std::string scheme, host, port, target;
+};
+
 
 /************ parse_url() *********************************/ 
 /*

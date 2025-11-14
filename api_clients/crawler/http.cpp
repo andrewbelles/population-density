@@ -8,6 +8,8 @@
 
 #pragma once 
 
+#include "http.hpp"
+
 #include <boost/asio.hpp> 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl.hpp> 
@@ -62,13 +64,8 @@ namespace htc {
 static constexpr auto timeout = std::chrono::seconds(10);
 static const std::string bearer = "Bearer "; 
 
-struct Url {
-  std::string scheme, host, port, target;
-};
-
-
 Url 
-parse_url_(std::string_view url)
+parse_url(std::string_view url)
 {
   // lambda helper to throw exception on parse failure  
   auto bad = [&url]{
