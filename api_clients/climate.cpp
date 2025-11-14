@@ -112,6 +112,19 @@ public:
 
   ClimateDB(ClimateDB&&) noexcept = default;
 
+  bool ingest(StationIterator first, StationIterator last)
+  {
+    typename Base::Tx tx(*this);
+    try {
+      sqlite_handler(first, last); 
+      tx.commit(); 
+      return 0; 
+    } catch (...) {
+      tx.rollback();
+      throw; 
+    }
+  }
+
 protected: 
 
   /********** ClimateDB override : sqlite_handler ***********/ 
@@ -267,6 +280,24 @@ private:
     return oss.str(); 
   }
 }; 
+
+crwl::Handlers<StationRecord> make_station_handler(ClimateDB& db)
+{
+  crwl::Handlers<StationRecord> handlers{}; 
+  handlers.json_handler = [](const boost::json::object& root, 
+                             const Fields& fields,
+                             const crwl::PaginationState& state) {
+    return parse_station_page(root, fields, state);
+  };
+
+  handlers.sqlite_handler = [&db](StationIterator first, 
+                                  StationIterator last) -> bool {
+    return db.ingest(first, last); 
+  };
+
+  return handlers; 
+}
+
 
 crwl::PageBatch<StationRecord> 
 parse_station_page(const boost::json::object& root, const Fields& fields,
