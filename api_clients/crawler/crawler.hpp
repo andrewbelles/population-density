@@ -6,7 +6,8 @@
  * api and also handling insertion into an sqlite database 
  */ 
 
-#pragma once 
+#ifndef __CRAWLER_HPP 
+#define __CRAWLER_HPP
 
 #include <algorithm>
 #include <atomic>
@@ -33,7 +34,6 @@
 
 namespace crwl {
 
-namespace json = boost::json;
 
 /************ crwl::Crawler *******************************/
 /* Crawler Interface
@@ -138,7 +138,7 @@ private:
     try {
       // get body of request and parse into value  
       std::string body = request_with_retries_(url);
-      const json::object& root = jsc::as_obj(jsc::parse(body)); 
+      const boost::json::object& root = jsc::as_obj(jsc::parse(body)); 
 
       auto batch = fns_.json_handler(root, endpoint.fields, state); 
       if ( endpoint.fields.size() != batch.items.size() ) {
@@ -476,3 +476,5 @@ private:
 };
 
 } // end namespace crwl 
+
+#endif // !__CRAWLER_HPP 

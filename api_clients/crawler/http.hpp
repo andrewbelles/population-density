@@ -6,7 +6,8 @@
  *
  */ 
 
-#pragma once 
+#ifndef __HTTP_HPP
+#define __HTTP_HPP
 
 #include <string_view> 
 #include <string> 
@@ -31,3 +32,5 @@ Url parse_url(std::string_view url);
 std::pair<std::string, int> request(const std::string& key, const Url& url);
 
 }
+
+#endif // !__HTTP_HPP

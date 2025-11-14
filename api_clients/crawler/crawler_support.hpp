@@ -6,7 +6,9 @@
  *
  */ 
 
-#pragma once 
+#ifndef __CRAWLER_SUPPORT_HPP
+#define __CRAWLER_SUPPORT_HPP
+
 
 #include <cstdint>  
 #include <vector> 
@@ -20,7 +22,6 @@
 
 #include <boost/json.hpp>  
 
-namespace json = boost::json;
 using millis   = std::chrono::milliseconds;
 
 /************ supporting structures ***********************/
@@ -91,8 +92,8 @@ private:
 
 public: 
   std::function<PageBatch<Item>(
-     const json::object&, const Fields&, const PaginationState&)> json_handler{};
-  std::function<int(MapIt, MapIt)> sqlite_handler{};
+     const boost::json::object&, const Fields&, const PaginationState&)> json_handler{};
+  std::function<bool(MapIt, MapIt)> sqlite_handler{};
 };
 
 /************ build_url_ **********************************/
@@ -173,3 +174,5 @@ build_url_(const std::string& base, const Endpoint& endpoint,
 }
 
 } // end namespace crwl 
+
+#endif // !__CRAWLER_SUPPORT_HPP

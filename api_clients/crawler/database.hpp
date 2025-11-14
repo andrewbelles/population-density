@@ -6,7 +6,8 @@
  *
  */ 
 
-#pragma once 
+#ifndef __DATABASE_HPP
+#define __DATABASE_HPP
 
 #include <string_view> 
 #include <string> 
@@ -227,3 +228,5 @@ private:
 };
 
 }
+
+#endif // !__DATABASE_HPP
