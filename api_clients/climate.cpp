@@ -228,6 +228,12 @@ public:
       db_(db), 
     handlers_(std::move(handlers)), 
     runner_(make_runner_()) {} 
+
+  ~StationClient(void)
+  {
+    request_stop(); 
+    join();
+  }
   
   /********** getters/setters *****************************/
   bool enqueue(StationSeed seed) { return runner_.enqueue(std::move(seed)); }
@@ -243,6 +249,11 @@ public:
   {
     runner_.set_on_error(std::move(error_callback));     
   }
+
+  /********** wrapped calls to crwl::Runner ***************/
+  void start(void) { runner_.start(); }
+  void request_stop(void) { runner_.request_stop(); }
+  void join(void) { runner_.join(); }
 
 private: 
   StationConfig cfg_; 
