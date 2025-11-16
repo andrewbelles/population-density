@@ -57,7 +57,7 @@ INSERT INTO stations (
  */
 struct StationSeed {
   std::string region_id; 
-  BBox extent; 
+  std::optional<BBox> extent; 
   int limit{1000}; 
 };
 
