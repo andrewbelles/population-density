@@ -6,8 +6,6 @@
  * connections properly. Robust to bad http responses 
  */ 
 
-#pragma once 
-
 #include "http.hpp"
 
 #include <boost/asio.hpp> 

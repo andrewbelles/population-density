@@ -15,6 +15,10 @@
 #include <functional> 
 #include <algorithm> 
 #include <sstream> 
+#include <optional>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
 
 #include "crawler/crawler.hpp"
 #include "crawler/database.hpp"
@@ -303,8 +307,10 @@ private:
       oss << "&locationid=" << seed.region_id; 
     }
 
-    const auto [south, west, north, east] = seed.extent; 
-    oss << "&extent=" << south << ',' << west << ',' << north << ',' << east; 
+    if ( auto extent = seed.extent ) {
+      const auto& [south, west, north, east] = *extent; 
+      oss << "&extent=" << south << ',' << west << ',' << north << ',' << east; 
+    }
 
     const int limit = seed.limit > 0? seed.limit : 1000; 
     oss << "&limit=" << limit; 

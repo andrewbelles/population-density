@@ -15,33 +15,35 @@
             allowUnfree = true; 
           };
         };
+        llvmPackages = pkgs.llvmPackages;
 
-        llvm   = pkgs.llvmPackages_latest; 
-        python = pkgs.python313; 
-
+        python = pkgs.python314; 
       in 
-      {
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            llvm.clang 
-            llvm.clang-tools 
-            llvm.libcxx
-            llvm.lld 
-            gnumake 
-            boost 
-            sqlite 
-            python
-          ];
+        {
+          devShells.default = pkgs.mkShell {
+            packages = with pkgs; [
+              clang 
+              clang-tools 
+              gnumake 
+              bear 
+              boost.dev 
+              sqlite.dev
+              llvmPackages.libcxx
+              python
+            ];
 
-          shellHook = ''
-            export CC=${llvm.clang}/bin/clang 
-            export CXX=${llvm.clang}/bin/clang++
-            export CXXFLAGS="-std=c++23 ${CXXFLAGS:-}"
-            export LDFLAGGS="${LDFLAGS:-}"
+            CXXFLAGS = "-std=c++23";
+            NIX_CFLAGS_COMPILE = "-isystem ${llvmPackages.libcxx.dev}/include/c++/v1";
+            LDFLAGS = "";
 
+            shellHook = ''
             mkdir -p data/
             touch data/climate.db 
-            sqlite3 data/climate.db < api_clients/climate_init.sql 
+            sqlite3 data/climate.db < clients/climate_init.sql 
+
+            if [ -x /run/current-system/sw/bin/clangd ]; then 
+              export PATH="/run/current-system/sw/bin:$PATH"
+            fi 
 
             echo [NIX] Development Toolchain Ready...
           '';
