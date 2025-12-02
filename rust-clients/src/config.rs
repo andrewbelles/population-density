@@ -2,11 +2,16 @@
 /// config.rs  Andrew Belles  Dec 2nd, 2025 
 ///
 /// Details configuration structures for API Client Base 
+/// 
+/// Client is thread safe assuming configuration provided is valid 
 ///
 
 use std::collections::HashMap; 
 use std::path::PathBuf; 
 use std::time::Duration; 
+
+use serde::{Serialize, Deserialize};
+use url::Url; 
 
 /************ ClientConfig ********************************/ 
 /* Parent Configuration fully detailing behavior of a single Client
@@ -123,7 +128,7 @@ pub struct PaginationParams {
 
 /************ PaginationConfig ****************************/ 
 /* Configurable information for client paginating incoming 
- * JSON recieved from API. 
+ * JSON received from API.
  */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginationConfig {
@@ -136,7 +141,7 @@ pub struct PaginationConfig {
     pub param_names: PaginationParams, 
     #[serde(default)]
     pub initial_cursor: Option<String>, 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub stop_on_duplicate: bool 
 }
 
@@ -212,7 +217,7 @@ pub struct RunnerConfig {
     #[serde(default = "default_queue_bound")]
     pub queue_bound: usize, 
     #[serde(default)]
-    pub idle_shotdown_secs: Option<u64>, 
+    pub idle_shutdown_secs: Option<u64>, 
     #[serde(default = "default_graceful_shutdown_secs")]
     pub graceful_shutdown_secs: u64 
 }
