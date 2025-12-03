@@ -85,8 +85,8 @@ impl Pager {
         self.state.last_batch_len = batch_len; 
 
         if let Some(cursor) = next_cursor {
-            if (self.config.stop_on_duplicate && 
-                self.state.last_cursor.as_ref() == Some(&cursor)) {
+            if self.config.stop_on_duplicate && 
+                self.state.last_cursor.as_ref() == Some(&cursor) {
                 return false; 
             }
             self.state.last_cursor = Some(cursor); 

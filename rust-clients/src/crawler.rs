@@ -104,7 +104,7 @@ where
 
 impl<'a, Raw, Item, P, S> Crawler<'a, Raw, Item, P, S> 
 where 
-    Raw: Send, 
+    Raw: Send + serde::de::DeserializeOwned, 
     Item: Send + Sync, 
     P: PageParser<Raw, Item> + Send + Sync, 
     S: Storage<Item> + Send + Sync 

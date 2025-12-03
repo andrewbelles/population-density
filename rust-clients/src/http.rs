@@ -8,8 +8,6 @@
 /// Only works for cloneable requests, need separate impl for streaming bodies
 ///
 
-use std::time::Duration; 
-
 // use rand::{thread_rng, Rng};
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT}, 
@@ -65,7 +63,8 @@ impl HttpClient {
 
         // Insert all headers provided by config 
         for (k, v) in &config.default_headers {
-            let key = k.parse().expect("invalid default header name"); 
+            let key: reqwest::header::HeaderName = 
+                k.parse().expect("invalid default header name"); 
             let val = HeaderValue::from_str(v).expect("invalid default header value");
             headers.insert(key, val);
         }

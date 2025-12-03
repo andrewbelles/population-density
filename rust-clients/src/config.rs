@@ -313,3 +313,14 @@ impl Default for MetricsConfig {
         }
     }
 }
+
+impl Default for RunnerConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: default_concurrency(),
+            queue_bound: default_queue_bound(),
+            idle_shutdown_secs: None, 
+            graceful_shutdown_secs: default_graceful_shutdown_secs()
+        }
+    }
+}
