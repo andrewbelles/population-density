@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use thiserror::Error; 
 
 use crate::core::http::{HttpClient, HttpError};
-use crate::core::storage::StorageError;
+use crate::core::storage::{Storage, StorageError};
 use crate::core::pagination::Pager; 
 
 /************ PageBatch<T> ********************************/ 
@@ -55,10 +55,6 @@ pub trait PageParser<R, Item> {
     fn parse(&self, raw: R) -> Result<PageBatch<Item>, ParseError>; 
 }
 
-#[async_trait]
-pub trait Storage<Item> {
-    async fn upsert_batch(&self, items: &[Item]) -> Result<(), StorageError>; 
-}
 
 /************ CrawlerStats ********************************/ 
 /* Useful information about current runtime of Client */

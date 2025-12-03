@@ -37,6 +37,8 @@ pub enum StorageError {
 type WriteBatchFn<Item> = dyn for<'a> Fn(&mut Transaction<'a, Sqlite>, &'a [Item]) 
     -> BoxFuture<'a, Result<(), StorageError>> + Send + Sync; 
 
+/************ SqliteStorage *******************************/ 
+/* A single Sqlite connection bound to a specific Item */ 
 pub struct SqliteStorage<Item> {
     pool: Pool<Sqlite>, 
     write_batch: Arc<WriteBatchFn<Item>>
@@ -93,9 +95,14 @@ impl<Item> SqliteStorage<Item> {
 }
 
 #[async_trait]
-impl<T, Item> crate::core::crawler::Storage<Item> for Arc<T> 
+pub trait Storage<Item> {
+    async fn upsert_batch(&self, items: &[Item]) -> Result<(), StorageError>; 
+}
+
+#[async_trait]
+impl<T, Item> Storage<Item> for Arc<T> 
 where 
-    T: crate::core::crawler::Storage<Item> + Send + Sync + ?Sized, 
+    T: Storage<Item> + Send + Sync + ?Sized, 
     Item: Send + Sync 
 {
     async fn upsert_batch(&self, items: &[Item]) -> Result<(), StorageError> {
@@ -104,7 +111,7 @@ where
 }
 
 #[async_trait]
-impl<Item: Sync + Send> crate::core::crawler::Storage<Item> for SqliteStorage<Item> {
+impl<Item: Sync + Send> Storage<Item> for SqliteStorage<Item> {
     async fn upsert_batch(&self, items: &[Item]) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await.map_err(StorageError::from)?; 
         (self.write_batch)(&mut transaction, items).await?;

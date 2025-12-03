@@ -138,7 +138,7 @@ impl<Body> EndpointBuilder<Body> {
 }
 
 // Constructor from some Endpoint Seed into an Endpoint 
-pub type EndpointConstructor<Seed, Body = serde_json::value> = 
+pub type EndpointConstructor<Seed, Body = serde_json::Value> = 
     Arc<dyn Fn(&Seed) -> Endpoint<Body> + Send + Sync>; 
 
 pub fn seed_endpoint_constructor<Seed, Body, F>(base: Endpoint<Body>, f: F)
