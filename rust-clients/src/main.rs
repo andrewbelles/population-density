@@ -1,7 +1,9 @@
-mod config; 
 mod http; 
+mod config; 
+mod pagination;
 
 fn main() {
+    let hc = http::HttpConfig::new();
     let cfg = config::AppConfig::default(); 
 
     println!("{:?}", cfg);

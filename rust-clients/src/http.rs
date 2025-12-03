@@ -1,9 +1,11 @@
 /// 
 /// http.rs  Andrew Belles  Dec 2nd, 2025 
 ///
+/// Construction of HttpClient and methods for 
+/// safe requests on API. 
 ///
-///
-///
+/// AUTHORIZATION assumes format "Bearer {}" 
+/// Only works for cloneable requests, need separate impl for streaming bodies
 ///
 
 use std::time::Duration; 
