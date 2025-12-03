@@ -11,8 +11,9 @@ use std::marker::PhantomData;
 use async_trait::async_trait; 
 use thiserror::Error; 
 
-use crate::http::{HttpClient, HttpError};
-use crate::pagination::Pager; 
+use crate::core::http::{HttpClient, HttpError};
+use crate::core::storage::StorageError;
+use crate::core::pagination::Pager; 
 
 /************ PageBatch<T> ********************************/ 
 /* A single batch resulting from a JSON Request.  
@@ -33,13 +34,6 @@ pub struct PageBatch<T> {
 /************ ParseError **********************************/ 
 #[derive(Debug, Error)]
 pub enum ParseError {
-    #[error("{0}")]
-    Message(String)
-}
-
-/************ StorageError ********************************/ 
-#[derive(Debug, Error)]
-pub enum StorageError {
     #[error("{0}")]
     Message(String)
 }
@@ -94,12 +88,13 @@ where
     P: PageParser<Raw, Item>, 
     S: Storage<Item>
 {
-    http: &'a HttpClient,  // HttpClient WILL be borrowed by the Crawler Client itself 
+    http: &'a HttpClient,    // HttpClient WILL be borrowed by the Crawler Client itself 
     path: String, 
     pager: Pager, 
     parser: P, 
     storage: S, 
-    _raw: PhantomData<Raw> // Notifies that we do not explicitly use raw data but it is used 
+    _raw: PhantomData<Raw>,  // Notifies that we do not explicitly use raw data but it is used 
+    _item: PhantomData<Item> // Exact same idea 
 }
 
 impl<'a, Raw, Item, P, S> Crawler<'a, Raw, Item, P, S> 
@@ -112,7 +107,7 @@ where
     pub fn new(
         http: &'a HttpClient, path: String, pager: Pager, parser: P, storage: S) -> Self {
         Self {
-            http, path, pager, parser, storage, _raw: PhantomData 
+            http, path, pager, parser, storage, _raw: PhantomData, _item: PhantomData 
         }
     }
 

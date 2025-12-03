@@ -1,8 +1,4 @@
-mod http; 
-mod config; 
-mod pagination;
-mod crawler; 
-mod runner; 
+mod core; 
 
 fn main() {
     println!("Hello, world!");

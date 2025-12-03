@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle; 
 use tokio::time::timeout;
 
-use crate::config::RunnerConfig; 
+use crate::core::config::RunnerConfig; 
 
 #[async_trait]
 pub trait Job: Send + Sync + 'static {

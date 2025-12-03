@@ -22,7 +22,7 @@ use thiserror::Error;
 use tokio::time::sleep; 
 use url::Url; 
 
-use crate::config::{BackoffConfig, HttpConfig, RetryConfig}; 
+use crate::core::config::{BackoffConfig, HttpConfig, RetryConfig}; 
 
 /************ HttpError ***********************************/ 
 #[derive(Debug, Error)]

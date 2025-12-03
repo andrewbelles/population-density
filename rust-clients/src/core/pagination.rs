@@ -6,7 +6,7 @@
 ///
 ///
 
-use crate::config::{PaginationConfig, PaginationFSM};
+use crate::core::config::{PaginationConfig, PaginationFSM};
 
 #[derive(Debug, Clone)]
 pub struct PaginationState {
