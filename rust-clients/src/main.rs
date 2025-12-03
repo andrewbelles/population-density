@@ -1,6 +1,7 @@
 mod http; 
 mod config; 
 mod pagination;
+mod crawler; 
 
 fn main() {
     let hc = http::HttpConfig::new();

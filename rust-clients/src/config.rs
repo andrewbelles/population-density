@@ -234,6 +234,7 @@ pub struct RateLimitConfig {
 }
 
 /************ Defaults ************************************/ 
+/// Defaults for members 
 fn default_user_agent() -> String { "topographic-client/0.1".into() }
 fn default_timeout() -> Duration { Duration::from_secs(30) }
 fn default_max_redirects() -> u8 { 5 }
@@ -254,3 +255,61 @@ fn default_metrics_prefix() -> String { "topographic".into() }
 fn default_concurrency() -> usize { 4 }
 fn default_queue_bound() -> usize { 100 }
 fn default_graceful_shutdown_secs() -> u64 { 10 }
+
+/// Defaults for Structs 
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_max_retries(), 
+            backoff: BackoffConfig::default(), 
+            retryable_statuses: Vec::new(), 
+            retryable_errors: Vec::new() 
+        }
+    }
+}
+
+impl Default for BackoffConfig {
+    fn default() -> Self {
+        Self {
+            base: default_backoff_base(), 
+            max: default_backoff_max(), 
+            multiplier: default_backoff_multiplier() 
+        }
+    }
+}
+
+impl Default for PaginationParams {
+    fn default() -> Self {
+        Self {
+            page: default_page_param(), 
+            per_page: default_per_page_param(), 
+            offset: default_offset_param(), 
+            cursor: default_cursor_param(), 
+            has_more_field: default_has_more_field(), 
+            next_cursor_field: default_next_cursor_field() 
+        }
+    }
+}
+
+impl Default for PaginationConfig {
+    fn default() -> Self {
+        Self {
+            strategy: PaginationFSM::OffsetLimit, 
+            page_size: None, 
+            max_pages: None, 
+            param_names: PaginationParams::default(), 
+            initial_cursor: None, 
+            stop_on_duplicate: default_true() 
+        }
+    }
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(), 
+            export_interval: default_export_interval(), 
+            prefix: default_metrics_prefix() 
+        }
+    }
+}
