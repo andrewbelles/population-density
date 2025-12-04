@@ -1,8 +1,8 @@
 ///
 /// jobs.rs  Andrew Belles  Dec 3rd, 2025 
 ///
-///
-///
+/// Generic Implementation of a single Crawler Job 
+/// to be carried out by Client after request from Daemon  
 ///
 ///
 
@@ -18,7 +18,20 @@ use crate::core::{
     http::HttpClient 
 }; 
 
-
+/************ CrawlJob ************************************/ 
+/* Defines a specific Job to be executed by the Client. 
+* Is attached to the client and ran when the Client is capable 
+* of running a task. 
+*
+* Trait Requirements: 
+*   Raw: Expected type of Raw data 
+*   Item: Expected type of parsed data 
+*   Seed: Struct used to instantiate a job 
+*   P: Parser to use on raw JSON with support for pagination 
+*   S: Storage to use on parsed data
+*   Body: Incoming JSON, most likely serde_json::Value itself, but 
+*     we allow derivatives 
+*/ 
 pub struct CrawlJob<Seed, Raw, Item, P, S, Body = serde_json::Value> 
 where 
     P: PageParser<Raw, Item>, 
@@ -31,8 +44,8 @@ where
     pub storage: S, 
     pub http: Arc<HttpClient>, 
     pub name: String,  
-    _raw: PhantomData<Raw>,
-    _item: PhantomData<Item>
+    pub _raw: PhantomData<Raw>,
+    pub _item: PhantomData<Item>
 }
 
 #[async_trait]

@@ -6,7 +6,7 @@
 /// Uses a client's name.yaml to configure the Client 
 /// 
 
-use std::{collections::HashMap, fs, path::Path, time::Duration}; 
+use std::{collections::HashMap, fs, path::{Path, PathBuf}, time::Duration}; 
 
 use serde::Deserialize; 
 use thiserror::Error;
@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::core::config::{
     ApiKey, ClientConfig, EndpointConfig, HttpConfig, 
-    LoggingConfig, RunnerConfig, StorageConfig, RetryConfig 
+    LoggingConfig, RunnerConfig, StorageConfig, RetryConfig, MetricsConfig 
 }; 
 
 /************ Configuration Load Errors *******************/
@@ -41,7 +41,7 @@ pub enum ConfigLoadError {
 #[derive(Debug, Deserialize)] 
 struct RawClient {
     http: RawHttp, 
-    storage: StorageConfig, 
+    storage: RawStorage, 
     log: LoggingConfig, 
     #[serde(default)]
     runner: RunnerConfig, 
@@ -64,6 +64,19 @@ struct RawHttp {
     retry: RetryConfig, 
     #[serde(default)]
     default_headers: HashMap<String, String> 
+}
+
+#[derive(Debug, Deserialize)]
+struct RawStorage {
+    db_path: PathBuf, 
+    #[serde(default)]
+    journal_mode: Option<String>, 
+    #[serde(default)]
+    busy_timeout_ms: Option<u64>, 
+    #[serde(default)]
+    max_connections: Option<u32>, 
+    #[serde(default)]
+    metrics: MetricsConfig 
 }
 
 /************ Default Helpers *****************************/ 
@@ -100,12 +113,29 @@ pub fn load_client_from_yaml(path: impl AsRef<Path>, client_name: &str)
         default_headers: raw_client.http.default_headers.clone() 
     }; 
 
+    let storage = StorageConfig {
+        db_path: resolve_db_path(&raw_client.storage.db_path), 
+        journal_mode: raw_client.storage.journal_mode.clone(), 
+        busy_timeout_ms: raw_client.storage.busy_timeout_ms,
+        max_connections: raw_client.storage.max_connections, 
+        metrics: raw_client.storage.metrics.clone()  
+    };
+
     Ok(ClientConfig {
         http, 
-        storage: raw_client.storage.clone(), 
+        storage, 
         log: raw_client.log.clone(), 
         runner: raw_client.runner.clone(), 
         endpoint_overrides: raw_client.endpoints.clone(), 
     })
 }
 
+
+fn resolve_db_path(p: &Path) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if p.is_absolute() {
+        p.to_path_buf() 
+    } else {
+        base.join("..").join(p)
+    }
+}
