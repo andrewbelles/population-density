@@ -1,6 +1,6 @@
 mod core; 
-mod init; 
-mod daemon;  
+mod clients; 
+mod parent; 
 
 #[tokio::main]
 async fn main() {

@@ -34,7 +34,7 @@ pub enum StorageError {
 
 /************ WriteBatch<Item> ****************************/ 
 /* Type alias for upsert signature on generic Item */ 
-type WriteBatchFn<Item> = dyn for<'a> Fn(&mut Transaction<'a, Sqlite>, &'a [Item]) 
+type WriteBatchFn<Item> = dyn for<'a> Fn(&'a mut Transaction<'_, Sqlite>, &'a [Item]) 
     -> BoxFuture<'a, Result<(), StorageError>> + Send + Sync; 
 
 /************ SqliteStorage *******************************/ 
@@ -47,7 +47,7 @@ pub struct SqliteStorage<Item> {
 impl<Item> SqliteStorage<Item> {
     pub async fn new<F>(config: &StorageConfig, write_batch: F) -> Result<Self, StorageError>
     where 
-        F: for<'a> Fn(&mut Transaction<'a, Sqlite>, &'a [Item]) -> BoxFuture<'a, Result<(), StorageError>>  
+        F: for<'a> Fn(&'a mut Transaction<'_, Sqlite>, &'a [Item]) -> BoxFuture<'a, Result<(), StorageError>>  
             + Send + Sync + 'static 
     {
         let mut opts = SqliteConnectOptions::new() 
