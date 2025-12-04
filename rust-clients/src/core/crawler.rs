@@ -7,13 +7,14 @@
 ///
 
 use std::marker::PhantomData; 
+use std::sync::Arc; 
 
-use async_trait::async_trait; 
 use thiserror::Error; 
 
 use crate::core::http::{HttpClient, HttpError};
-use crate::core::storage::StorageError;
+use crate::core::storage::{Storage, StorageError};
 use crate::core::pagination::Pager; 
+use crate::core::endpoint::Endpoint; 
 
 /************ PageBatch<T> ********************************/ 
 /* A single batch resulting from a JSON Request.  
@@ -55,10 +56,6 @@ pub trait PageParser<R, Item> {
     fn parse(&self, raw: R) -> Result<PageBatch<Item>, ParseError>; 
 }
 
-#[async_trait]
-pub trait Storage<Item> {
-    async fn upsert_batch(&self, items: &[Item]) -> Result<(), StorageError>; 
-}
 
 /************ CrawlerStats ********************************/ 
 /* Useful information about current runtime of Client */
@@ -83,13 +80,13 @@ pub struct CrawlerStats {
  *   the compiler must not ignore its existence, allowing us to keep the Crawler 
  *   as generic as possible in regards to how we explicitly handle the raw data. 
  */
-pub struct Crawler<'a, Raw, Item, P, S> 
+pub struct Crawler<Raw, Item, P, S, Body = serde_json::Value> 
 where 
     P: PageParser<Raw, Item>, 
     S: Storage<Item>
 {
-    http: &'a HttpClient,    // HttpClient WILL be borrowed by the Crawler Client itself 
-    path: String, 
+    http: Arc<HttpClient>,    // HttpClient WILL be borrowed by the Crawler Client itself 
+    endpoint: Endpoint<Body>, 
     pager: Pager, 
     parser: P, 
     storage: S, 
@@ -97,17 +94,18 @@ where
     _item: PhantomData<Item> // Exact same idea 
 }
 
-impl<'a, Raw, Item, P, S> Crawler<'a, Raw, Item, P, S> 
+impl<Raw, Item, P, S, Body> Crawler<Raw, Item, P, S, Body> 
 where 
     Raw: Send + serde::de::DeserializeOwned, 
     Item: Send + Sync, 
     P: PageParser<Raw, Item> + Send + Sync, 
-    S: Storage<Item> + Send + Sync 
+    S: Storage<Item> + Send + Sync, 
+    Body: serde::Serialize + Clone + Send + Sync
 {
     pub fn new(
-        http: &'a HttpClient, path: String, pager: Pager, parser: P, storage: S) -> Self {
+        http: Arc<HttpClient>, endpoint: Endpoint<Body>, pager: Pager, parser: P, storage: S) -> Self {
         Self {
-            http, path, pager, parser, storage, _raw: PhantomData, _item: PhantomData 
+            http, endpoint, pager, parser, storage, _raw: PhantomData, _item: PhantomData 
         }
     }
 
@@ -121,18 +119,22 @@ where
         let mut stats = CrawlerStats::default(); 
 
         loop {
+            // Get parameters via Pagination tool 
             let params = match self.pager.next_params() {
                 Some(p) => p, 
                 None    => break,
             }; 
+            
+            // Clone endpoint 
+            let mut endp = self.endpoint.clone(); 
+            endp.query.extend(params); 
 
-            let query: Vec<(&str, String)> =
-                params.iter().map(|(k, v)| (k.as_str(), v.clone())).collect(); 
-
-            let raw: Raw = self.http.get_json(&self.path, &query).await?; 
+            // Make request through endpoint 
+            let raw: Raw = self.http.request_endpoint(&endp).await?; 
             let page = self.parser.parse(raw)?; 
             self.storage.upsert_batch(&page.items).await?; 
 
+            // Check if should continue via Pager 
             let page_len = page.items.len(); 
             stats.pages += 1; 
             stats.items += page_len; 

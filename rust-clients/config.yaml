@@ -1,0 +1,69 @@
+name: 
+  http:
+    base_url: https://example.com/ 
+    api_key_env: _API_KEY 
+    user_agent: -crawler/0.1 
+    timeout_secs: 
+    max_redirect: 
+    default_headers: 
+      Accept: application/json 
+    retry: 
+      max_retries:
+      backoff: 
+        base_ms: 
+        max_ms: 
+        multiplier: 
+      retryable_statuses: [429, 500, 502, 503, 504]
+      retryable_errors: ["connection reset", "timeout"]
+    storage: 
+      db_path: 
+      journal_mode: WAL 
+      busy_timeout_ms: 
+      max_connections: 
+      metrics: 
+        enabled: 
+        export_interval_secs: 
+        prefix: 
+    runner: 
+      concurrency: 
+      queue_bound: 
+      idle_shutdown_secs: 
+      graceful_shutdown_secs: 
+    log: 
+      log_level: info 
+      json: false 
+      otlp_endpoint: null 
+      metrics: 
+        enabled: false  
+        export_interval_secs: 15  
+        prefix: _logs 
+    endpoints: 
+      name: 
+        path:
+        query_defaults: 
+          per_page: "100"
+        pagination: 
+          strategy: OffsetLimit 
+          page_size: 100 
+          max_pages: null 
+          param_names: 
+            page: page 
+            per_page: per_page 
+            offset: offset 
+            cursor: cursor 
+            has_more_field: has_more 
+            next_cursor_field: next_cursor 
+          initial_cursor: null 
+          stop_on_duplicate: true 
+        retry: 
+          max_retries: 
+          backoff: 
+            base_ms: 
+            max_ms: 
+            multiplier: 
+          retryable_statuses: [429, 500, 502, 503, 504]
+          retryable_errors: []
+        rate_limit:
+          requests_per_minute: 
+          burst: 
+          cooldown_secs: 

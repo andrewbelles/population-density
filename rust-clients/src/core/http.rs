@@ -23,6 +23,7 @@ use tokio::time::sleep;
 use url::Url; 
 
 use crate::core::config::{BackoffConfig, HttpConfig, RetryConfig}; 
+use crate::core::endpoint::{Endpoint, Method}; 
 
 /************ HttpError ***********************************/ 
 #[derive(Debug, Error)]
@@ -38,6 +39,7 @@ pub enum HttpError {
 }
 
 /************ HttpClient **********************************/ 
+#[derive(Clone)]
 pub struct HttpClient {
     client: Client, 
     base_url: Url, 
@@ -85,7 +87,7 @@ impl HttpClient {
     {
         let url  = self.base_url.join(path)?; 
         let req  = self.client.get(url).query(query);
-        let resp = self.execute_with_retry(req).await?; 
+        let resp = self.execute_with_retry(req, None).await?; 
         Ok(resp.json().await?)
     }
 
@@ -96,12 +98,13 @@ impl HttpClient {
     {
         let url  = self.base_url.join(path)?; 
         let req  = self.client.post(url).json(body);
-        let resp = self.execute_with_retry(req).await?; 
+        let resp = self.execute_with_retry(req, None).await?; 
         Ok(resp.json().await?)
     }
 
-    async fn execute_with_retry(&self, req: RequestBuilder) -> Result<Response, HttpError> {
-        let retry = &self.config.retry; 
+    async fn execute_with_retry(&self, req: RequestBuilder, retry_override: Option<&RetryConfig>) 
+        -> Result<Response, HttpError> {
+        let retry = retry_override.unwrap_or(&self.config.retry); 
         let mut attempt: u32 = 0; 
 
         loop {
@@ -166,5 +169,26 @@ impl HttpClient {
         }
 
         sleep(delay).await; 
+    }
+
+    pub async fn request_endpoint<T, B>(&self, endpoint: &Endpoint<B>) -> Result<T, HttpError> 
+    where 
+        T: DeserializeOwned,
+        B: serde::Serialize
+    {
+        let url = self.base_url.join(&endpoint.path)?; 
+        let req = match endpoint.method {
+            Method::Get  => self.client.get(url).query(&endpoint.query),
+            Method::Post => {
+                let mut builder = self.client.post(url).query(&endpoint.query);
+                if let Some(body) = endpoint.body.as_ref() {
+                    builder = builder.json(body); 
+                }
+                builder 
+            } 
+        }; 
+
+        let resp = self.execute_with_retry(req, endpoint.retry.as_ref()).await?; 
+        Ok(resp.json().await?)
     }
 }
