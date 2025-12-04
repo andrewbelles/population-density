@@ -1,34 +1,34 @@
-name: 
+station: 
   http:
-    base_url: https://example.com/ 
-    api_key_env: _API_KEY 
-    user_agent: -crawler/0.1 
-    timeout_secs: 
-    max_redirect: 
+    base_url: https://ncdc.noaa.gov/ 
+    api_key_env: STATION_KEY 
+    user_agent: station-crawler/0.1 
+    timeout_secs: 30
+    max_redirect: 5
     default_headers: 
       Accept: application/json 
     retry: 
-      max_retries:
+      max_retries: 3
       backoff: 
-        base_ms: 
-        max_ms: 
-        multiplier: 
+        base_ms: 200
+        max_ms: 30000
+        multiplier: 2.0 
       retryable_statuses: [429, 500, 502, 503, 504]
       retryable_errors: ["connection reset", "timeout"]
     storage: 
-      db_path: 
+      db_path: data/station.sqlite 
       journal_mode: WAL 
-      busy_timeout_ms: 
-      max_connections: 
+      busy_timeout_ms: 5000
+      max_connections: 8
       metrics: 
-        enabled: 
-        export_interval_secs: 
-        prefix: 
+        enabled: true 
+        export_interval_secs: 15s 
+        prefix: station_storage
     runner: 
-      concurrency: 
-      queue_bound: 
-      idle_shutdown_secs: 
-      graceful_shutdown_secs: 
+      concurrency: 4 
+      queue_bound: 200
+      idle_shutdown_secs: 60 
+      graceful_shutdown_secs: 10 
     log: 
       log_level: info 
       json: false 
@@ -36,15 +36,16 @@ name:
       metrics: 
         enabled: false  
         export_interval_secs: 15  
-        prefix: _logs 
+        prefix: station_logs 
     endpoints: 
-      name: 
-        path:
+      stations:
+        path: /cdo-web/api/v2/stations
         query_defaults: 
-          per_page: "100"
+          limit: "1000"
+          offset: "0" 
         pagination: 
           strategy: OffsetLimit 
-          page_size: 100 
+          page_size: 1000
           max_pages: null 
           param_names: 
             page: page 
@@ -56,14 +57,14 @@ name:
           initial_cursor: null 
           stop_on_duplicate: true 
         retry: 
-          max_retries: 
+          max_retries: 5
           backoff: 
-            base_ms: 
-            max_ms: 
-            multiplier: 
+            base_ms: 500
+            max_ms: 30000
+            multiplier: 2.0
           retryable_statuses: [429, 500, 502, 503, 504]
           retryable_errors: []
         rate_limit:
-          requests_per_minute: 
-          burst: 
-          cooldown_secs: 
+          requests_per_minute: 30
+          burst: 10
+          cooldown_secs: 1s 
