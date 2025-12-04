@@ -13,17 +13,16 @@ use thiserror::Error;
 use url::Url; 
 
 use crate::core::config::{
-    ApiKey, ClientConfig, EndpointConfig, HttpConfig, LoggingConfig, PaginationConfig,
-    PaginationFSM, PaginationParams, RateLimitConfig, RunnerConfig, StorageConfig, MetricsConfig,
-    RetryConfig 
+    ApiKey, ClientConfig, EndpointConfig, HttpConfig, 
+    LoggingConfig, RunnerConfig, StorageConfig, RetryConfig 
 }; 
 
 /************ Configuration Load Errors *******************/
 
-#[derive(Debug, Clone)] 
+#[derive(Debug, Error)] 
 pub enum ConfigLoadError {
     #[error("io: {0}")]
-    IO(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("yaml: {0}")]
     Yaml(#[from] serde_yaml::Error), 
     #[error("url parse: {0}")]

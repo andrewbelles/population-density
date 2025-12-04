@@ -14,3 +14,4 @@ pub mod runner;
 pub mod storage; 
 pub mod endpoint; 
 pub mod jobs; 
+pub mod logging; 
