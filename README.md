@@ -1,29 +1,59 @@
-# Multiview Learning of Data Categories as Manifolds 
+# Population Density Prediction
 
-Model leveraging Manifold Learning techniques that aims to predict Population Density and its Gradient across the Contiguous United States. Includes custom implementation of highly flexible and performant C++ Client Backbone for Data Ingestion. 
+Predicting population density across the contiguous United States using climate data, with plans for multi-modal fusion architectures.
 
-## Data Categories 
+## Current Status
 
-I will pull data from 8-10 various parent categories that offer underlying information about change in population density. 
+Started with climate data regression models to establish baseline performance. The approach aggregates daily weather measurements (temperature, precipitation) by county and decade to predict population density for corresponding time periods.
 
-Key data (abstractly stated): 
-- Demographic data 
-    - Census data 
-- Building footprint/density 
-- Nighttime light intensity 
-- Land Use/Cover 
-- Transportation Networks
-- Socioeconomic
-    - Housing density 
-    - Economic activity 
-- Cell phone Towers? 
+### Data Processing Pipeline
 
-## C++ API Crawler 
+The `aggregate_climpop.py` script processes:
+- **Climate Data**: Daily GHCNd gridded data (temperature min/max/avg, precipitation)
+- **Population Data**: Census data for 1960, 1990, 2020
+- **Geography**: County boundaries and centroids for spatial modeling
 
-I intend to implement a highly flexible API Crawler Class which aims to make API calls for specific to the instance. In a most basic sense, the Crawler will implement methods for hitting the specific API endpoint, support for retrying, exception handling for errors, and support for calling user defined functions for handling parsed JSON. The Crawler will be designed to work for RESTFUL, Json API. 
+Climate features are aggregated monthly by county, then split by decade to avoid temporal leakage. The pipeline outputs a hierarchical `.mat` file structure separating each decade's features/labels while caching shared coordinate data.
 
-Json data will be pulled and a handler will insert the parsed data into a SQLite database. The end goal will be for each category to have a single (or possibly multiple) Crawler(s) that utilizes a CPU Scheduler-esque algorithm to alternate calls between Crawlers. 
+### Current Models
 
-## Crawler Logging 
+All models in `models/forest_models.py` support decade-specific training:
 
-A detailed logger will be implemented that aims to log Crawler failures or  
++ **Random Forest**: Baseline ensemble model
+  - $r^2$: ~0.26, RMSE: ~0.70
++ **XGBoost**: Gradient boosting with spatial coordinates as features
+  - $r^2$: ~0.22, RMSE: ~0.69
++ **GPBoost**: Planned spatial Gaussian process + boosting hybrid
+
+### Usage
+
+```bash
+# Set up environment
+nix-shell
+
+# Process raw data (creates climpop.mat)
+python models/aggregate_climpop.py
+
+# Train models on specific decades
+python models/forest_models.py --decade 2020 --rf --xgib
+``` 
+
+## Future Plans
+
+Model Architecture Evolution
+
+Early Fusion: Train category-specific encoders (climate, satellite, socioeconomic) into shared latent space for unified regression.
+
+Late Fusion: Train specialized models per data category, then learn weighted combinations or meta-models over individual predictions.
+
+### Additional Data Categories
+
+- Nighttime Satellite Imagery: CNN-based features from satellite lighting data
+- Socioeconomics: Land costs, zoning, income, employment statistics
+- Graph Networks: County adjacency graphs with centroid-based spatial relationships
+
+### Technical Improvements
+
+Climate data will expand beyond basic temperature/precipitation to include humidity, weather extremes, and seasonal patterns. Spatial modeling will incorporate county adjacency graphs for GraphNN approaches.
+
+The current climate-only models perform poorly as expected, primarily because you wouldn't (and shouldn't) predict population density from just weather data. But these features should prove valuable in the larger multi-modal architectures.
