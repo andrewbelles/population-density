@@ -1,4 +1,4 @@
-# Population Density Prediction
+Population Density Prediction
 
 Predicting population density across the contiguous United States using climate data, with plans for multi-modal fusion architectures.
 
@@ -17,13 +17,19 @@ Climate features are aggregated monthly by county, then split by decade to avoid
 
 ### Current Models
 
-All models in `models/forest_models.py` support decade-specific training:
+The baseline `models/linear_model.py` supports decade-specific training:
++ **Linear Regression**: Pure, linear baseline. For climate/population dataset: 
+    - $r^2$: ~0.08, RMSE: ~0.79 
+
+Likewise `models/forest_models.py` support decade-specific training:
 
 + **Random Forest**: Baseline ensemble model
   - $r^2$: ~0.26, RMSE: ~0.70
 + **XGBoost**: Gradient boosting with spatial coordinates as features
   - $r^2$: ~0.24, RMSE: ~0.71
 + **GPBoost**: Planned spatial Gaussian process + boosting hybrid
+
+Faint positive variance for linear regression and an increase for more non-linear regressors supports evidence that more detailed/sophisticated datasets could provide substantial support to both multi-modal architectures. 
 
 ### Usage
 
@@ -34,8 +40,11 @@ nix-shell
 # Process raw data (creates climpop.mat)
 python models/aggregate_climpop.py
 
+# See baseline against linear model on a specific decade 
+python models/linear_model.py --decade 2020 
+
 # Train models on specific decades
-python models/forest_models.py --decade 2020 --rf --xgib
+python models/forest_models.py --decade 2020 --rf --xgb
 ``` 
 
 ## Future Plans

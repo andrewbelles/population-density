@@ -13,6 +13,9 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
+    export PROJECT_ROOT="$(pwd)"
+    echo "PROJECT_ROOT set to: $PROJECT_ROOT" 
+    
     echo "initializing python environment..."
 
     if [ ! -d ".venv" ]; then 

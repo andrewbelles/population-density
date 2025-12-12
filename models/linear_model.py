@@ -8,6 +8,8 @@
 # Provides a Linear interface generic to specific features vs labels 
 # 
 
+from helpers import project_path
+
 import torch, argparse
 import numpy as np 
 from scipy.io import loadmat 
@@ -74,7 +76,7 @@ def main():
     Example Usage using Climate/Population Density Dataset 
     '''
 
-    data    = loadmat("../data/climpop.mat")
+    data    = loadmat(project_path("data", "climpop.mat"))
     decades = data["decades"]
     coords  = data["coords"]
 

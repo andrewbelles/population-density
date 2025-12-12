@@ -7,6 +7,8 @@
 # idiomatic saving of datasets into .mat format for use by models. 
 # 
 
+from helpers import project_path
+
 import argparse, os, glob, json
 import numpy as np 
 import pandas as pd 
@@ -523,8 +525,11 @@ class PopulationDensity:
         '''
 
         gaz_path = os.path.join(dir, "2020_Gaz_counties_national.txt")
+
         gaz = pd.read_csv(gaz_path, sep='\t', dtype={"GEOID": str})
         gaz = gaz.rename(columns={"GEOID": "FIPS"})
+        gaz.columns = gaz.columns.str.strip()
+
         cols = ["FIPS", "USPS", "NAME", "ALAND_SQMI", "AWATER_SQMI", "INTPTLAT", "INTPTLONG"]
         available_cols = [col for col in cols if col in gaz.columns]
         return gaz[available_cols]
@@ -587,6 +592,10 @@ def create_feature_matrix(climate_agg: ClimateAgg, pop_density: PopulationDensit
                 if density_col in county_pop.columns: 
                     county_data[density_col] = county_pop[density_col].iloc[0]
 
+            if "INTPTLAT" in county_pop.columns and "INTPTLONG" in county_pop.columns:
+                county_data["INTPTLAT"] = county_pop["INTPTLAT"].iloc[0]
+                county_data["INTPTLONG"] = county_pop["INTPTLONG"].iloc[0]
+
         features.append(county_data) 
 
     df = pd.DataFrame(features)
@@ -607,14 +616,8 @@ def save_df_as_mat(feature_df: pd.DataFrame, output_path: str):
 
     fips_codes   = feature_df.index.values 
 
-    # Check that lat, long exists for all counties assumedly at their centroid  
-    if "INTPTLAT" in feature_df.columns and "INTPTLONG" in feature_df.columns:
-        coords = feature_df[["INTPTLAT", "INTPTLONG"]].values.astype(np.float64)
-    else:
-        coords = np.full((len(fips_codes), 2), np.nan, dtype=np.float64)
-
     # Get columns for each decade, explicitly seperate features and labels for each decade 
-    
+    coords = feature_df[["INTPTLAT", "INTPTLONG"]].values.astype(np.float64)
     label_cols   = [col for col in feature_df.columns if col.startswith("density_")]
     decades      = sorted([int(col.split('_')[1]) for col in label_cols])
     feature_cols = [col for col in feature_df.columns if not col.startswith("density_")
@@ -664,10 +667,12 @@ def save_df_as_mat(feature_df: pd.DataFrame, output_path: str):
 
 
 def main(): 
+
+
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--climdir", default="../data/climate")
-    parser.add_argument("--censdir", default="../data/census")
-    parser.add_argument("--geodir",  default="../data/geography")
+    parser.add_argument("--climdir", default=project_path("data", "climate"))
+    parser.add_argument("--censdir", default=project_path("data", "census"))
+    parser.add_argument("--geodir",  default=project_path("data", "geography"))
     args = parser.parse_args()
 
     population_density      = PopulationDensity(args.censdir, args.geodir, [1960, 1990, 2020]) 
@@ -679,7 +684,7 @@ def main():
     if features.isnull().sum().sum() > 0: 
         print(f"Columns with NaN: {features.columns[features.isnull().any()].tolist()[:10]}")
 
-    save_df_as_mat(features, "../data/climpop.mat")
+    save_df_as_mat(features, project_path("data", "climpop.mat"))
 
 
 if __name__ == "__main__":

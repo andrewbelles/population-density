@@ -7,6 +7,8 @@
 # models
 # 
 
+from helpers import project_path
+
 import argparse 
 
 from scipy.io import loadmat  
@@ -104,9 +106,9 @@ class XGBoost:
 def main(): 
 
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--rf", default=True)
-    parser.add_argument("--xgb", default=True)
-    parser.add_argument("--decade", default="2020")
+    parser.add_argument("--rf", action="store_true", help="train random forest model")
+    parser.add_argument("--xgb", action="store_true", help="train xgboost model")
+    parser.add_argument("--decade", default="2020", help="specify which decade to train on")
     args = parser.parse_args()
 
     '''
@@ -114,7 +116,7 @@ def main():
         Climate regression against Population Density 
     '''
     
-    data    = loadmat("../data/climpop.mat")
+    data    = loadmat(project_path("data", "climpop.mat"))
     decades = data["decades"]
     coords  = data["coords"]
 
