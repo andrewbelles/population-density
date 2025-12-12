@@ -15,7 +15,6 @@ pkgs.mkShell {
   shellHook = ''
     echo "initializing python environment..."
 
-    deactivate 
     if [ ! -d ".venv" ]; then 
       echo "creating new virtual environment..."
       python -m venv .venv 
