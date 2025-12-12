@@ -22,7 +22,7 @@ All models in `models/forest_models.py` support decade-specific training:
 + **Random Forest**: Baseline ensemble model
   - $r^2$: ~0.26, RMSE: ~0.70
 + **XGBoost**: Gradient boosting with spatial coordinates as features
-  - $r^2$: ~0.22, RMSE: ~0.69
+  - $r^2$: ~0.24, RMSE: ~0.71
 + **GPBoost**: Planned spatial Gaussian process + boosting hybrid
 
 ### Usage
