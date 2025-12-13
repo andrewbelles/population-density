@@ -31,7 +31,7 @@ Likewise `models/forest_models.py` support decade-specific training:
 
 Faint positive variance for linear regression and an increase for more non-linear regressors supports evidence that more detailed/sophisticated datasets could provide substantial support to both multi-modal architectures. 
 
-### Usage
+### Models Usage
 
 ```bash
 # Set up environment
@@ -46,6 +46,50 @@ python models/linear_model.py --decade 2020
 # Train models on specific decades
 python models/forest_models.py --decade 2020 --rf --xgb
 ``` 
+
+## Supporting Modules 
+
+### High-Performance C++ Geospatial Graph Backend 
+
+The project includes a custom C++ GeospatialGraph class (located in `support/geography_graph.cpp`) optimized for spatial graph neural network operations. Some key features: 
+
+Distance computation: Graph uses the Haversine distance (or distance between two points on $S^2$ given their latitude and longitude) as its standard metric to create an accurate/stable distance matrix for all counties centroids. 
+
+Flexible adjacency metrics: 
+- K-Nearest Neighbors (KNN): An edge has at most its $k$ nearest neighbors where nearest is defined by the standard metric. 
+- Distance-Bounded: Connect counties within a specific distance threshold (km) 
+- Complete Graph: Connect counties without restriction, sorted by distance. 
+
+PyTorch Integration: Python bindings (`python_bindings.cpp`) provides direct access for GNN frameworks:
+- Edge indices as source-target pairs for `torch_geometric`.  
+- Distance vectors for edge weights. 
+- County coordinate extraction for positiional encodings. 
+
+The C++ implementation can process 3,200+ US counties efficiently in a highly configurable manner. 
+
+### Support Usage 
+
+```bash 
+# Build project (in support/)
+make 
+
+# Run unit tests for geography_graph 
+make test 
+
+# Clean support modules 
+make clean 
+
+# Compile python bindings 
+make python 
+
+# Install python bindings into models/ 
+make install-python 
+
+# Clean just python bindings 
+make clean-python 
+```
+
+And the backend can be imported via `import geography_graph_cpp`. 
 
 ## Future Plans
 
