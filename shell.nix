@@ -3,6 +3,8 @@
 pkgs.mkShell {
   packages = with pkgs; [
     python314 
+    gcc 
+    gnumake 
   ];
 
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
@@ -36,5 +38,8 @@ pkgs.mkShell {
 
     echo "mkdir -p data/climate data/census data/geography"
     mkdir -p data/climate data/census data/geography 
+
+    export PYBIND11_INCLUDES="$(python -m pybind11 --includes)"
+    echo "pybind11 includes: $PYBIND11_INCLUDES}"
   '';
 }
