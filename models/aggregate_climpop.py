@@ -611,7 +611,6 @@ def save_df_as_mat(feature_df: pd.DataFrame, output_path: str):
     Call Provides: 
         feature_df which is assumed to be complete/dense from create_feature_matrix
         output_path which is a valid path (as string) for which the .mat will be saved 
-
     '''
 
     fips_codes   = feature_df.index.values 
@@ -633,7 +632,8 @@ def save_df_as_mat(feature_df: pd.DataFrame, output_path: str):
 
         decade_feature_cols = feature_cols[start_idx:end_idx]
         decade_features     = feature_df[decade_feature_cols].values.astype(np.float64)
-        decade_labels       = feature_df[f"density_{decade}"].values.astype(np.float64).reshape(-1, 1) 
+        decade_labels       = feature_df[f"density_{decade}"].values.astype(
+            np.float64).reshape(-1, 1) 
          
         # Scale/Normalize data to std=1, mean=0  
 
@@ -666,8 +666,38 @@ def save_df_as_mat(feature_df: pd.DataFrame, output_path: str):
     print(f"Saved .mat file: {output_path} for {len(decades)} decades")
 
 
-def main(): 
+def export_climate_county_metadata(features_df: pd.DataFrame, output_path: str):
+    '''
+    Export the metadata for counties that remain within features_df to a tsv file 
+    compatible with GeospatialGraph. 
 
+    Caller Provides:
+        features_df which is the complete features matrix from aggregated data. 
+        output_path specifies output for tsv 
+    '''
+    county_metadata = []
+    for fips in features_df.index: 
+        county_row = features_df.loc[fips]
+
+        metadata_row = {
+            "USPS": county_row.get("USPS", "XX"),
+            "GEOID": fips, 
+            "ANSICODE": "00000000", 
+            "NAME": county_row.get("NAME", ""),
+            "ALAND": int(county_row.get("ALAND_SQMI", 1.0) * 2589988.11), 
+            "AWATER": int(county_row.get("AWATER_SQMI", 0.0) * 2589988.11), 
+            "ALAND_SQMI": county_row.get("ALAND_SQMI", 0.0), 
+            "AWATER_SQMI": county_row.get("AWATER_SQMI", 0.0), 
+            "INTPTLAT": county_row.get("INTPTLAT", 0.0), 
+            "INTPTLONG": county_row.get("INTPTLONG", 0.0)
+        }
+        county_metadata.append(metadata_row)
+
+    metadata_df = pd.DataFrame(county_metadata)
+    metadata_df.to_csv(output_path, sep='\t', index=False)
+
+
+def main(): 
 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--climdir", default=project_path("data", "climate"))
@@ -679,6 +709,7 @@ def main():
     aggregated_climate_data = ClimateAgg(args.geodir, args.climdir)
 
     features = create_feature_matrix(aggregated_climate_data, population_density)
+    export_climate_county_metadata(features, project_path("data", "climate_counties.tsv"))
 
     # Log if any entries contain NaN still (which should be a fatal erorr)
     if features.isnull().sum().sum() > 0: 

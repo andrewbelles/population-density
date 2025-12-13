@@ -9,15 +9,16 @@
 
 import geospatial_graph_cpp as cpp 
 import torch 
-# import numpy as np 
 
 from helpers import project_path
 from torch_geometric.data import Data 
 
 class GeospatialModel(cpp.GeospatialGraph): 
 
-    def __init__(self, method: str="knn", parameter: float= 5.0): 
-        counties_file = project_path("data", "geography", "2020_Gaz_counties_national.txt")
+    def __init__(self, filepath: str | None, method: str="knn", parameter: float= 5.0): 
+        if filepath is None: 
+            filepath = project_path("data", "geography", "2020_Gaz_counties_national.txt")
+            
         self.method    = method 
         self.parameter = parameter  
 
@@ -27,7 +28,7 @@ class GeospatialModel(cpp.GeospatialGraph):
             "standard": cpp.MetricType.STANDARD 
         }
 
-        super().__init__(counties_file, method_map[self.method], self.parameter)
+        super().__init__(filepath, method_map[self.method], self.parameter)
         
     def to_pytorch_tensors(self) -> tuple[torch.Tensor, torch.Tensor]: 
         edge_pairs, distances = self.get_edge_indices_and_distances() 
@@ -56,4 +57,3 @@ class GeospatialModel(cpp.GeospatialGraph):
     def get_coordinate_tensor(self) -> torch.Tensor: 
         coords = self.get_all_coordinates() 
         return torch.tensor(coords, dtype=torch.float32)
-
