@@ -1,4 +1,4 @@
-Population Density Prediction
+# Population Density Prediction
 
 Predicting population density across the contiguous United States using climate data, with plans for multi-modal fusion architectures.
 
