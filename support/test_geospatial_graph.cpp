@@ -14,13 +14,14 @@
 #include "geospatial_graph.hpp"
 #include "support.hpp"
 
-/************ Testing Macros ******************************/
+/************ Testing Macro ******************************/
 #define TEST(name) void test_##name() 
 #define RUN_TEST(name) do { \
   std::cout << "Running " #name "..."; \
   test_##name(); \
   std::cout << "PASSED\n"; \
 } while(0)
+
 
 TEST(load_counties) {
   auto counties = load_counties("../data/geography/2020_Gaz_counties_national.txt"); 
