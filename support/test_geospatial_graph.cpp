@@ -93,6 +93,51 @@ TEST(geospatial_graph_standard_ctor) {
   }
 }
 
+TEST(ensure_edge_indices_and_distances) {
+  auto graph = GeospatialGraph(
+    "../data/climate_counties.tsv", 
+    GeospatialGraph::metricType::KNN, 5
+  );
+
+  auto [edges, costs] = graph.get_edge_indices_and_distances(); 
+  assert( edges.size() == costs.size() ); 
+
+  // each county has at most 5 neighbors 
+  size_t max_degree = graph.counties().size() * 5;
+  assert( edges.size() <= max_degree );
+}
+
+TEST(ensure_coordinates) {
+  auto graph = GeospatialGraph(
+    "../data/climate_counties.tsv", 
+    GeospatialGraph::metricType::KNN, 1
+  );
+
+  // Ensure all coordinates are within expected range 
+  auto coordinates = graph.get_all_coordinates(); 
+  for (auto& [lat, lon] : coordinates) {
+    assert( lat >= 15.0 && lat <= 72.0 );
+    assert( lon >= -180.0 && lon <= 180.0 ); 
+  }
+
+  assert( coordinates.size() == graph.counties().size() ); 
+}
+
+TEST(ensure_geoid_to_index) {
+  auto graph = GeospatialGraph(
+    "../data/climate_counties.tsv", 
+    GeospatialGraph::metricType::KNN, 1
+  );
+
+  // Ensure that all geoid's are indexed on an integer properly 
+  auto geoid_to_index = graph.get_geoid_to_index(); 
+  for (auto& county : graph.counties()) {
+    auto geoid = county.id(); 
+
+    auto it = geoid_to_index.find(geoid); 
+    assert( it != geoid_to_index.end() ); 
+  }
+}
 
 int main(void) 
 {
@@ -103,6 +148,9 @@ int main(void)
     RUN_TEST(geospatial_graph_knn_ctor); 
     RUN_TEST(geospatial_graph_bounded_ctor); 
     RUN_TEST(geospatial_graph_standard_ctor);
+    RUN_TEST(ensure_edge_indices_and_distances); 
+    RUN_TEST(ensure_coordinates); 
+    RUN_TEST(ensure_geoid_to_index);
   
     std::cout << "\nAll tests passed\n"; 
   } catch (const std::exception& e) {
