@@ -17,6 +17,8 @@ Climate features are aggregated monthly by county, then split by decade to avoid
 
 ### Current Models
 
+All benchmarks were performed on the `2020` climate dataset as a baseline. 
+
 The baseline `models/linear_model.py` supports decade-specific training:
 + **Linear Regression**: Pure, linear baseline. For climate/population dataset: 
     - $r^2$: ~0.08, RMSE: ~0.79 
@@ -29,7 +31,17 @@ Likewise `models/forest_models.py` support decade-specific training:
   - $r^2$: ~0.24, RMSE: ~0.71
 + **GPBoost**: Planned spatial Gaussian process + boosting hybrid
 
-Faint positive variance for linear regression and an increase for more non-linear regressors supports evidence that more detailed/sophisticated datasets could provide substantial support to both multi-modal architectures. 
+The Graph Neural Network uses the GeospatialModel class to support quick implementation of dataset specific GNNs. Relevant Source Files: 
++ `models/gnn_models.py`
++ `models/geospatial.py`
+And the C++ modules defining the high-performance backend: 
++ `support/geography_graph.cpp/.hpp`
+
+The model's performance on the `2020` baseline climate dataset.
++ **GNN**: Encode geospatial relationships through a geospatial adjacency graph with features.
+   - $r^2$: ~0.33, RMSE: ~0.67
+
+Faint positive variance for linear regression and an increase for more non-linear regressors supports evidence that more detailed/sophisticated datasets could provide substantial support to both multi-modal architectures. The GNN performance suggests that spatial encodings provide much needed support that the current climate dataset lacks.  
 
 ### Models Usage
 
