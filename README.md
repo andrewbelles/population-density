@@ -34,6 +34,7 @@ Likewise `models/forest_models.py` support decade-specific training:
 The Graph Neural Network uses the GeospatialModel class to support quick implementation of dataset specific GNNs. Relevant Source Files: 
 + `models/gnn_models.py`
 + `models/geospatial.py`
+
 And the C++ modules defining the high-performance backend: 
 + `support/geography_graph.cpp/.hpp`
 
