@@ -34,12 +34,15 @@ pkgs.mkShell {
     
     pip install --upgrade pip
     pip install numpy scipy pandas scikit-learn xgboost matplotlib seaborn 
-    pip install geopandas xarray rasterio pybind11 
+    pip install geopandas xarray rasterio pybind11 pybind11-stubgen torch_geometric  
 
     echo "mkdir -p data/climate data/census data/geography"
     mkdir -p data/climate data/census data/geography 
 
-    export PYBIND11_INCLUDES="$(python -m pybind11 --includes)"
-    echo "pybind11 includes: $PYBIND11_INCLUDES}"
+    PYBIND11_INC=$(python -c "import pybind11; print('-I' + pybind11.get_include())") 
+    echo "CompileFlags:" > .clangd  
+    echo "  Add:" >> .clangd 
+    echo "    - \"$PYBIND11_INC\"" >> .clangd 
+    echo "    - \"-I${pkgs.python314}/include/python3.14\"" >> .clangd 
   '';
 }

@@ -1,0 +1,59 @@
+#!/usr/bin/env python 
+# 
+# geospatial.py  Andrew Belles  Dec 12th, 2025 
+# 
+# Class that enables GeospatialGraph backend to interact with 
+# ML libraries and attach features to counties by inheriting 
+# the c++ implementation. 
+# 
+
+import geospatial_graph_cpp as cpp 
+import torch 
+# import numpy as np 
+
+from helpers import project_path
+from torch_geometric.data import Data 
+
+class GeospatialModel(cpp.GeospatialGraph): 
+
+    def __init__(self, method: str="knn", parameter: float= 5.0): 
+        counties_file = project_path("data", "geography", "2020_Gaz_counties_national.txt")
+        self.method    = method 
+        self.parameter = parameter  
+
+        method_map = {
+            "knn": cpp.MetricType.KNN, 
+            "bounded": cpp.MetricType.BOUNDED, 
+            "standard": cpp.MetricType.STANDARD 
+        }
+
+        super().__init__(counties_file, method_map[self.method], self.parameter)
+        
+    def to_pytorch_tensors(self) -> tuple[torch.Tensor, torch.Tensor]: 
+        edge_pairs, distances = self.get_edge_indices_and_distances() 
+        edges     = torch.tensor(edge_pairs, dtype=torch.long).t().contiguous()
+        edge_attr = torch.tensor(distances, dtype=torch.float32).unsqueeze(1) 
+
+        return edges, edge_attr
+
+    def to_pytorch_geometric(self, node_features: torch.Tensor | None = None):
+        edge_index, edge_attr = self.to_pytorch_tensors() 
+        data = Data(edge_index=edge_index, edge_attr=edge_attr)
+
+        if node_features is not None: 
+            if node_features.shape[0] != len(self.counties()): 
+                raise ValueError(f"Node features shape {node_features.shape[0]} != counties "
+                                 f"shape {len(self.counties())}")
+            data.x = node_features 
+        else: 
+            data.x = self.get_coordinate_tensor()
+
+        return data 
+
+    def get_county_mapping(self) -> dict[str, int]:
+        return dict(self.get_geoid_to_index())
+
+    def get_coordinate_tensor(self) -> torch.Tensor: 
+        coords = self.get_all_coordinates() 
+        return torch.tensor(coords, dtype=torch.float32)
+

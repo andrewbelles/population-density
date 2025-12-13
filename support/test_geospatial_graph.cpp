@@ -32,7 +32,7 @@ TEST(load_counties) {
   assert( lon >= -180 && lon <= 180 ); 
 }
 
-TEST(geospatial_graph_ctor) {
+TEST(geospatial_graph_knn_ctor) {
   try {
     auto graph = GeospatialGraph(
       "../data/geography/2020_Gaz_counties_national.txt",  
@@ -52,13 +52,56 @@ TEST(geospatial_graph_ctor) {
   }
 }
 
+TEST(geospatial_graph_bounded_ctor) {
+  try {
+    auto graph = GeospatialGraph(
+      "../data/geography/2020_Gaz_counties_national.txt",  
+      GeospatialGraph::metricType::BOUNDED, 5 
+    ); 
+
+    if ( auto neighbors = graph.get_neighbors("01001"); neighbors.has_value() ) {
+      assert( neighbors.has_value() ); 
+    } else {
+      std::cerr << "FAILURE: key 01001 does not have any neighbors\n"; 
+      assert(false);
+    }
+
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << '\n'; 
+    assert(false); 
+  }
+}
+
+TEST(geospatial_graph_standard_ctor) {
+  try {
+    auto graph = GeospatialGraph(
+      "../data/geography/2020_Gaz_counties_national.txt",  
+      GeospatialGraph::metricType::STANDARD, 0 
+    ); 
+
+    if ( auto neighbors = graph.get_neighbors("01001"); neighbors.has_value() ) {
+      assert( neighbors.value().size() == graph.counties().size() - 1 ); 
+    } else {
+      std::cerr << "FAILURE: key 01001 does not have any neighbors\n"; 
+      assert(false);
+    }
+
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << '\n'; 
+    assert(false); 
+  }
+}
+
+
 int main(void) 
 {
   std::cout << "Running GeospatialGraph tests...\n"; 
 
   try {
     RUN_TEST(load_counties); 
-    RUN_TEST(geospatial_graph_ctor); 
+    RUN_TEST(geospatial_graph_knn_ctor); 
+    RUN_TEST(geospatial_graph_bounded_ctor); 
+    RUN_TEST(geospatial_graph_standard_ctor);
   
     std::cout << "\nAll tests passed\n"; 
   } catch (const std::exception& e) {

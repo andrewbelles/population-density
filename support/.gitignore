@@ -1,4 +1,5 @@
 *.env 
+*.so
 *.o 
 test_geospatial_graph 
 

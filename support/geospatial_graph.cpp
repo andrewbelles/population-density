@@ -11,6 +11,7 @@
 
 #include <cmath> 
 #include <algorithm> 
+#include <unordered_map>
 
 /************ Compile Time Constants **********************/ 
 /* For haversine distance */ 
@@ -107,7 +108,80 @@ GeospatialGraph::build_adjacency_list(void)
   }
 }
 
+/************ get_edge_indices_and_distances() ************/ 
+/* Gets vectors of county indices representing edges and vectors of distances
+ * that pytorch needs for most Graph Neural Networks
+ */ 
+std::pair<std::vector<std::pair<size_t, size_t>>, std::vector<double>>
+GeospatialGraph::get_edge_indices_and_distances(void) const
+{
+  std::vector<std::pair<size_t, size_t>> edges; 
+  std::vector<double> distances; 
 
+  size_t estimated_edges = 0; 
+  for (const auto& [geoid, neighbors] : this->county_adjacency_list_) {
+    estimated_edges += neighbors.size(); 
+  }
+  edges.reserve(estimated_edges); 
+  distances.reserve(estimated_edges); 
+
+  for (const auto& [geoid, neighbors] : this->county_adjacency_list_) {
+    for (const auto& [neighbor_geoid, distance] : neighbors) {
+      distances.push_back(distance); 
+    }
+  }
+
+  auto geoid_to_idx = get_geoid_to_index(); 
+  for (size_t county_idx = 0; county_idx < this->counties_.size(); county_idx++) {
+
+    const auto& geoid = this->counties_[county_idx].id(); 
+    
+    if ( auto it = this->county_adjacency_list_.find(geoid); 
+         it != this->county_adjacency_list_.end() ) {
+      for (const auto& [neighbor_geoid, distance] : it->second) {
+        if ( auto neighbor_it = geoid_to_idx.find(neighbor_geoid); 
+             neighbor_it != geoid_to_idx.end() ) {
+          edges.emplace_back(county_idx, neighbor_it->second); 
+        }
+      }
+    }
+  }
+
+  return {edges, distances}; 
+}
+
+/************ get_all_coordinates() ***********************/ 
+/* Gets all (lat, lon) coordinates as a vector */ 
+std::vector<std::pair<double, double>> 
+GeospatialGraph::get_all_coordinates(void) const 
+{
+  std::vector<std::pair<double, double>> coords; 
+  coords.reserve(this->counties_.size()); 
+
+  for (const auto& county : this->counties_) {
+    coords.push_back(county.coord()); 
+  }
+
+  return coords; 
+}
+
+/************ geoid_to_idx() ******************************/ 
+/* Creates lookup table for converting geoid into index */ 
+std::unordered_map<std::string, size_t>
+GeospatialGraph::get_geoid_to_index(void) const 
+{
+  std::unordered_map<std::string, size_t> mapping; 
+  mapping.reserve(this->counties_.size()); 
+  for (size_t county_idx = 0; county_idx < this->counties_.size(); county_idx++) {
+    mapping[this->counties_[county_idx].id()] = county_idx; 
+  }
+  return mapping; 
+}
+
+/************ get_neighbors() *****************************/ 
+/* For a county, return all neighbors 
+ * in adjacency list as option 
+ */
 std::optional<const std::vector<County>> 
 GeospatialGraph::get_neighbors(const std::string& key) const 
 {

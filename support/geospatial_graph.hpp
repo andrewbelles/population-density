@@ -50,7 +50,17 @@ public:
                            const double metric_threshold);
 
   GeospatialGraph(GeospatialGraph&& graph); 
+  
+  /********** pytorch tensor helper functions *************/ 
+  std::pair<std::vector<std::pair<size_t, size_t>>, std::vector<double>> 
+  get_edge_indices_and_distances(void) const; 
+  
+  std::vector<std::pair<double, double>> get_all_coordinates(void) const; 
+  std::unordered_map<std::string, size_t> get_geoid_to_index(void) const; 
+  
+  /********** Getters *************************************/ 
 
+  const std::vector<County>& counties(void) const { return counties_; }
   std::optional<const std::vector<County>> get_neighbors(const std::string& key) const; 
 
   static std::vector<integerIndex> 
@@ -76,7 +86,7 @@ private:
   metricType metric_type_{};
   double metric_parameter_{}; 
 
-  void compute_distance_matrix(); 
-  void build_adjacency_list(); 
+  void compute_distance_matrix(void); 
+  void build_adjacency_list(void); 
   static metricFunction metric_from_type(metricType metric_type); 
 }; 
