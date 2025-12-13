@@ -32,7 +32,7 @@ pkgs.mkShell {
     
     pip install --upgrade pip
     pip install numpy scipy pandas scikit-learn xgboost matplotlib seaborn 
-    pip install geopandas xarray rasterio 
+    pip install geopandas xarray rasterio pybind11 
 
     echo "mkdir -p data/climate data/census data/geography"
     mkdir -p data/climate data/census data/geography 

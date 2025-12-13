@@ -121,8 +121,8 @@ parse_county(const std::vector<std::string>& fields, size_t line_num)
     County::Coordinate coord{std::stod(fields[8]), std::stod(fields[9])}; 
     County county{
       fields[0], // state 
-      fields[1], // geoid 
-      fields[3], // name  
+      fields[3], // name 
+      fields[1], // geoid  
       coord 
     };  
 
@@ -133,7 +133,7 @@ parse_county(const std::vector<std::string>& fields, size_t line_num)
       return std::nullopt; 
     }
 
-    if ( auto [_, lon] = county.coord(); lon < -180.0 || lon > -60.0 ) {
+    if ( auto [_, lon] = county.coord(); lon < -180.0 || lon > 180.0 ) {
       std::cerr << "Line " << line_num << ": Longitude " << lon << " outside US range\n"; 
       return std::nullopt; 
     }
