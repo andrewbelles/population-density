@@ -116,10 +116,9 @@ Late Fusion: Train specialized models per data category, then learn weighted com
 
 - Nighttime Satellite Imagery: CNN-based features from satellite lighting data
 - Socioeconomics: Land costs, zoning, income, employment statistics
-- Graph Networks: County adjacency graphs with centroid-based spatial relationships
 
 ### Technical Improvements
 
-Climate data will expand beyond basic temperature/precipitation to include humidity, weather extremes, and seasonal patterns. Spatial modeling will incorporate county adjacency graphs for GraphNN approaches.
+Climate data will expand beyond basic temperature/precipitation to include humidity, weather extremes, and seasonal patterns. 
 
 The current climate-only models perform poorly as expected, primarily because you wouldn't (and shouldn't) predict population density from just weather data. But these features should prove valuable in the larger multi-modal architectures.
