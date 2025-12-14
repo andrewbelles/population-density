@@ -11,6 +11,3 @@ Cargo.lock
 *.clangd 
 *.log 
 *.env 
-*.npm-global/
-
-AGENTS.md

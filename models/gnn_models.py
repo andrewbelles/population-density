@@ -22,13 +22,15 @@ from geospatial import GeospatialModel
 
 class ClimateGNN(nn.Module): 
 
-    def __init__(self, layers: list[int], method="knn", parameter=5.0, decade=2020): 
+    def __init__(self, climate_filepath: str, layers: list[int], method="knn", parameter=5.0, decade=2020): 
         '''
         Initializes GNN using passed layer sizes, metricType, and metricParameter 
 
         layers includes the input_dim 
         '''
         super().__init__()
+
+        self.climate_filepath = climate_filepath
 
         filepath = project_path("data", "climate_counties.tsv")
         self.graph      = GeospatialModel(filepath=filepath, method=method, parameter=parameter)
@@ -62,7 +64,7 @@ class ClimateGNN(nn.Module):
 
     def load_climate_data(self, decade): 
 
-        data    = loadmat(project_path("data", "climpop.mat"))
+        data    = loadmat(self.climate_filepath)
         decades = data["decades"]
 
         decade_key  = f"decade_{decade}"
@@ -139,11 +141,13 @@ def main():
     parser.add_argument("--lr", type=float, default=0.01)
 
     args = parser.parse_args()
-    input_dim = ClimateGNN.get_input_dim(project_path("data", "climpop.mat"), args.decade)
+    climate_filepath = project_path("data", "climate_population.mat"); 
+    input_dim = ClimateGNN.get_input_dim(climate_filepath, args.decade)
     
     layers = [input_dim] + args.layers[1:]
 
     model = ClimateGNN(
+        climate_filepath=climate_filepath, 
         layers=layers,
         method=args.method, 
         parameter=args.parameter, 

@@ -15,6 +15,8 @@ import pandas as pd
 import xarray as xr 
 import geopandas as gpd 
 
+from typing import List 
+
 from sklearn.preprocessing import StandardScaler
 from rasterio.transform import from_bounds 
 from rasterio.features import rasterize 
@@ -292,8 +294,6 @@ class ClimateAgg:
             if not columns: 
                 continue 
 
-            print(f"        > Interpolating {var_name}: {len(columns)} columns")
-
             var_data = df_interp[columns]
 
             sorted_cols = sorted(columns, key=ClimateAgg.safe_sort_key)
@@ -387,7 +387,13 @@ class PopulationDensity:
 
         census_data = {}
         census_data.update(self.load_historical_census_(census_dir))
-        census_data.update(self.load_modern_census_(census_dir))
+        
+        modern_years = []
+        for year in target_years: 
+            if year >= 2000: 
+                modern_years.append(year)
+
+        census_data.update(self.load_modern_census_(census_dir, modern_years))
 
         # census.gov gazetteer provides land mass in sqmi for us 
         # to compute population density as people per sqmi  
@@ -413,12 +419,15 @@ class PopulationDensity:
             population density indexed on fips_code per target year  
         '''
 
+
         result = self.meta.copy() 
 
         available_years = sorted(census_data.keys()) 
+
         for target_year in self.target_years: 
             pop_col = f"pop_{target_year}"
             density_col = f"density_{target_year}"
+
 
             print(f"> Processing {target_year}...")
             if target_year in available_years: 
@@ -433,14 +442,6 @@ class PopulationDensity:
                 )
                 result.loc[~mask, density_col] = np.nan
 
-            density_col = f"density_{target_year}"
-            pop_col     = f"pop_{target_year}"
-
-            # Compute density directly 
-            if pop_col in result.columns: 
-                result[density_col] = result[pop_col] / result["ALAND_SQMI"]
-            else: 
-                result[density_col] = np.nan
         return result 
 
     def load_historical_census_(self, census_dir: str): 
@@ -482,7 +483,7 @@ class PopulationDensity:
         return census_years 
 
 
-    def load_modern_census_(self, census_dir: str):
+    def load_modern_census_(self, census_dir: str, target_decades: List[int]):
         '''
         Helper function to load modern census data from NBER data >= 2000 
 
@@ -493,23 +494,24 @@ class PopulationDensity:
             people per county (indexed on fips code) for each target year < 2000 
 
         '''
-        json_path = os.path.join(census_dir, "county_population_2020.json")
-        
-        with open(json_path, 'r') as f: 
-            data = json.load(f)
 
-        headers, rows = data[0], data[1:]
-        df = pd.DataFrame(rows, columns=headers)
-        
-        # TODO: Hardcoded year here, need to adjust to use target years >= 2000 
+        census_data = {}
 
-        df["FIPS"] = df["state"] + df["county"]
-        df["pop_2020"] = pd.to_numeric(df["P1_001N"])
+        for decade in target_decades: 
+            json_path = os.path.join(census_dir, f"county_population_{decade}.json")
+            
+            with open(json_path, 'r') as f: 
+                data = json.load(f)
 
-        return {
-            2020: df[["FIPS", "pop_2020"]]
-        }
+            headers, rows = data[0], data[1:]
+            df = pd.DataFrame(rows, columns=headers)
 
+            df["FIPS"] = df["state"] + df["county"]
+            df[f"pop_{decade}"] = pd.to_numeric(df["P1_001N"])
+
+            census_data[decade] = df[["FIPS", f"pop_{decade}"]]
+
+        return census_data 
 
     @staticmethod 
     def load_county_metadata(dir: str): 
@@ -664,38 +666,6 @@ def save_df_as_mat(feature_df: pd.DataFrame, output_path: str):
 
     savemat(output_path, mat_data)
     print(f"Saved .mat file: {output_path} for {len(decades)} decades")
-
-
-def export_climate_county_metadata(features_df: pd.DataFrame, output_path: str):
-    '''
-    Export the metadata for counties that remain within features_df to a tsv file 
-    compatible with GeospatialGraph. 
-
-    Caller Provides:
-        features_df which is the complete features matrix from aggregated data. 
-        output_path specifies output for tsv 
-    '''
-    county_metadata = []
-    for fips in features_df.index: 
-        county_row = features_df.loc[fips]
-
-        metadata_row = {
-            "USPS": county_row.get("USPS", "XX"),
-            "GEOID": fips, 
-            "ANSICODE": "00000000", 
-            "NAME": county_row.get("NAME", ""),
-            "ALAND": int(county_row.get("ALAND_SQMI", 1.0) * 2589988.11), 
-            "AWATER": int(county_row.get("AWATER_SQMI", 0.0) * 2589988.11), 
-            "ALAND_SQMI": county_row.get("ALAND_SQMI", 0.0), 
-            "AWATER_SQMI": county_row.get("AWATER_SQMI", 0.0), 
-            "INTPTLAT": county_row.get("INTPTLAT", 0.0), 
-            "INTPTLONG": county_row.get("INTPTLONG", 0.0)
-        }
-        county_metadata.append(metadata_row)
-
-    metadata_df = pd.DataFrame(county_metadata)
-    metadata_df.to_csv(output_path, sep='\t', index=False)
-
 
 def main(): 
 

@@ -76,7 +76,7 @@ def main():
     Example Usage using Climate/Population Density Dataset 
     '''
 
-    data    = loadmat(project_path("data", "climpop.mat"))
+    data    = loadmat(project_path("data", "climate_population.mat"))
     decades = data["decades"]
     coords  = data["coords"]
 
@@ -86,8 +86,8 @@ def main():
     if decade_key not in decade_keys: 
         raise ValueError(f"decade {args.decade} not found. Available: {decade_keys}")
     
-    data  = decades[decade_key][0, 0]
-    X, y  = data["features"][0, 0], data["labels"][0, 0]
+    decade_data = decades[decade_key][0, 0]
+    X, y  = decade_data["features"][0, 0], decade_data["labels"][0, 0]
 
     indices = np.arange(len(X))
     train_idx, test_idx = train_test_split(indices, test_size=0.25, random_state=1)

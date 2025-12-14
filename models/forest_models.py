@@ -116,7 +116,7 @@ def main():
         Climate regression against Population Density 
     '''
     
-    data    = loadmat(project_path("data", "climpop.mat"))
+    data    = loadmat(project_path("data", "climate_population.mat"))
     decades = data["decades"]
     coords  = data["coords"]
 
@@ -146,7 +146,8 @@ def main():
         print(f"    > r2: {result["r2"]:.4}")
 
     if args.xgb is True: 
-        boost  = XGBoost((X_train, X_test), (y_train, y_test), (c_train, c_test), gpu=False, verbose=False)
+        boost  = XGBoost((X_train, X_test), (y_train, y_test), (c_train, c_test), 
+                         gpu=False, verbose=False)
         result = boost.evaluate()  
 
         print("> XGBoost Regression:")
