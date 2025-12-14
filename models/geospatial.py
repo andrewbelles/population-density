@@ -7,6 +7,7 @@
 # the c++ implementation. 
 # 
 
+from torch_geometric.utils import subgraph
 import geospatial_graph_cpp as cpp 
 import torch 
 
@@ -57,3 +58,32 @@ class GeospatialModel(cpp.GeospatialGraph):
     def get_coordinate_tensor(self) -> torch.Tensor: 
         coords = self.get_all_coordinates() 
         return torch.tensor(coords, dtype=torch.float32)
+
+    @staticmethod 
+    def induced_subgraph(data: Data, node_idx, relabel_nodes: bool = True) -> Data: 
+        node_idx = torch.as_tensor(node_idx, dtype=torch.long) 
+
+        edge_attr  = getattr(data, "edge_attr", None)
+        edge_index = getattr(data, "edge_index", None) 
+
+        edge_index_sub, edge_attr_sub = subgraph(
+            node_idx, 
+            edge_index, 
+            edge_attr=edge_attr, 
+            relabel_nodes=relabel_nodes, 
+            num_nodes=data.num_nodes 
+        )
+
+        out = Data(edge_index=edge_index_sub, edge_attr=edge_attr_sub)
+
+        if relabel_nodes:
+            out.x = data.x[node_idx]
+            if hasattr(data, "y") and data.y is not None: 
+                out.y = data.y[node_idx] 
+            out.orig_idx = node_idx
+        else: 
+            out.x = data.x 
+            if hasattr(data, "y"):
+                out.y = data.y 
+
+        return out 

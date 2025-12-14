@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd 
 
 from scipy.io import savemat 
-from sklearn.preprocessing import RobustScaler 
+from sklearn.preprocessing import StandardScaler
 
 from helpers import NCLIMDIV_RE, project_path
 from typing import List, Dict, Optional 
@@ -393,18 +393,10 @@ class ClimateDataset:
             decade_features = decade_df[feature_cols].values.astype(np.float64) 
             decade_labels   = decade_df[f"density_{decade}"].values.astype(np.float64).reshape(-1, 1)
 
-            feature_scaler  = RobustScaler() 
-            features        = feature_scaler.fit_transform(decade_features) 
-
-            label_scaler    = RobustScaler() 
-            labels          = label_scaler.fit_transform(decade_labels)
-
             decade_data[f"decade_{decade}"] = {
-                "features": features, 
-                "labels": labels, 
+                "features": decade_features, 
+                "labels": decade_labels, 
                 "feature_names": feature_cols, 
-                "feature_scale": feature_scaler.scale_, 
-                "label_scale": label_scaler.scale_, 
                 "n_counties": len(decade_df)
             }
 

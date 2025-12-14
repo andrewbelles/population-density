@@ -7,7 +7,7 @@
 # models
 # 
 
-from helpers import project_path
+from helpers import project_path, split_and_scale
 
 import argparse 
 
@@ -129,13 +129,12 @@ def main():
     data  = decades[decade_key][0, 0]
     X, y  = data["features"][0, 0], data["labels"][0, 0]
 
-    indices = np.arange(len(X))
-    train_idx, test_idx = train_test_split(indices, test_size=0.25, random_state=1)
-
     # Get splits 
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_train, y_test = y[train_idx].ravel(), y[test_idx].ravel()
+    (X_train, X_test), (y_train, y_test), (train_idx, test_idx), _ = split_and_scale(X, y, 0.20)
     c_train, c_test = coords[train_idx], coords[test_idx]
+
+    y_train, y_test = y_train.ravel(), y_test.ravel()  
+
 
     if args.rf is True:  
         forest = RandomForest((X_train, X_test), (y_train, y_test), verbose=False)
