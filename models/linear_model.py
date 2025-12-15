@@ -9,7 +9,7 @@
 # 
 
 import numpy as np 
-import helpers as h 
+import models.helpers as h 
 
 from numpy.typing import NDArray 
 

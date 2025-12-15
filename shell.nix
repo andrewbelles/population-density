@@ -5,6 +5,7 @@ pkgs.mkShell {
     python314 
     gcc 
     gnumake 
+    swayimg
   ];
 
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [

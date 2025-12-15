@@ -10,10 +10,11 @@ import os, re
 
 import numpy as np 
 from numpy.typing import ArrayLike, NDArray
-from typing import Any  
+from typing import Any, Callable, TypedDict, List 
 from sklearn.preprocessing import StandardScaler
 
 from abc import ABC, abstractmethod
+from scipy.io import loadmat 
 
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
 
@@ -127,3 +128,85 @@ class ModelInterface(ABC):
                         coords: tuple[NDArray[np.float64], NDArray[np.float64]],
                         **kwargs) -> NDArray[np.float64]:
         raise NotImplementedError
+
+
+class DatasetDict(TypedDict): 
+    features: NDArray[np.float64]
+    labels: NDArray[np.float64]
+    coords: NDArray[np.float64]
+
+DataseLoader = Callable[[str], DatasetDict]
+
+def load_climate_population(filepath: str, decade: int, groups: List[str]) -> DatasetDict: 
+    
+    '''
+    Loader Helper for Climate against Population Density. 
+
+    Caller Provides: 
+        Path to dataset, 
+        decade to load, 
+        groups to include in feature set 
+
+    We return: 
+        A DatasetDict containing the requested features and labels 
+    '''
+
+    group_set = set(groups)
+
+    data    = loadmat(filepath)
+    decades = data["decades"]
+    decade_data = decades[f"decade_{decade}"][0, 0]
+
+    X = np.asarray(decade_data["features"][0, 0], dtype=np.float64)
+    y = np.asarray(decade_data["labels"][0, 0], dtype=np.float64).reshape(-1)
+    coords = np.asarray(data["coords"], dtype=np.float64)
+
+    if "coords" in group_set and "climate" in group_set: 
+        features = np.hstack([X, coords], dtype=np.float64)
+    elif "coords" in group_set: 
+        features = coords
+    elif "climate" in group_set: 
+        features = X 
+    else: 
+        raise ValueError(f"{groups} does not contain any valid group labels for data")
+
+    return {"features": features, "labels": y, "coords": coords}
+
+CLIMATE_GROUPS = {"degree_days", "palmer_indices"}
+
+def load_climate_geospatial(filepath: str, target: str, groups: List[str]) -> DatasetDict: 
+    '''
+    Loader Helper for Climate against (lat, lon). 
+
+    Caller Provides: 
+        filepath to dataset, 
+        target (lat or lon)
+        groups to include in dataset 
+
+    We return: 
+        A DatasetDict containing the requested feature groups and target label 
+    '''
+
+    group_set = set(groups)
+    label_set = {"lat", "lon"}
+
+    if target not in label_set: 
+        raise ValueError(f"target: {target} must be in {sorted(label_set)} to be requested")
+
+    data = loadmat(filepath)
+    c = np.asarray(data["labels"], dtype=np.float64)   # expects shape (n, 2)
+
+    idx = 0 if target == "lat" else 1 
+    y = c[:, idx].reshape(-1)
+
+    features = []
+    for name in sorted(CLIMATE_GROUPS): 
+        if name not in group_set: 
+            continue 
+        features.append(np.asarray(data[f"features_{name}"], dtype=np.float64))
+
+    if not features: 
+        raise ValueError(f"{groups} does not contain any valid group labels for data")
+
+    features = np.hstack(features) if len(features) > 1 else features[0] 
+    return {"features": features, "labels": y, "coords": np.zeros_like(y)}

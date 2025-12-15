@@ -6,7 +6,7 @@
 # with dynamic choice of dataset 
 # 
 
-import helpers as h 
+import models.helpers as h 
 import numpy as np 
 
 from numpy.typing import NDArray
@@ -14,8 +14,9 @@ from xgboost import XGBRegressor
 
 class XGBoost(h.ModelInterface): 
 
-    def __init__(self, gpu: bool = True, **xgb_params): 
-        self.gpu = gpu 
+    def __init__(self, gpu: bool = True, ignore_coords=False, **xgb_params): 
+        self.gpu = gpu
+        self.ignore_coords = ignore_coords
         self.xgb_params = xgb_params 
 
     def fit_and_predict(self, features, labels, coords, **kwargs) -> NDArray[np.float64]: 
@@ -28,9 +29,14 @@ class XGBoost(h.ModelInterface):
 
         inner_train_idx, inner_val_idx = h.split_indices(len(X_train), val_size, seed) 
 
-        X_tr = np.hstack([c_train[inner_train_idx].astype(np.float32), X_train[inner_train_idx].astype(np.float32)])
-        X_va = np.hstack([c_train[inner_val_idx].astype(np.float32), X_train[inner_val_idx].astype(np.float32)])
-        X_te = np.hstack([c_test.astype(np.float32), X_test.astype(np.float32)])
+        if self.ignore_coords: 
+            X_tr = np.asarray(X_train[inner_train_idx], dtype=np.float32)
+            X_va = np.asarray(X_train[inner_val_idx], dtype=np.float32)
+            X_te = np.asarray(X_test, dtype=np.float32)
+        else: 
+            X_tr = np.hstack([c_train[inner_train_idx].astype(np.float32), X_train[inner_train_idx].astype(np.float32)])
+            X_va = np.hstack([c_train[inner_val_idx].astype(np.float32), X_train[inner_val_idx].astype(np.float32)])
+            X_te = np.hstack([c_test.astype(np.float32), X_test.astype(np.float32)])
 
         y_tr, y_va = y_train[inner_train_idx].astype(np.float32), y_train[inner_val_idx].astype(np.float32)
 

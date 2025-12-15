@@ -14,7 +14,6 @@ OUT="../data/climate/nclimdiv_county/raw"
 mkdir -p "$OUT"
 
 ELEMS=(
-  tmpc pcpn tmin tmax 
   pdsi pmdi phdi zndx 
   hddc cddc 
 )

@@ -10,41 +10,24 @@ import argparse
 
 import numpy as np 
 import pandas as pd
-import helpers as h
-
-from scipy.io import loadmat 
+import models.helpers as h
 
 from typing import Dict  
  
 from sklearn.metrics import mean_squared_error, r2_score 
 
-from linear_model import LinearModel
-from random_forest_model import RandomForest 
-from xgboost_model import XGBoost
-from gp_xgboost_model import GPBoost
+from models.linear_model import LinearModel
+from models.random_forest_model import RandomForest 
+from models.xgboost_model import XGBoost
+from models.gp_xgboost_model import GPBoost
 
 
 class CrossValidator: 
 
-    def __init__(self, filepath: str, decade: int = 2020): 
+    def __init__(self, filepath: str, loader: h.DataseLoader): 
 
         self.filepath = filepath 
-        self.decade   = decade 
-        self.data     = self._load_data() 
-
-    def _load_data(self): 
-
-        data    = loadmat(self.filepath)
-        decades = data["decades"]
-        coords  = data["coords"]
-
-        decade_key  = f"decade_{self.decade}"
-        decade_data = decades[decade_key][0, 0]
-
-        X = decade_data["features"][0, 0]
-        y = decade_data["labels"][0, 0]
-
-        return {"features": X, "labels": y, "coords": coords}
+        self.data     = loader(filepath) 
 
     def run(self, models: Dict[str, h.ModelInterface], n_folds: int, test_size: float, seed: int) -> pd.DataFrame: 
         X = np.asarray(self.data["features"], dtype=np.float64) 
@@ -248,14 +231,21 @@ def main():
     args = parser.parse_args()
 
     filepath = h.project_path("data", "climate_population.mat")
-    cv = CrossValidator(filepath, decade=args.decade)  
+    loader   = lambda fp: h.load_climate_population(fp, decade=args.decade, groups=["climate", "coords"])
+
+    cv = CrossValidator(filepath, loader)  
 
     models = {}
 
     if "rf" in args.models: 
         models["RandomForest"] = RandomForest(n_estimators=500, random_state=args.seed)
     if "xgb" in args.models: 
-        models["XGBoost"] = XGBoost(gpu=args.gpu, random_state=args.seed, early_stopping_rounds=150)
+        models["XGBoost"] = XGBoost(
+            gpu=args.gpu, 
+            ignore_coords=False, 
+            random_state=args.seed, 
+            early_stopping_rounds=200
+        )
     if "linear" in args.models: 
         models["Linear"] = LinearModel(gpu=args.gpu)
     if "gpxgb" in args.models: 
@@ -280,8 +270,9 @@ def main():
 
     CrossValidator.format_summary(summary_df)
     
-    results_csv = h.project_path("data", "models", f"cv_results_decade_{args.decade}_f{args.folds}_r{args.repeats}.csv")
-    summary_csv = h.project_path("data", "models", f"cv_summary_decade_{args.decade}_f{args.folds}_r{args.repeats}.csv")
+    raw_dir = h.project_path("data", "models", "raw")
+    results_csv = h.project_path(raw_dir, f"cv_results_decade_{args.decade}_f{args.folds}_r{args.repeats}.csv")
+    summary_csv = h.project_path(raw_dir, f"cv_summary_decade_{args.decade}_f{args.folds}_r{args.repeats}.csv")
 
     results_df.to_csv(results_csv, index=False)
     summary_df.to_csv(summary_csv, index=False)
