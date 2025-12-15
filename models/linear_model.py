@@ -8,12 +8,11 @@
 # Provides a Linear interface generic to specific features vs labels 
 # 
 
-from helpers import project_path, split_and_scale
+from helpers import project_path
 
 import torch, argparse
 import numpy as np 
 from scipy.io import loadmat 
-from sklearn.model_selection import train_test_split 
 from sklearn.metrics import mean_squared_error, r2_score 
 
 class LinearModel: 
@@ -25,19 +24,19 @@ class LinearModel:
     Coords if provided are attached to features since the model will be working with county data
     '''
 
-    def __init__(self, features, labels, coords, gpu=True): 
+    def __init__(self, features, labels, coords, y_scaler, gpu=True): 
 
+        self.y_scaler = y_scaler 
         device = torch.device("cuda" if torch.cuda.is_available() and gpu else "cpu")
 
         X_train, X_test = features 
         y_train, y_test = labels 
-        c_train, c_test = coords 
 
         self.X_train = torch.cat(
             [
                 torch.ones(X_train.shape[0], 1, device=device),
                 torch.tensor(X_train, dtype=torch.float32).to(device), 
-                torch.tensor(c_train, dtype=torch.float32).to(device)
+                #torch.tensor(c_train, dtype=torch.float32).to(device)
             ],
             dim=1
         )
@@ -46,7 +45,7 @@ class LinearModel:
             [
                 torch.ones(X_test.shape[0], 1, device=device),
                 torch.tensor(X_test, dtype=torch.float32).to(device), 
-                torch.tensor(c_test, dtype=torch.float32).to(device)
+                #torch.tensor(c_test, dtype=torch.float32).to(device)
             ],
             dim=1
         )
@@ -88,10 +87,10 @@ def main():
     
     decade_data = decades[decade_key][0, 0]
     X, y  = decade_data["features"][0, 0], decade_data["labels"][0, 0]
-    (X_train, X_test), (y_train, y_test), (train_idx, test_idx), _ = split_and_scale(X, y, 0.20)
+    (X_train, X_test), (y_train, y_test), (train_idx, test_idx), (_, y_scaler) = split_and_scale(X, y, 0.40)
     c_train, c_test = coords[train_idx], coords[test_idx]
 
-    model   = LinearModel((X_train, X_test), (y_train, y_test), (c_train, c_test), gpu=True)
+    model   = LinearModel((X_train, X_test), (y_train, y_test), (c_train, c_test),  y_scaler=y_scaler, gpu=True)
     results = model.evaluate()
 
     print("> Linear Model: ")

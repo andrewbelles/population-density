@@ -36,8 +36,12 @@ pkgs.mkShell {
     pip install numpy scipy pandas scikit-learn xgboost matplotlib seaborn 
     pip install geopandas xarray rasterio pybind11 pybind11-stubgen torch_geometric  
 
+    echo "installing models/"
+    pip install -e . 
+
     echo "mkdir -p data/climate data/census data/geography"
     mkdir -p data/climate data/census data/geography 
+    mkdir -p models/ scripts/ analysis/ support/ 
 
     PYBIND11_INC=$(python -c "import pybind11; print('-I' + pybind11.get_include())") 
     echo "CompileFlags:" > .clangd  

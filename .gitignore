@@ -1,4 +1,7 @@
 debug/ 
+
+*.egg-info/ 
+
 target/ 
 
 data/ 

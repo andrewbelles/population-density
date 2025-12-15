@@ -31,7 +31,6 @@ import numpy as np
 import pandas as pd 
 
 from scipy.io import savemat 
-from sklearn.preprocessing import StandardScaler
 
 from helpers import NCLIMDIV_RE, project_path
 from typing import List, Dict, Optional 
@@ -374,78 +373,142 @@ class ClimateDataset:
 
         return decade_summary.merge(pop_subset, on="FIPS", how="inner")
 
-    def save(self, output_path: str): 
-        
+    def _canonical_fips_order(self) -> list[str]: 
+
         if not self.features: 
-            raise ValueError("[ERROR] cannot save data as no data exists")
+            raise ValueError("[ERROR] no decade features available") 
 
-        first_decade = self.features[self.target_decades[0]]
-        fips_codes   = first_decade["FIPS"].values 
-        coords       = first_decade[["INTPTLAT", "INTPTLONG"]].values.astype(np.float64)
-
-        decade_data = {} 
+        decade_fips_sets = [] 
         for decade in self.target_decades: 
-            decade_df = self.features[decade]
+            if decade not in self.features: 
+                raise ValueError(f"[ERROR]  decade {decade} missing from features")
 
-            exclude_cols = ["FIPS", "INTPTLAT", "INTPTLONG", "decade", f"density_{decade}"]
-            feature_cols = [col for col in decade_df.columns if col not in exclude_cols]
+            df = self.features[decade] 
+            if "FIPS" not in df.columns: 
+                raise ValueError(f"[ERROR] decade {decade} missing FIPS column")
 
-            decade_features = decade_df[feature_cols].values.astype(np.float64) 
-            decade_labels   = decade_df[f"density_{decade}"].values.astype(np.float64).reshape(-1, 1)
+            fips = df["FIPS"].astype(str).str.zfill(5)
+            decade_fips_sets.append(set(fips.tolist()))
+
+        common = set.intersection(*decade_fips_sets) if decade_fips_sets else set() 
+        if not common: 
+            raise ValueError("[ERROR] no common counties across target decades")
+
+        return sorted(common)
+
+    def save(self, output_path: str):
+        if not self.features:
+          raise ValueError("[ERROR] cannot save data as no data exists")
+
+        fips_order = self._canonical_fips_order()
+        fips_order_arr = np.array(fips_order, dtype="U5")
+
+        decade_data = {}
+        coords_ref = None
+
+        for decade in self.target_decades:
+            decade_df = self.features[decade].copy()
+
+            # Ensure string FIPS with leading zeros and align to canonical order
+            decade_df["FIPS"] = decade_df["FIPS"].astype(str).str.zfill(5)
+            decade_df = decade_df.set_index("FIPS")
+
+            missing = [f for f in fips_order if f not in decade_df.index]
+            if missing:
+                raise ValueError(
+                    f"[ERROR] decade {decade} missing {len(missing)} counties after alignment; "
+                    f"first few: {missing[:10]}"
+                )
+
+            decade_df = decade_df.loc[fips_order].reset_index()
+
+            # coords must align to the same row order
+            if ("INTPTLAT" not in decade_df.columns) or ("INTPTLONG" not in decade_df.columns):
+                raise ValueError(f"[ERROR] decade {decade} missing INTPTLAT/INTPTLONG")
+
+            coords = decade_df[["INTPTLAT", "INTPTLONG"]].values.astype(np.float64)
+            if coords_ref is None:
+                coords_ref = coords
+            else:
+                if coords.shape != coords_ref.shape or not np.allclose(coords, coords_ref, equal_nan=True):
+                    raise ValueError(f"[ERROR] coords mismatch across decades (first mismatch at decade {decade})")
+
+            label_col = f"density_{decade}"
+            if label_col not in decade_df.columns:
+                raise ValueError(f"[ERROR] label column {label_col} not found for decade {decade}")
+
+            exclude_cols = ["FIPS", "INTPTLAT", "INTPTLONG", "decade", label_col]
+            feature_cols = [c for c in decade_df.columns if c not in exclude_cols]
+
+            decade_features = decade_df[feature_cols].values.astype(np.float64)
+            decade_labels = decade_df[label_col].values.astype(np.float64).reshape(-1, 1)
 
             decade_data[f"decade_{decade}"] = {
-                "features": decade_features, 
-                "labels": decade_labels, 
-                "feature_names": feature_cols, 
-                "n_counties": len(decade_df)
+                "features": decade_features,
+                "labels": decade_labels,
+                "feature_names": feature_cols,
+                "n_counties": len(decade_df),
+                "fips_codes": fips_order_arr,
+                "coords": coords,
             }
 
             print(f"> Decade {decade}: {len(decade_df)} counties, {len(feature_cols)} features")
 
+        if coords_ref is None:
+            raise ValueError("[ERROR] failed to compute coords")
+
         mat_data = {
-            "coords": coords, 
-            "fips_codes": fips_codes, 
-            "n_counties": len(fips_codes), 
-            "target_decades": self.target_decades, 
-            "variables": self.variables, 
-            "decades": decade_data
+            "fips_codes": fips_order_arr,
+            "coords": coords_ref,
+            "n_counties": len(fips_order_arr),
+            "target_decades": self.target_decades,
+            "variables": self.variables,
+            "decades": decade_data,
         }
 
         savemat(output_path, mat_data)
         print(f"Saved .mat file: {output_path} for {len(decade_data)} decades")
 
 
-def export_climate_county_metadata(decade_matrices: Dict[int, pd.DataFrame], output_path: str):
-    '''
-    Export the metadata for counties that remain within features_df to a tsv file 
-    compatible with GeospatialGraph. 
+def export_climate_county_metadata(
+      decade_matrices: Dict[int, pd.DataFrame],
+      output_path: str,
+      decade_for_order: int = 2020):
 
-    Caller Provides:
-        features_df which is the complete features matrix from aggregated data. 
-        output_path specifies output for tsv 
-    '''
-    first_decade = list(decade_matrices.values())[0]
-    county_metadata = []
+      if decade_for_order not in decade_matrices:
+          raise ValueError(
+              f"[ERROR] decade {decade_for_order} not found in decade_matrices; "
+              f"available: {sorted(decade_matrices.keys())}"
+          )
 
-    for _, row in first_decade.iterrows(): 
-        fips = row["FIPS"]
+      df = decade_matrices[decade_for_order].copy()
+      df["FIPS"] = df["FIPS"].astype(str).str.zfill(5)
 
-        metadata_row = {
-            "USPS": row.get("USPS", "XX"),
-            "GEOID": fips, 
-            "ANSICODE": "00000000", 
-            "NAME": row.get("NAME", ""),
-            "ALAND": int(row.get("ALAND_SQMI", 1.0) * 2589988.11), 
-            "AWATER": int(row.get("AWATER_SQMI", 0.0) * 2589988.11), 
-            "ALAND_SQMI": row.get("ALAND_SQMI", 0.0), 
-            "AWATER_SQMI": row.get("AWATER_SQMI", 0.0), 
-            "INTPTLAT": row.get("INTPTLAT", 0.0), 
-            "INTPTLONG": row.get("INTPTLONG", 0.0)
-        }
-        county_metadata.append(metadata_row)
+      if ("INTPTLAT" not in df.columns) or ("INTPTLONG" not in df.columns):
+          raise ValueError("[ERROR] decade matrix missing INTPTLAT/INTPTLONG")
 
-    metadata_df = pd.DataFrame(county_metadata)
-    metadata_df.to_csv(output_path, sep='\t', index=False)
+      df = df.sort_values("FIPS").reset_index(drop=True)
+
+      county_metadata = []
+      for _, row in df.iterrows():
+          fips = row["FIPS"]
+
+          county_metadata.append({
+              "USPS": row.get("USPS", "XX"),
+              "GEOID": fips,
+              "ANSICODE": "00000000",
+              "NAME": row.get("NAME", ""),
+              "ALAND": int(row.get("ALAND_SQMI", 1.0) * 2589988.11),
+              "AWATER": int(row.get("AWATER_SQMI", 0.0) * 2589988.11),
+              "ALAND_SQMI": row.get("ALAND_SQMI", 0.0),
+              "AWATER_SQMI": row.get("AWATER_SQMI", 0.0),
+              "INTPTLAT": row.get("INTPTLAT", 0.0),
+              "INTPTLONG": row.get("INTPTLONG", 0.0),
+          })
+
+      metadata_df = pd.DataFrame(county_metadata)
+      metadata_df.to_csv(output_path, sep="\t", index=False)
+      print(f"Saved county metadata TSV: {output_path} ({len(metadata_df)} rows)")
 
 
 def main(): 
@@ -457,7 +520,7 @@ def main():
     dataset     = ClimateDataset() 
     output_path = project_path("data", "climate_population.mat")
     dataset.save(output_path)
-    export_climate_county_metadata(dataset.features, project_path("data", "climate_counties.tsv"))
+    export_climate_county_metadata(dataset.features, project_path("data", "climate_counties.tsv"), decade_for_order=2020)
 
 if __name__ == "__main__": 
     main() 

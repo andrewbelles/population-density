@@ -125,29 +125,27 @@ GeospatialGraph::get_edge_indices_and_distances(void) const
   edges.reserve(estimated_edges); 
   distances.reserve(estimated_edges); 
 
-  for (const auto& [geoid, neighbors] : this->county_adjacency_list_) {
-    for (const auto& [neighbor_geoid, distance] : neighbors) {
+  auto geoid_to_idx = get_geoid_to_index(); 
+  for (size_t county_idx = 0; county_idx < this->counties_.size(); county_idx++) {
+    const auto& geoid = this->counties_[county_idx].id(); 
+    
+    auto it = this->county_adjacency_list_.find(geoid); 
+    if ( it == this->county_adjacency_list_.end() ) {
+      continue; 
+    } 
+    
+    for (const auto& [neighbor_geoid, distance] : it->second) {
+      auto nit = geoid_to_idx.find(neighbor_geoid); 
+      if ( nit == geoid_to_idx.end() ) {
+        continue; 
+      }
+
+      edges.emplace_back(county_idx, nit->second); 
       distances.push_back(distance); 
     }
   }
 
-  auto geoid_to_idx = get_geoid_to_index(); 
-  for (size_t county_idx = 0; county_idx < this->counties_.size(); county_idx++) {
-
-    const auto& geoid = this->counties_[county_idx].id(); 
-    
-    if ( auto it = this->county_adjacency_list_.find(geoid); 
-         it != this->county_adjacency_list_.end() ) {
-      for (const auto& [neighbor_geoid, distance] : it->second) {
-        if ( auto neighbor_it = geoid_to_idx.find(neighbor_geoid); 
-             neighbor_it != geoid_to_idx.end() ) {
-          edges.emplace_back(county_idx, neighbor_it->second); 
-        }
-      }
-    }
-  }
-
-  return {edges, distances}; 
+  return {std::move(edges), std::move(distances)}; 
 }
 
 /************ get_all_coordinates() ***********************/ 

@@ -7,7 +7,7 @@
 # the c++ implementation. 
 # 
 
-from torch_geometric.utils import subgraph
+from torch_geometric.utils import subgraph, to_undirected
 import geospatial_graph_cpp as cpp 
 import torch 
 
@@ -40,6 +40,7 @@ class GeospatialModel(cpp.GeospatialGraph):
 
     def to_pytorch_geometric(self, node_features: torch.Tensor | None = None):
         edge_index, edge_attr = self.to_pytorch_tensors() 
+        edge_index, edge_attr = to_undirected(edge_index, edge_attr=edge_attr, reduce="mean")
         data = Data(edge_index=edge_index, edge_attr=edge_attr)
 
         if node_features is not None: 

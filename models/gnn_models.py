@@ -39,13 +39,24 @@ class ClimateGNN(nn.Module):
         self.num_layers = len(layers)
         self.input_dim  = layers[0]  
         self.gnn_model  = self.build_gnn_model_() 
-        self.features, self.labels = self.load_climate_data(decade)
+        self.features, self.labels, fips_codes = self.load_climate_data(decade)
+
+        geoid_to_idx = self.graph.get_county_mapping() 
+        for i in (0, len(fips_codes)//2, len(fips_codes) - 1):
+            if geoid_to_idx[fips_codes[i]] != i:
+                raise ValueError("row/node order mismatch")
         
         X, y = self.features.numpy(), self.labels.numpy()
-        (_, _), (_, _), (train_idx, test_idx), (X_scaler, y_scaler) = split_and_scale(X, y, 0.20)
+        (_, _), (_, _), (train_idx, test_idx), (X_scaler, y_scaler) = split_and_scale(X, y, 0.40)
         
+        coords = self.graph.get_coordinate_tensor().numpy() 
+        coord_mean = coords[train_idx].mean(axis=0, keepdims=True)
+        coord_std  = coords[train_idx].std(axis=0, keepdims=True) 
+        coords_all = (coords - coord_mean) / coord_std 
+
         X_all, y_all = X_scaler.transform(X), y_scaler.transform(y.reshape(-1, 1)).reshape(-1) 
-        full_data    = self.graph.to_pytorch_geometric(torch.tensor(X_all, dtype=torch.float32))
+        X_node = np.hstack([X_all, coords_all])
+        full_data    = self.graph.to_pytorch_geometric(torch.tensor(X_node, dtype=torch.float32))
         full_data.y  = torch.tensor(y_all, dtype=torch.float32) 
 
         self.train_data = self.graph.induced_subgraph(full_data, train_idx)
@@ -64,14 +75,19 @@ class ClimateGNN(nn.Module):
 
     def forward(self, data): 
         x, edge_index = data.x, data.edge_index 
+        
+        edge_weight = None 
+        if hasattr(data, "edge_attr") and data.edge_attr is not None: 
+            d_km = data.edge_attr.view(-1)
+            edge_weight = torch.exp(-(d_km / 200.0) ** 2)
 
         for conv in self.gnn_model[:-1]: 
-            x = conv(x, edge_index)
+            x = conv(x, edge_index, edge_weight=edge_weight)
             x = F.relu(x) 
-            x = F.dropout(x, training=self.training)  
+            x = F.dropout(x, p=0.1, training=self.training)  
 
-        x = self.gnn_model[-1](x, edge_index) 
-        return x.squeeze() 
+        x = self.gnn_model[-1](x, edge_index, edge_weight=edge_weight) 
+        return x.squeeze(-1) 
 
     def load_climate_data(self, decade): 
 
@@ -88,8 +104,12 @@ class ClimateGNN(nn.Module):
         features    = decade_data["features"][0, 0] 
         labels      = decade_data["labels"][0, 0]
 
+        fips_codes = decade_data["fips_codes"][0, 0].reshape(-1)
+        fips_codes = [str(f).strip() for f in fips_codes]
+
+
         return (torch.tensor(features, dtype=torch.float32), 
-                torch.tensor(labels, dtype=torch.float32)) 
+                torch.tensor(labels, dtype=torch.float32), fips_codes) 
 
     def train_model(self, epochs=1000, lr=0.001): 
         
@@ -139,9 +159,9 @@ def main():
     args = parser.parse_args()
     print(args.layers)
     climate_filepath = project_path("data", "climate_population.mat"); 
-    input_dim = ClimateGNN.get_input_dim(climate_filepath, args.decade)
+    input_dim = ClimateGNN.get_input_dim(climate_filepath, args.decade) + 2
     
-    layers = [input_dim] + args.layers[1:]
+    layers = [input_dim] + args.layers
 
     model = ClimateGNN(
         climate_filepath=climate_filepath, 
