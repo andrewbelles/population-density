@@ -10,13 +10,18 @@ import os, re
 
 import numpy as np 
 from numpy.typing import ArrayLike, NDArray
+from typing import Any  
 from sklearn.preprocessing import StandardScaler
 
+from abc import ABC, abstractmethod
+
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
+
 
 def project_path(*args):
     root = os.environ.get("PROJECT_ROOT", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, *args)
+
 
 def split_indices(n_samples: int, test_size: float, seed: int | None = None): 
     if n_samples <= 0: 
@@ -35,6 +40,7 @@ def split_indices(n_samples: int, test_size: float, seed: int | None = None):
 
     return train_idx, test_idx 
 
+
 def fit_scaler(X_train, y_train):
     X_train = np.asarray(X_train, dtype=np.float64)
     y_train = np.asarray(y_train, dtype=np.float64) 
@@ -49,6 +55,7 @@ def fit_scaler(X_train, y_train):
     y_scaler.fit(y_train.reshape(-1, 1))
 
     return X_scaler, y_scaler 
+
 
 def transform_with_scalers(X: ArrayLike, y: ArrayLike, X_scaler: StandardScaler, 
                            y_scaler: StandardScaler) -> tuple[NDArray[np.float64], NDArray[np.float64]]: 
@@ -81,3 +88,42 @@ def kfold_indices(n_samples: int, n_folds: int = 5, seed: int | None = None):
         folds.append((train_idx, test_idx))
 
     return folds 
+
+
+def unwrap_scalar(v): 
+    return v[0] if isinstance(v, tuple) and len(v) == 1 else v 
+
+
+def make_xgb_model(
+    cls: type, 
+    *, 
+    gpu: bool, 
+    base_params: dict[str, Any], 
+    default_tree_method: str = "hist"
+):
+    params = dict(base_params) 
+    params.setdefault("tree_method", default_tree_method)
+
+    params.setdefault("device", "cuda" if gpu else "cpu")
+
+    try: 
+        return cls(**params) 
+    except TypeError as e: 
+        raise e
+
+
+class ModelInterface(ABC):
+    '''
+    Abstract Method for model to be trained and predict some y_hat for the provided 
+    features and labels.
+
+    Returns y_hat scaled via scikit-learn StandardScaler()  
+    '''
+
+    @abstractmethod 
+    def fit_and_predict(self, 
+                        features: tuple[NDArray[np.float64], NDArray[np.float64]], 
+                        labels: tuple[NDArray[np.float64], NDArray[np.float64]], 
+                        coords: tuple[NDArray[np.float64], NDArray[np.float64]],
+                        **kwargs) -> NDArray[np.float64]:
+        raise NotImplementedError

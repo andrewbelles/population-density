@@ -2,9 +2,12 @@
 # 
 # cross_validation.py  Andrew Belles  Dec 14th, 2025 
 # 
+# Interface which models can register with for intelligent folding of test data 
+# and flexible number of repeats to gain understanding about models' efficacy and stability 
 # 
 
-import argparse 
+import argparse  
+
 import numpy as np 
 import pandas as pd
 import helpers as h
@@ -12,134 +15,13 @@ import helpers as h
 from scipy.io import loadmat 
 
 from typing import Dict  
-from numpy.typing import NDArray 
-
-from abc import ABC, abstractmethod
-
-from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor 
  
 from sklearn.metrics import mean_squared_error, r2_score 
 
-# from gnn_models import ClimateGNN
-
-'''
-Providing an Interface for which a model can quickly be wrapped over to allow for cross validation 
-'''
-
-def _unwrap_scalar(v): 
-    return v[0] if isinstance(v, tuple) and len(v) == 1 else v 
-
-class ModelInterface(ABC):
-
-    @abstractmethod 
-    def fit_and_predict(self, 
-                        features: tuple[NDArray[np.float64], NDArray[np.float64]], 
-                        labels: tuple[NDArray[np.float64], NDArray[np.float64]], 
-                        coords: tuple[NDArray[np.float64], NDArray[np.float64]],
-                        **kwargs) -> NDArray[np.float64]:
-        '''
-        Abstract Method for model to be trained and predict some y_hat for the provided 
-        features and labels.
-
-        Returns y_hat scaled via scikit-learn StandardScaler()  
-        '''
-        raise NotImplementedError
-
-
-class LinearModelCV(ModelInterface):
-
-    def __init__(self, **linear_params):
-        self.linear_params = linear_params 
-
-    def fit_and_predict(self, features, labels, coords, **kwargs) -> NDArray[np.float64]:
-        X_train, X_val = features 
-        y_train, _     = labels
-
-        _ = coords 
-        _ = kwargs 
-        _ = self.linear_params 
-
-        X_train_ = np.hstack([np.ones((X_train.shape[0], 1)), X_train])
-        X_val_   = np.hstack([np.ones((X_val.shape[0], 1)), X_val])
-
-        w = np.linalg.pinv(X_train_) @ y_train 
-        y_hat = X_val_ @ w 
-        return np.asarray(y_hat, dtype=np.float64)
-
-
-class RandomForestCV(ModelInterface): 
-    def __init__(self, **rf_params): 
-        self.rf_params = rf_params 
-
-    def fit_and_predict(self, features, labels, coords, **kwargs) -> NDArray[np.float64]:
-        X_train, X_val = features 
-        y_train, _     = labels 
-
-        _ = coords 
-        _ = kwargs 
-
-        rf = RandomForestRegressor(n_jobs=-1, **self.rf_params)
-        rf.fit(X_train, y_train) 
-        y_hat = rf.predict(X_val)
-        return np.asarray(y_hat, dtype=np.float64)
-
-
-class XGBoostCV(ModelInterface): 
-
-    def __init__(self, **xgb_params): 
-        self.xgb_params = xgb_params 
-
-    def fit_and_predict(self, features, labels, coords, **kwargs) -> NDArray[np.float64]: 
-        X_train, X_test = features 
-        y_train, _      = labels 
-        c_train, c_test = coords 
-
-        val_size = kwargs.get("val_size", 0.3)
-        seed     = kwargs.get("seed", 1) 
-
-        inner_train_idx, inner_val_idx = h.split_indices(len(X_train), val_size, seed) 
-
-        X_tr = np.hstack([c_train[inner_train_idx].astype(np.float32), X_train[inner_train_idx].astype(np.float32)])
-        X_va = np.hstack([c_train[inner_val_idx].astype(np.float32), X_train[inner_val_idx].astype(np.float32)])
-        X_te = np.hstack([c_test.astype(np.float32), X_test.astype(np.float32)])
-
-        y_tr, y_va = y_train[inner_train_idx].astype(np.float32), y_train[inner_val_idx].astype(np.float32)
-
-        xgb_params = {k: _unwrap_scalar(v) for k, v in self.xgb_params.items()}
-
-        xgb = XGBRegressor(
-            tree_method="hist", 
-            n_jobs=-1,
-            **xgb_params 
-        )
-        xgb.fit(
-            X_tr, y_tr, 
-            eval_set=[(X_va, y_va)], 
-            verbose=False,
-        )
-
-        y_hat = xgb.predict(X_te) 
-        return np.asarray(y_hat, dtype=np.float64)
-
-
-
-class GNNCV(ModelInterface): 
-    
-    def __init__(self, layers, method="knn", parameter=5.0, epochs=1000, lr=0.001, **gnn_params): 
-        self.layers     = layers 
-        self.method     = method 
-        self.parameter  = parameter 
-        self.epochs     = epochs 
-        self.lr         = lr 
-        self.gnn_params = gnn_params
-
-    def fit_and_predict(self, features, labels, coords, **kwargs) -> NDArray[np.float64]:
-        _ = features 
-        _ = coords 
-        _ = kwargs 
-        _, y_val = labels 
-        return np.zeros_like(y_val, dtype=np.float64)
+from linear_model import LinearModel
+from random_forest_model import RandomForest 
+from xgboost_model import XGBoost
+from gp_xgboost_model import GPBoost
 
 
 class CrossValidator: 
@@ -164,7 +46,7 @@ class CrossValidator:
 
         return {"features": X, "labels": y, "coords": coords}
 
-    def run(self, models: Dict[str, ModelInterface], n_folds: int, test_size: float, seed: int) -> pd.DataFrame: 
+    def run(self, models: Dict[str, h.ModelInterface], n_folds: int, test_size: float, seed: int) -> pd.DataFrame: 
         X = np.asarray(self.data["features"], dtype=np.float64) 
         y = np.asarray(self.data["labels"], dtype=np.float64).reshape(-1)
         coords = np.asarray(self.data["coords"])
@@ -245,7 +127,7 @@ class CrossValidator:
 
         return pd.DataFrame(results)
 
-    def run_repeated(self, models: Dict[str, ModelInterface], n_repeats: int, n_folds: int, 
+    def run_repeated(self, models: Dict[str, h.ModelInterface], n_repeats: int, n_folds: int, 
                      test_size: float, base_seed: int) -> pd.DataFrame: 
 
         all_results = []
@@ -360,7 +242,8 @@ def main():
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0) 
     parser.add_argument("--repeats", type=int, default=100)
-    parser.add_argument("--models", nargs="+", default=["rf", "xgb", "linear"])
+    parser.add_argument("--models", nargs="+", default=["rf", "xgb", "linear", "gpxgb"])
+    parser.add_argument("--gpu", action="store_true")
     
     args = parser.parse_args()
 
@@ -370,14 +253,27 @@ def main():
     models = {}
 
     if "rf" in args.models: 
-        models["RandomForest"] = RandomForestCV(n_estimators=500, random_state=args.seed)
+        models["RandomForest"] = RandomForest(n_estimators=500, random_state=args.seed)
     if "xgb" in args.models: 
-        models["XGBoost"] = XGBoostCV(random_state=args.seed, early_stopping_rounds=150)
+        models["XGBoost"] = XGBoost(gpu=args.gpu, random_state=args.seed, early_stopping_rounds=150)
     if "linear" in args.models: 
-        models["Linear"] = LinearModelCV(gpu=False)
-    if "gnn" in args.models: 
-        # models["ClimateGNN"] = ClimateGNN() 
-        pass 
+        models["Linear"] = LinearModel(gpu=args.gpu)
+    if "gpxgb" in args.models: 
+        models["Gaussian-Process + XGBoost"] = GPBoost(
+            gpu=args.gpu, 
+            gp_params={
+                "n_inducing": 512, 
+                "steps": 500, 
+                "lr": 0.001, 
+                "batch_size": 1024, 
+                "include_coords_in_booster": True  
+            }, 
+            n_estimators=500, 
+            max_depth=8, 
+            subsample=0.8, 
+            colsample_bynode=0.8, 
+            random_state=args.seed 
+        )
 
     results_df = cv.run_repeated(models, n_repeats=args.repeats, n_folds=args.folds, test_size=0.4, base_seed=args.seed)
     summary_df = cv.summarize_repeated(results_df)

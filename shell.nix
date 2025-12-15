@@ -16,12 +16,12 @@ pkgs.mkShell {
 
   shellHook = ''
     export PROJECT_ROOT="$(pwd)"
-    echo "PROJECT_ROOT set to: $PROJECT_ROOT" 
+    echo "[NIX-SHELL] PROJECT_ROOT set to: $PROJECT_ROOT" 
     
-    echo "initializing python environment..."
+    echo "[NIX-SHELL] initializing python environment..."
 
     if [ ! -d ".venv" ]; then 
-      echo "creating new virtual environment..."
+      echo "[NIX-SHELL] creating new virtual environment..."
       python -m venv .venv 
     fi 
 
@@ -30,19 +30,20 @@ pkgs.mkShell {
     fi 
 
     source .venv/bin/activate
-    echo "activated virtual environment: $VIRTUAL_ENV"
+    echo "[NIX-SHELL] activated virtual environment: $VIRTUAL_ENV"
     
+    echo "[NIX-SHELL] Installing packages"
     pip install --upgrade pip
-    pip install numpy scipy pandas scikit-learn xgboost matplotlib seaborn 
+    pip install numpy scipy pandas scikit-learn xgboost matplotlib seaborn gpytorch 
     pip install geopandas xarray rasterio pybind11 pybind11-stubgen torch_geometric  
 
-    echo "installing models/"
+    echo "[NIX-SHELL] installing models/"
     pip install -e . 
 
-    echo "mkdir -p data/climate data/census data/geography"
+    echo "[NIX-SHELL] creating project directories outside git repo"
     mkdir -p data/climate data/census data/geography 
-    mkdir -p models/ scripts/ analysis/ support/ 
 
+    echo "[NIX-SHELL] Injecting pybind11 include path into .clangd"
     PYBIND11_INC=$(python -c "import pybind11; print('-I' + pybind11.get_include())") 
     echo "CompileFlags:" > .clangd  
     echo "  Add:" >> .clangd 
