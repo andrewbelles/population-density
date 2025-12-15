@@ -318,12 +318,9 @@ class CrossValidator:
         has_win_rmse = "win_rmse_mean" in summary_df.columns
         has_win_r2gt0 = "win_r2_gt0_mean" in summary_df.columns
 
-        if has_win_rmse or has_win_r2gt0:
-            print(
-                f"{'Model':<15} {'r2 Score':<25} {'RMSE':<30} {'WinRMSE':<10} {'P(R2>0)':<10} {'Stability':<15}"
-            )
-        else:
-            print(f"{'Model':<15} {'r2 Score':<25} {'RMSE':<30} {'Stability':<15}")
+        print(
+            f"{'Model':<15} {'r2 Score':<25} {'RMSE':<30} {'WinRMSE':<10} {'P(R2>0)':<10}"
+        )
         print("===========================================================================================") 
 
         for _, row in summary_df.iterrows():
@@ -331,7 +328,6 @@ class CrossValidator:
             r2_mean = row["r2_mean"]
             r2_ci_lower = row["r2_ci_lower"]
             r2_ci_upper = row["r2_ci_upper"]
-            r2_std = row["r2_std"]
 
             rmse_mean = row["rmse_mean"]
             rmse_ci_lower = row["rmse_ci_lower"]
@@ -340,32 +336,21 @@ class CrossValidator:
             r2_str   = f"{r2_mean:+.3f} [{r2_ci_lower:+.3f}, {r2_ci_upper:+.3f}]"
             rmse_str = f"{rmse_mean:+.3f} [{rmse_ci_lower:+.3f}, {rmse_ci_upper:+.3f}]"
 
-            r2_cv   = abs(r2_std / r2_mean) if r2_mean != 0.0 else np.inf 
 
-            if r2_cv < 0.5: 
-                stability = "Stable" 
-            elif r2_cv < 1.0: 
-                stability = "Moderate" 
-            else: 
-                stability = "Unstable"
+            win_rmse_str = ""
+            win_r2gt0_str = ""
 
-            if has_win_rmse or has_win_r2gt0:
-                win_rmse_str = ""
-                win_r2gt0_str = ""
+            if has_win_rmse:
+                win_rmse_mean = float(row["win_rmse_mean"])
+                win_rmse_str = f"{100.0 * win_rmse_mean:5.1f}%"
 
-                if has_win_rmse:
-                    win_rmse_mean = float(row["win_rmse_mean"])
-                    win_rmse_str = f"{100.0 * win_rmse_mean:5.1f}%"
+            if has_win_r2gt0:
+                win_r2gt0_mean = float(row["win_r2_gt0_mean"])
+                win_r2gt0_str = f"{100.0 * win_r2gt0_mean:5.1f}%"
 
-                if has_win_r2gt0:
-                    win_r2gt0_mean = float(row["win_r2_gt0_mean"])
-                    win_r2gt0_str = f"{100.0 * win_r2gt0_mean:5.1f}%"
-
-                print(
-                    f"{model:<15} {r2_str:<25} {rmse_str:<30} {win_rmse_str:<10} {win_r2gt0_str:<10} {stability:<15}"
-                )
-            else:
-                print(f"{model:<15} {r2_str:<25} {rmse_str:<30} {stability:<15}")
+            print(
+                f"{model:<15} {r2_str:<25} {rmse_str:<30} {win_rmse_str:<10} {win_r2gt0_str:<10}"
+            )
 
 
 def main(): 
