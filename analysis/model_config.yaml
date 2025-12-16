@@ -1,0 +1,17 @@
+models:                               
+  LinearModel: {}
+                                  
+  RandomForest:                   
+    n_estimators: 300
+    max_depth: 6
+    min_samples_split: 5
+    min_samples_leaf: 2
+
+  XGBoost:
+    gpu: False
+    n_estimators: 300
+    max_depth: 8
+    subsample: 0.8
+    colsample_bynode: 0.8
+    early_stopping_rounds: 200
+    ignore_coords: true
