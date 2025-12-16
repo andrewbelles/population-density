@@ -9,7 +9,7 @@
 import argparse 
 
 from pathlib import Path
-from models.cross_validation import CrossValidator
+from models.cross_validation import CrossValidator, ModelFactory, CVConfig
 import models.helpers as h 
 
 import numpy as np 
@@ -18,88 +18,71 @@ import seaborn as sns
 import matplotlib.pyplot as plt 
 
 from dataclasses import dataclass 
-from typing import Dict, Mapping, Optional, List
-from numpy.typing import NDArray 
+from typing import Callable, Mapping, Optional, Any
 
+from models.linear_model import LinearModel
 from models.xgboost_model import XGBoost
+from models.random_forest_model import RandomForest
+
+DatasetLoader = h.DatasetLoader
+LoaderFactory = Callable[[list[str]], DatasetLoader]
+ModelPatcher  = Callable[[Mapping[str, ModelFactory]], Mapping[str, ModelFactory]]
+
+def set_model_attrs(factory: ModelFactory, **attrs: Any) -> ModelFactory: 
+    def _wrapped() -> h.ModelInterface: 
+        m = factory() 
+        for k, v in attrs.items(): 
+            setattr(m, k, v)
+        return m 
+    return _wrapped
 
 
-class ClimateFeaturesAblation: 
 
-    @dataclass(frozen=True)
-    class AblationGroup: 
-        features: NDArray[np.float64] 
-        coords: NDArray[np.float64]
-        using_groups: Optional[List[str]]
-
-    def __init__(self, cv: CrossValidator, feature_groups: List[str]): 
-        X = np.asarray(cv.data["features"], dtype=np.float64)
-        coords = np.asarray(cv.data["coords"], dtype=np.float64)
-
-        self.cv     = cv 
-         
-        self.groups = {}
-
-        for group_name in feature_groups: 
-            # pull group from cv.data, utilize it and store which group we are using  
+@dataclass(frozen=True)
+class AblationSpec: 
+    name: str 
+    tags: list[str] 
+    patch_models: Optional[ModelPatcher] = None 
 
 
-            self.groups[group_name] = self.AblationGroup(features=)
+class FeatureAblation: 
 
-        self.groups = {
-            "coords_only": self.AblationGroup(features=X, coords=coords, using_groups=groups), 
-            "climate_only": self.AblationGroup(features=X, coords=coords, ignore_groups=), 
-            "both": self.AblationGroup(features=X, coords=coords, ignore_climate=False, ignore_coords=False)
-        }
+    def __init__(self, *, filepath: str, loader_factory: LoaderFactory): 
+        self.filepath       = filepath 
+        self.loader_factory = loader_factory
 
-    def run(self, *, groups: Mapping[str, AblationGroup], 
-             models: Dict[str, h.ModelInterface], n_repeats: int, n_folds: int, 
-             test_size: float, base_seed: int) -> pd.DataFrame: 
-        
-        original_data = self.cv.data 
+    @staticmethod 
+    def leave_one_out(*, all_tags: list[str], baseline_name: str = "all") -> list[AblationSpec]: 
+        specs = [AblationSpec(baseline_name, tags=list(all_tags))]
+        for t in all_tags:
+            specs.append(AblationSpec(f"minus_{t}", tags=[x for x in all_tags if x != t]))
+        return specs 
+
+    def run(self, *, specs: list[AblationSpec], models: Mapping[str, ModelFactory], 
+            cv_config: CVConfig, n_repeats: int) -> pd.DataFrame: 
         out: list[pd.DataFrame] = []
 
-        y = np.asarray(original_data["labels"], dtype=np.float64)
+        for spec in specs: 
+            loader = self.loader_factory(spec.tags)
+            cv = CrossValidator(filepath=self.filepath, loader=loader)
 
-        for group_name, group in groups.items(): 
+            effective_models = dict(models)
+            if spec.patch_models is not None: 
+                effective_models = dict(spec.patch_models(effective_models))
 
-            Xg = np.asarray(group.features, dtype=np.float64) 
-            Cg = np.asarray(group.coords, dtype=np.float64)
-
-            if Xg.shape[0] != y.shape[0]: 
-                raise ValueError(f"{group_name}: features rows {Xg.shape[0]} != labels rows {y.shape[0]}")
-            if Cg.shape[0] != y.shape[0]: 
-                raise ValueError(f"{group_name}: coords rows {Cg.shape[0]} != labels rows {y.shape[0]}")
-
-            self.cv.data = {"features": Xg, "labels": y, "coords": Cg} 
-
-            for m in models.values(): 
-                if not hasattr(m, "ignore_coords"):
-                    continue 
-
-                effective_ignore = bool(group.ignore_coords) or bool(group.ignore_climate)
-                setattr(m , "ignore_coords", effective_ignore)
-
-                if bool(group.ignore_climate): 
-                    self.cv.data["features"] = Cg 
-
-            df = self.cv.run_repeated(
-                models,
-                n_repeats=n_repeats, 
-                n_folds=n_folds, 
-                test_size=test_size, 
-                base_seed=base_seed
-            )
-            df["feature_group"] = group_name 
-            df["ignore_coords"] = bool(group.ignore_coords) or bool(group.ignore_climate)
+            df = cv.run_repeated(models=effective_models, config=cv_config, n_repeats=n_repeats)
+            df["ablation"] = spec.name 
+            df["tags"] = ",".join(spec.tags) 
             out.append(df)
 
-        self.cv.data = original_data 
         return pd.concat(out, ignore_index=True)
 
-    def _default_results_path(self, *, n_folds: int, n_repeats: int) -> str: 
-        fname = f"climate_ablation_decade{self.cv.decade}_f{n_folds}_r{n_repeats}.csv" 
-        return h.project_path("data", "models", "raw", fname)
+    @staticmethod
+    def _as_float(x: Any) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float("nan")
 
     def compile(self, results_df: pd.DataFrame, filepath: str): 
         path = Path(filepath)
@@ -108,9 +91,12 @@ class ClimateFeaturesAblation:
         self.merged.to_csv(path, index=False)
 
         summary = self._summary_by_group(self.merged)
-        summary.to_csv(path.with_name(path.stem + "_summary.csv"), index=False)
+        summary_path = path.with_name(path.stem + "_summary.csv")
+        summary.to_csv(summary_path, index=False)
+        self.summary = summary
 
-        print(f"> Saved ablation results: {filepath}")
+        print(f"> Saved ablation results: {path}")
+        print(f"> Saved ablation summary: {summary_path}")
         return summary
 
     @staticmethod 
@@ -134,7 +120,7 @@ class ClimateFeaturesAblation:
     def _summary_by_group(df: pd.DataFrame) -> pd.DataFrame: 
 
         required = {
-            "feature_group", "model", "repeat", 
+            "ablation", "model", "repeat", 
             "r2", "rmse", "baseline_r2", "baseline_rmse",
             "win_r2", "win_rmse", "win_r2_gt0"
         }
@@ -144,7 +130,7 @@ class ClimateFeaturesAblation:
             raise ValueError(f"_summary_by_group missing required columns: {missing}")
 
         repeat_summary = (
-            df.groupby(["feature_group", "model", "repeat"]).agg({
+            df.groupby(["ablation", "model", "repeat"]).agg({
                 "r2": "mean", 
                 "rmse": "mean", 
                 "baseline_r2": "mean", 
@@ -160,7 +146,7 @@ class ClimateFeaturesAblation:
 
         n_repeats = int(repeat_summary["repeat"].nunique())
 
-        final_summary = repeat_summary.groupby(["feature_group", "model"]).agg({
+        final_summary = repeat_summary.groupby(["ablation", "model"]).agg({
             "r2": ["mean", "median", "std", "min", "max"],
             "rmse": ["mean", "median", "std", "min", "max"], 
             "baseline_r2": ["mean", "median", "std", "min", "max"], 
@@ -188,8 +174,18 @@ class ClimateFeaturesAblation:
     @staticmethod 
     def plot(results: pd.DataFrame, out_dir: str) -> None: 
         out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
 
-        repeats = results.groupby(["feature_group", "model", "repeat"]).agg({
+        if "win_rmse" not in results.columns or "win_r2" not in results.columns or "win_r2_gt0" not in results.columns:
+            results = FeatureAblation._compute_winrates(results)
+
+        group_col = "ablation"
+        if group_col not in results.columns:
+            raise ValueError(f"plot requires '{group_col}' column in results")
+
+        group_order = list(dict.fromkeys(results[group_col].astype(str).tolist()))
+
+        repeats = results.groupby([group_col, "model", "repeat"]).agg({
             "win_rmse": "mean", 
             "win_r2": "mean", 
             "win_r2_gt0": "mean"
@@ -199,7 +195,7 @@ class ClimateFeaturesAblation:
             raise TypeError("win aggregation failed type check")
 
         wins_long = repeats.melt(
-            id_vars=["feature_group", "model", "repeat"],
+            id_vars=[group_col, "model", "repeat"],
             value_vars=["win_rmse", "win_r2", "win_r2_gt0"],
             var_name="metric",
             value_name="win_rate",
@@ -214,11 +210,10 @@ class ClimateFeaturesAblation:
             "win_r2_gt0": "P(R2>0)",
         })
 
-        group_order = ["coords_only", "both", "climate_only"]
         metric_order = ["WinRMSE", "WinR2", "P(R2>0)"]
 
-        wins_long["feature_group"] = pd.Categorical(
-            wins_long["feature_group"], categories=group_order, ordered=True
+        wins_long[group_col] = pd.Categorical(
+            wins_long[group_col], categories=group_order, ordered=True
         )
         wins_long["metric"] = pd.Categorical(
             wins_long["metric"], categories=metric_order, ordered=True
@@ -226,7 +221,7 @@ class ClimateFeaturesAblation:
 
         g = sns.catplot(
             data=wins_long,
-            x="feature_group",
+            x=group_col,
             y="win_rate",
             hue="metric",
             col="model",
@@ -259,7 +254,7 @@ class ClimateFeaturesAblation:
         fig.savefig(out / "ablation_winrates_box.png")
         plt.close(fig)
 
-        repeats_metrics = results.groupby(["feature_group", "model", "repeat"]).agg({
+        repeats_metrics = results.groupby([group_col, "model", "repeat"]).agg({
             "r2": "mean",
             "rmse": "mean",
         }).reset_index()
@@ -267,7 +262,7 @@ class ClimateFeaturesAblation:
             raise TypeError("metrics aggregation failed type check")
 
         metrics_long = repeats_metrics.melt(
-            id_vars=["feature_group", "model", "repeat"],
+            id_vars=[group_col, "model", "repeat"],
             value_vars=["r2", "rmse"],
             var_name="metric",
             value_name="value",
@@ -275,8 +270,8 @@ class ClimateFeaturesAblation:
         if not isinstance(metrics_long, pd.DataFrame):
             raise TypeError("metrics melt failed type check")
 
-        metrics_long["feature_group"] = pd.Categorical(
-            metrics_long["feature_group"], categories=group_order, ordered=True
+        metrics_long[group_col] = pd.Categorical(
+            metrics_long[group_col], categories=group_order, ordered=True
         )
         metrics_long["metric"] = metrics_long["metric"].replace({
             "r2": "R2",
@@ -285,7 +280,7 @@ class ClimateFeaturesAblation:
 
         g2 = sns.catplot(
             data=metrics_long,
-            x="feature_group",
+            x=group_col,
             y="value",
             col="model",
             row="metric",
@@ -328,21 +323,21 @@ class ClimateFeaturesAblation:
         if not isinstance(summary, pd.DataFrame):
             raise TypeError("_summary_by_group failed type check")
 
-        summary_sorted = summary.sort_values(["model", "feature_group"])
+        summary_sorted = summary.sort_values(["model", "ablation"])
         if not isinstance(summary_sorted, pd.DataFrame):
             raise TypeError("summary sort failed type check")
 
         for model_name, model_rows in summary_sorted.groupby("model", sort=False):
             print(f"> {model_name}")
             for _, row in model_rows.iterrows():
-                group = row["feature_group"]
+                group = row["ablation"]
 
                 r2_str   = f"{row['r2_mean']:+.3f} [{row['r2_ci_lower']:+.3f}, {row['r2_ci_upper']:+.3f}]"
                 rmse_str = f"{row['rmse_mean']:+.3f} [{row['rmse_ci_lower']:+.3f}, {row['rmse_ci_upper']:+.3f}]"
 
-                win_rmse   = h._as_float(row.get("win_rmse_mean", np.nan))
-                win_r2     = h._as_float(row.get("win_r2_mean", np.nan))
-                win_r2_gt0 = h._as_float(row.get("win_r2_gt0_mean", np.nan))
+                win_rmse   = self._as_float(row.get("win_rmse_mean", np.nan))
+                win_r2     = self._as_float(row.get("win_r2_mean", np.nan))
+                win_r2_gt0 = self._as_float(row.get("win_r2_gt0_mean", np.nan))
 
                 win_rmse_str   = "" if np.isnan(win_rmse) else f"{100.0 * win_rmse:5.1f}%"
                 win_r2_str     = "" if np.isnan(win_r2) else f"{100.0 * win_r2:5.1f}%"
@@ -353,38 +348,43 @@ class ClimateFeaturesAblation:
                     f"WinRMSE={win_rmse_str} WinR2={win_r2_str} P(R2>0)={win_r2_gt0_str}"
                 )
 
+        return summary
+
 
 def main(): 
     parser = argparse.ArgumentParser()
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument("--target", type=str, default="lat")
     args = parser.parse_args()
 
-    filepath = h.project_path("data", "climate_population.mat")
-    cv  = CrossValidator(filepath, decade=2020)
-    abl = ClimateFeaturesAblation(cv)  
+    filepath = h.project_path("data", "climate_geospatial.mat")
+    loader_factory = lambda tags: (lambda fp: h.load_climate_geospatial(fp, target=args.target, groups=tags))
 
-    models: Dict[str, h.ModelInterface] = {
-        "XGBoost": XGBoost(
+    abl   = FeatureAblation(filepath=filepath, loader_factory=loader_factory)
+    specs = FeatureAblation.leave_one_out(all_tags=["degree_days", "palmer_indices"]) 
+
+    models = {
+        "XGBoost": lambda: XGBoost(
             gpu=False, 
             random_state=0,
             early_stopping_rounds=200
+        ),
+        "Linear": lambda: LinearModel(),
+        "RandomForest": lambda: RandomForest(
+            n_estimators=500, 
+            random_state=0
         )
     }
 
-    results = abl.run(
-        groups=abl.groups, 
-        models=models, 
-        n_repeats=args.repeats, 
-        n_folds=args.folds, 
-        test_size=0.4,
-        base_seed=0
-    )
+    cv_config = CVConfig(n_splits=args.folds, test_size=0.4, split_mode="random", base_seed=0)
+    df = abl.run(specs=specs, models=models, cv_config=cv_config, n_repeats=args.repeats)
 
-    _ = abl.compile(results, h.project_path("data", "models", "ablation_results.csv"))
+    results_path = h.project_path("data", "models", "raw", "feature_ablation_results.csv")
+    _ = abl.compile(df, results_path)
+    _ = abl.interpret(abl.merged)
 
-    abl.interpret(results)
-    abl.plot(abl.merged, h.project_path("data", "models"))
+    FeatureAblation.plot(abl.merged, h.project_path("analysis", args.target))
 
 
 if __name__ == "__main__":

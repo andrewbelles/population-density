@@ -135,7 +135,7 @@ class DatasetDict(TypedDict):
     labels: NDArray[np.float64]
     coords: NDArray[np.float64]
 
-DataseLoader = Callable[[str], DatasetDict]
+DatasetLoader = Callable[[str], DatasetDict]
 
 def load_climate_population(filepath: str, decade: int, groups: List[str]) -> DatasetDict: 
     
@@ -195,6 +195,8 @@ def load_climate_geospatial(filepath: str, target: str, groups: List[str]) -> Da
 
     data = loadmat(filepath)
     c = np.asarray(data["labels"], dtype=np.float64)   # expects shape (n, 2)
+    if c.ndim != 2 or c.shape[1] != 2:
+        raise ValueError(f"expected labels to have shape (n, 2); got {c.shape}")
 
     idx = 0 if target == "lat" else 1 
     y = c[:, idx].reshape(-1)
@@ -209,4 +211,4 @@ def load_climate_geospatial(filepath: str, target: str, groups: List[str]) -> Da
         raise ValueError(f"{groups} does not contain any valid group labels for data")
 
     features = np.hstack(features) if len(features) > 1 else features[0] 
-    return {"features": features, "labels": y, "coords": np.zeros_like(y)}
+    return {"features": features, "labels": y, "coords": c}
