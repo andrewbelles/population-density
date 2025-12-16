@@ -9,7 +9,7 @@
 import argparse 
 
 from pathlib import Path
-from models.cross_validation import CrossValidator, ModelFactory, CVConfig
+from analysis.cross_validation import CrossValidator, ModelFactory, CVConfig
 import support.helpers as h 
 
 import numpy as np 

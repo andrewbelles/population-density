@@ -11,7 +11,7 @@ import argparse
 import support.helpers as h 
 
 from models.xgboost_model import XGBoost 
-from models.cross_validation import CVConfig, CrossValidator
+from analysis.cross_validation import CVConfig, CrossValidator
 
 def main(): 
     parser = argparse.ArgumentParser() 
