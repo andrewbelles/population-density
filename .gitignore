@@ -1,5 +1,7 @@
 debug/ 
 
+*.venv
+
 *.egg-info/ 
 
 target/ 
