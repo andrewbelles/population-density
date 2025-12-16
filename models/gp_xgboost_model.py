@@ -7,7 +7,7 @@
 # from Geospatial information 
 # 
 
-import models.helpers as h 
+import support.helpers as h 
 import numpy as np 
 
 import torch, gpytorch

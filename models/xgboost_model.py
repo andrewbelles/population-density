@@ -6,7 +6,7 @@
 # with dynamic choice of dataset 
 # 
 
-import models.helpers as h 
+import support.helpers as h 
 import numpy as np 
 
 from numpy.typing import NDArray

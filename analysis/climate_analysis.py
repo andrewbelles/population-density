@@ -10,7 +10,7 @@ import argparse
 
 from pathlib import Path
 from models.cross_validation import CrossValidator, ModelFactory, CVConfig
-import models.helpers as h 
+import support.helpers as h 
 
 import numpy as np 
 import pandas as pd 

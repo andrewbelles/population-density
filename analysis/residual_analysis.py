@@ -8,7 +8,7 @@
 
 import argparse 
 
-import models.helpers as h 
+import support.helpers as h 
 
 from models.xgboost_model import XGBoost 
 from models.cross_validation import CVConfig, CrossValidator
