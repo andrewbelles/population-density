@@ -11,7 +11,7 @@ set -euo pipefail
 RAW="../data/climate/nclimdiv_county/raw"
 OUT="../data/climate/nclimdiv_county/parsed"
 
-mkdir -pp "$OUT"
+mkdir -p "$OUT"
 
 if [ "$#" -ne 2 ]; then 
   echo "usage: ./parse_nclimdiv_county.sh [start_year] [end_year]"

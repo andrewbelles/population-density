@@ -1,22 +1,47 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import <nixpkgs> { config.allowUnfree = true; } }:
 
 pkgs.mkShell {
   packages = with pkgs; [
-    python314 
-    gcc 
-    gnumake 
+    python312
+    gcc
+    gnumake
     swayimg
+
+    # Python packages from nixpkgs
+    python312Packages.numpy
+    python312Packages.scipy
+    python312Packages.pandas
+    python312Packages.scikit-learn
+    python312Packages.matplotlib
+    python312Packages.seaborn
+    python312Packages.pyyaml
+    python312Packages.geopandas
+    python312Packages.xarray
+    python312Packages.rasterio
+    python312Packages.pybind11
+    python312Packages.torch-geometric
+
+    # PyTorch with CUDA
+    python312Packages.torch
+    python312Packages.torchvision
+
+    cudaPackages.cudatoolkit  
+    cudaPackages.nccl 
   ];
 
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-    pkgs.stdenv.cc.cc.lib 
-    pkgs.glibc 
-    pkgs.zlib 
-    pkgs.libffi 
-  ];
+    pkgs.stdenv.cc.cc.lib
+    pkgs.glibc
+    pkgs.zlib
+    pkgs.libffi
+    pkgs.cudaPackages.cudatoolkit
+  ] + ":/run/opengl-driver/lib";
 
   shellHook = ''
     export PROJECT_ROOT="$(pwd)"
+    export CUDA_HOME="${pkgs.cudaPackages.cudatoolkit}"
+    export PATH="$CUDA_HOME/bin:$PATH"
+
     echo "[NIX-SHELL] PROJECT_ROOT set to: $PROJECT_ROOT" 
     
     echo "[NIX-SHELL] initializing python environment..."
@@ -28,18 +53,21 @@ pkgs.mkShell {
 
     if [ -n "$VIRTUAL_ENV" ]; then 
       deactivate 
-    fi 
+    fi
 
     source .venv/bin/activate
     echo "[NIX-SHELL] activated virtual environment: $VIRTUAL_ENV"
     
-    echo "[NIX-SHELL] Installing packages"
+    echo "[NIX-SHELL] Installing remaining packages via pip"
     pip install --upgrade pip
-    pip install numpy scipy pandas scikit-learn xgboost matplotlib seaborn gpytorch 
-    pip install geopandas xarray rasterio pybind11 pybind11-stubgen torch_geometric  
-
-    echo "[NIX-SHELL] installing models/"
-    pip install -e . 
+    
+    # Only install packages not available in nixpkgs
+    pip install gpytorch  # if not available in nixpkgs
+    
+    echo "[NIX-SHELL] Installing CUDA XGBoost"
+    pip install --upgrade pip
+    pip install --no-cache-dir 'xgboost>=2.0.0' --config-settings=use_cuda=ON --config-settings=use_nccl=ON
+    pip install -e .
 
     echo "[NIX-SHELL] creating project directories outside git repo"
     mkdir -p data/climate data/census data/geography 
@@ -49,6 +77,6 @@ pkgs.mkShell {
     echo "CompileFlags:" > .clangd  
     echo "  Add:" >> .clangd 
     echo "    - \"$PYBIND11_INC\"" >> .clangd 
-    echo "    - \"-I${pkgs.python314}/include/python3.14\"" >> .clangd 
+    echo "    - \"-I${pkgs.python312}/include/python3.14\"" >> .clangd 
   '';
 }

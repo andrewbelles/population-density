@@ -6,7 +6,7 @@
 # 
 # 
 
-import os, re
+import os, re, yaml
 
 import numpy as np 
 from numpy.typing import ArrayLike, NDArray
@@ -14,7 +14,8 @@ from typing import Any, Callable, TypedDict, List
 from sklearn.preprocessing import StandardScaler
 
 from abc import ABC, abstractmethod
-from scipy.io import loadmat 
+from scipy.io import loadmat
+
 
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
 MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -152,6 +153,45 @@ class ModelInterface(ABC):
                         **kwargs) -> NDArray[np.float64]:
         raise NotImplementedError
 
+ModelFactory = Callable[[], ModelInterface]
+
+def load_models_from_yaml(yaml_path: str, **kwargs) -> dict[str, ModelFactory]: 
+
+    try: 
+        with open(yaml_path, 'r') as f: 
+            config = yaml.safe_load(f) 
+    except FileNotFoundError: 
+        raise FileNotFoundError(f"YAML configuration file not found: {yaml_path}")
+    except yaml.YAMLError as e: 
+        raise ValueError(f"Invalid YAML format: {e}")
+
+    if 'models' not in config: 
+        raise ValueError("YAML must contain 'models' section")
+
+    factories = {}
+    for model_name, model_config in config['models'].items(): 
+        if model_config is None: 
+            model_config = {}
+
+        merged_params = {**model_config, **kwargs} 
+        factories[model_name] = create_model_factory(model_name, merged_params)
+
+    return factories 
+
+def create_model_factory(model_type: str, params: dict) -> ModelFactory: 
+
+    if model_type == "LinearModel": 
+        from models.linear_model import LinearModel
+        return lambda: LinearModel(**params) 
+    elif model_type == "RandomForest": 
+        from models.random_forest_model import RandomForest
+        return lambda: RandomForest(**params)
+    elif model_type == "XGBoost": 
+        from models.xgboost_model import XGBoost 
+        return lambda: XGBoost(**params) 
+    else: 
+        raise ValueError(f"unsupported model type: {model_type}")
+
 
 class DatasetDict(TypedDict): 
     features: NDArray[np.float64]
@@ -203,7 +243,7 @@ def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) ->
 
     Caller Provides: 
         filepath to dataset, 
-        target (lat or lon)
+        target (lat, lon, or all)
         groups to include in dataset 
 
     We return: 
@@ -211,7 +251,7 @@ def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) ->
     '''
 
     group_set = set(groups)
-    label_set = {"lat", "lon"}
+    label_set = {"lat", "lon", "all"}
 
     if target not in label_set: 
         raise ValueError(f"target: {target} must be in {sorted(label_set)} to be requested")
@@ -221,8 +261,11 @@ def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) ->
     if c.ndim != 2 or c.shape[1] != 2:
         raise ValueError(f"expected labels to have shape (n, 2); got {c.shape}")
 
-    idx = 0 if target == "lat" else 1 
-    y = c[:, idx].reshape(-1)
+    if target == "all":
+        y = c.astype(np.float64, copy=False)
+    else:
+        idx = 0 if target == "lat" else 1
+        y = c[:, idx].reshape(-1)
 
     features = []
     for name in sorted(CLIMATE_GROUPS): 

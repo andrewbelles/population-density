@@ -255,7 +255,7 @@ class CrossValidator:
         all_pred = []
 
         for repeat_i in range(n_repeats):
-            print(f"\n> Running CV Repeat {repeat_i + 1}/{n_repeats}")
+            print(f"> Iter: {repeat_i + 1}")
             
             repeat_seed   = config.base_seed + repeat_i * 2
             results, pred = self.run(
@@ -339,7 +339,7 @@ class CrossValidator:
 
         out = (
             df.groupby(["model"]).agg({
-                "idx": "count", 
+                "idx": "count",
                 "residual": "mean", 
                 "abs_residual": "mean", 
                 "sq_residual": "mean", 
@@ -422,15 +422,10 @@ class CrossValidator:
         }
 
         savemat(export_path, mat)
-        print(f"> Saved residual datatset: {export_path}")
 
 
     @staticmethod 
     def format_summary(summary_df: pd.DataFrame): 
-
-        print("===========================================================================================")
-        print("================             Repeated Cross-Validation Summary             ================")
-        print("===========================================================================================")
 
         has_win_rmse  = "win_rmse_mean" in summary_df.columns
         has_win_r2gt0 = "win_r2_gt0_mean" in summary_df.columns
