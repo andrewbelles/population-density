@@ -12,9 +12,10 @@ import numpy as np
 import pandas as pd
 import models.helpers as h
 
-from typing import Any, Callable, Iterator, Literal, Mapping  
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Tuple  
  
 from sklearn.metrics import mean_squared_error, r2_score 
+from scipy.io import savemat
 
 from models.linear_model import LinearModel
 from models.random_forest_model import RandomForest 
@@ -57,21 +58,37 @@ class CrossValidator:
         self.filepath = filepath 
         self.data     = loader(filepath) 
 
-    def run(self, *, models: Mapping[str, ModelFactory], config: CVConfig, seed: int) -> pd.DataFrame: 
-        X = np.asarray(self.data["features"], dtype=np.float64) 
-        y = np.asarray(self.data["labels"], dtype=np.float64).reshape(-1)
-        coords = np.asarray(self.data["coords"])
+    def run(
+        self,
+        *,
+        models: Mapping[str, ModelFactory],
+        config: CVConfig,
+        seed: int,
+        collect: bool = False,
+        output_names: list[str] | None = None,
+        repeat: int | None = None,
+    ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]: 
 
-        if X.shape[0] != y.shape[0]:
-            raise ValueError(f"X rows ({X.shape[0]}) != y rows ({y.shape[0]})")
-        if coords.shape[0] != y.shape[0]:
-            raise ValueError(f"coords rows ({coords.shape[0]}) != y rows ({y.shape[0]})")
+        X = np.asarray(self.data["features"], dtype=np.float64) 
+        y = np.asarray(self.data["labels"], dtype=np.float64)
+        coords = np.asarray(self.data["coords"], dtype=np.float64)
+
+        if y.ndim not in (1, 2):
+            raise ValueError(f"labels must be 1D or 2D; got shape {y.shape}")
+
+        n_samples = int(y.shape[0])
+
+        if X.shape[0] != n_samples:
+            raise ValueError(f"X rows ({X.shape[0]}) != y rows ({n_samples})")
+        if coords.shape[0] != n_samples:
+            raise ValueError(f"coords rows ({coords.shape[0]}) != y rows ({n_samples})")
 
         results: list[dict[str, Any]] = []
+        pred_rows: list[dict[str, Any]] = []
 
         for model_name, make_model in models.items():
             for split_i, train_idx, test_idx in _iter_split(
-                len(X), n_splits=config.n_splits, 
+                n_samples, n_splits=config.n_splits, 
                 test_size=config.test_size, seed=seed, 
                 mode=config.split_mode): 
 
@@ -96,17 +113,92 @@ class CrossValidator:
                         y_scaler=y_scaler 
                     )
 
-                    y_hat  = y_scaler.inverse_transform(np.asarray(y_hat_scaled).reshape(-1, 1)).ravel() 
-                    y_true = y_scaler.inverse_transform(np.asarray(y_test).reshape(-1, 1)).ravel()  
+                    y_hat_scaled_arr = np.asarray(y_hat_scaled, dtype=np.float64)
 
-                    rmse = float(np.sqrt(mean_squared_error(y_true, y_hat)))
-                    r2   = float(r2_score(y_true, y_hat))
+                    if y_test.ndim == 1:
+                        y_hat = y_scaler.inverse_transform(y_hat_scaled_arr.reshape(-1, 1)).ravel()
+                        y_true = y_scaler.inverse_transform(np.asarray(y_test, dtype=np.float64).reshape(-1, 1)).ravel()
 
-                    y_train_mean = float(np.mean(y_train_raw))
-                    y_base       = np.full_like(y_true, y_train_mean, dtype=np.float64)
+                        residuals_1d = y_true - y_hat
+                        if collect:
+                            out_name = output_names[0] if output_names else "y"
+                            for i, idx in enumerate(test_idx):
+                                pred_rows.append({
+                                    "model": model_name,
+                                    "repeat": -1 if repeat is None else int(repeat),
+                                    "fold": split_i,
+                                    "idx": int(idx),
+                                    "output": 0,
+                                    "output_name": str(out_name),
+                                    "y_true": float(y_true[i]),
+                                    "y_pred": float(y_hat[i]),
+                                    "residual": float(residuals_1d[i]),
+                                    "seed": int(seed),
+                                })
 
-                    baseline_rmse = float(np.sqrt(mean_squared_error(y_true, y_base)))
-                    baseline_r2   = float(r2_score(y_true, y_base))
+                        rmse = float(np.sqrt(mean_squared_error(y_true, y_hat)))
+                        r2 = float(r2_score(y_true, y_hat))
+
+                        y_train_mean = float(np.mean(y_train_raw))
+                        y_base = np.full_like(y_true, y_train_mean, dtype=np.float64)
+
+                        baseline_rmse = float(np.sqrt(mean_squared_error(y_true, y_base)))
+                        baseline_r2 = float(r2_score(y_true, y_base))
+                    else:
+                        if y_hat_scaled_arr.ndim == 1:
+                            y_hat_scaled_arr = y_hat_scaled_arr.reshape(-1, 1)
+
+                        y_test_arr = np.asarray(y_test, dtype=np.float64)
+                        if y_test_arr.ndim == 1:
+                            y_test_arr = y_test_arr.reshape(-1, 1)
+
+                        if y_hat_scaled_arr.shape != y_test_arr.shape:
+                            raise ValueError(f"pred shape {y_hat_scaled_arr.shape} != y_test shape {y_test_arr.shape}")
+
+                        y_hat = y_scaler.inverse_transform(y_hat_scaled_arr)
+                        y_true = y_scaler.inverse_transform(y_test_arr)
+
+                        residuals = y_true - y_hat 
+
+                        if collect: 
+                            k = int(y_true.shape[1])
+                            if output_names is not None and len(output_names) != k:
+                                raise ValueError(f"output_names length ({len(output_names)}) != n_outputs ({k})")
+
+                            for j in range(k): 
+                                out_name = output_names[j] if output_names else f"y{j}"
+                                for i, idx in enumerate(test_idx): 
+                                    pred_rows.append({
+                                        "model": model_name,
+                                        "repeat": -1 if repeat is None else int(repeat),
+                                        "fold": split_i,
+                                        "idx": int(idx),
+                                        "output": int(j),
+                                        "output_name": str(out_name),
+                                        "y_true": float(y_true[i, j]),
+                                        "y_pred": float(y_hat[i, j]),
+                                        "residual": float(residuals[i, j]),
+                                        "seed": int(seed),
+                                    })
+
+                        mse_cols = mean_squared_error(y_true, y_hat, multioutput="raw_values")
+                        rmse_cols = np.sqrt(np.asarray(mse_cols, dtype=np.float64))
+                        rmse = float(np.mean(rmse_cols))
+
+                        r2_cols = r2_score(y_true, y_hat, multioutput="raw_values")
+                        r2_cols = np.asarray(r2_cols, dtype=np.float64)
+                        r2 = float(np.mean(r2_cols))
+
+                        y_train_mean = np.asarray(np.mean(y_train_raw, axis=0), dtype=np.float64)
+                        y_base = np.tile(y_train_mean.reshape(1, -1), (y_true.shape[0], 1))
+
+                        base_mse_cols = mean_squared_error(y_true, y_base, multioutput="raw_values")
+                        baseline_rmse_cols = np.sqrt(np.asarray(base_mse_cols, dtype=np.float64))
+                        baseline_rmse = float(np.mean(baseline_rmse_cols))
+
+                        baseline_r2_cols = r2_score(y_true, y_base, multioutput="raw_values")
+                        baseline_r2_cols = np.asarray(baseline_r2_cols, dtype=np.float64)
+                        baseline_r2 = float(np.mean(baseline_r2_cols))
 
                     win_rmse   = float(rmse < baseline_rmse) 
                     win_r2     = float(r2 > baseline_r2)
@@ -131,7 +223,7 @@ class CrossValidator:
                     print(f"    Error in fold {split_i + 1}: {e}")
                     results.append({
                           "model": model_name,
-                          "split": split_i,
+                          "fold": split_i,
                           "r2": np.nan,
                           "rmse": np.nan,
                           "baseline_r2": np.nan,
@@ -145,21 +237,43 @@ class CrossValidator:
                           "error": str(e),
                       })
 
-        return pd.DataFrame(results)
+        results_df = pd.DataFrame(results)
+        pred_df    = pd.DataFrame(pred_rows) if collect else None  
+        return results_df, pred_df 
 
-    def run_repeated(self, *, models: Mapping[str, ModelFactory], 
-                     config: CVConfig, n_repeats: int) -> pd.DataFrame: 
+    def run_repeated(
+        self,
+        *,
+        models: Mapping[str, ModelFactory],
+        config: CVConfig,
+        n_repeats: int,
+        collect: bool = False,
+        output_names: list[str] | None = None,
+    ) -> pd.DataFrame: 
 
         all_results: list[pd.DataFrame] = []
+        all_pred = []
 
         for repeat_i in range(n_repeats):
             print(f"\n> Running CV Repeat {repeat_i + 1}/{n_repeats}")
             
-            repeat_seed    = config.base_seed + repeat_i * 2
-            repeat_results = self.run(models=models, config=config, seed=repeat_seed) 
-            repeat_results["repeat"] = repeat_i 
+            repeat_seed   = config.base_seed + repeat_i * 2
+            results, pred = self.run(
+                models=models, 
+                config=config, 
+                seed=repeat_seed,
+                collect=collect,
+                output_names=output_names,
+                repeat=repeat_i,
+            ) 
+            
+            if pred is not None: 
+                all_pred.append(pred)
 
-            all_results.append(repeat_results, )
+            results["repeat"] = repeat_i 
+            all_results.append(results)
+
+        self.predictions_ = pd.concat(all_pred, ignore_index=True) if all_pred else None
         return pd.concat(all_results, ignore_index=True)
 
     def summarize(self, results_df: pd.DataFrame) -> pd.DataFrame: 
@@ -210,6 +324,107 @@ class CrossValidator:
         
         return final_summary
 
+    def summarize_residuals(self) -> pd.DataFrame: 
+        if self.predictions_ is None: 
+            raise ValueError("predictions cannot be none")
+
+        required = {"model", "idx", "residual", "y_pred"} 
+        missing  = required - set(self.predictions_.columns)
+        if missing: 
+            raise ValueError(f"pred_df missing columns: {sorted(missing)}")
+
+        df =self.predictions_.copy() 
+        df["abs_residual"] = np.abs(df["residual"].to_numpy(dtype=np.float64))
+        df["sq_residual"]  = np.square(df["residual"].to_numpy(dtype=np.float64))
+
+        out = (
+            df.groupby(["model"]).agg({
+                "idx": "count", 
+                "residual": "mean", 
+                "abs_residual": "mean", 
+                "sq_residual": "mean", 
+                "y_pred": "mean"
+            })
+            .reset_index() 
+            .rename(columns={"idx": "n"})
+        )
+
+        out["rmse"] = np.sqrt(out["sq_residual"].to_numpy(dtype=np.float64))
+        return out
+
+    def save_residuals_dataset(
+        self,
+        export_path: str,
+        *,
+        model: str,
+        repeat: int | None = None,
+        reducer: str = "mean",         # for random splits duplicates
+        use_abs: bool = False,
+        require_full_coverage: bool = True,
+    ): 
+        if self.predictions_ is None: 
+            raise ValueError("self.predictions_ is None. run with collect_predictions=True first")
+
+        required = {"model", "repeat", "output_name", "residual"}
+        missing  = required - set(self.predictions_.columns)
+        if missing: 
+            raise ValueError(f"self.predictions_ missing columns: {sorted(missing)}")
+
+        df = self.predictions_.copy() 
+      
+        df = df[df["model"] == model]
+        if repeat is not None: 
+            df = df[df["repeat"] == repeat]
+
+        if not isinstance(df, pd.DataFrame): 
+          raise TypeError 
+
+        if df.empty: 
+            raise ValueError(f"no predictions for model={model} repeat={repeat}")
+
+        if use_abs: 
+            df["residual"] = np.abs(df["residual"].to_numpy(dtype=np.float64))
+
+        agg_df = (
+            df.groupby(["idx", "output_name"]).agg({
+                "residual": reducer 
+            }).reset_index()
+        )
+
+        wide = agg_df.pivot(index="idx", columns="output_name", values="residual").sort_index()
+        
+        X_orig = np.asarray(self.data["features"], dtype=np.float64)
+        n = int(X_orig.shape[0])
+        wide = wide.reindex(np.arange(n))
+
+        if wide.isna().any().any(): 
+            if require_full_coverage: 
+                missing_rows = int(wide.isna().any(axis=1).sum())
+                raise ValueError(f"residual matrix has missing rows ({missing_rows}/{n})")
+
+        R = wide.to_numpy(dtype=np.float64)
+        Y = X_orig 
+        if Y.ndim == 1: 
+            Y = Y.reshape(-1, 1)
+
+        label_names   = np.asarray([f"feature_{i}" for i in range(Y.shape[1])], dtype="U32")
+        feature_names = np.asarray([str(c) for c in wide.columns.to_list()], dtype="U64")
+        
+        mat = {
+            "features": R, 
+            "feature_names": feature_names, 
+            "labels": Y, 
+            "label_names": label_names, 
+            "idx": np.arange(n, dtype=np.int64), 
+            "model": np.asarray([model], dtype="U64"), 
+            "repeat": np.asarray([-1 if repeat is None else int(repeat)], dtype=np.int64), 
+            "use_abs": np.asarray([int(bool(use_abs))], dtype=np.float64)
+        }
+
+        savemat(export_path, mat)
+        print(f"> Saved residual datatset: {export_path}")
+
+
     @staticmethod 
     def format_summary(summary_df: pd.DataFrame): 
 
@@ -217,7 +432,7 @@ class CrossValidator:
         print("================             Repeated Cross-Validation Summary             ================")
         print("===========================================================================================")
 
-        has_win_rmse = "win_rmse_mean" in summary_df.columns
+        has_win_rmse  = "win_rmse_mean" in summary_df.columns
         has_win_r2gt0 = "win_r2_gt0_mean" in summary_df.columns
 
         print(
@@ -303,7 +518,7 @@ def main():
         )
 
     config     = CVConfig(n_splits=args.folds, test_size=0.4, split_mode="random", base_seed=args.seed)
-    results_df = cv.run_repeated(models=models, config=config, n_repeats=args.repeats)
+    results_df = cv.run_repeated(models=models, config=config, n_repeats=args.repeats, collect=False)
     summary_df = cv.summarize_repeated(results_df)
 
     CrossValidator.format_summary(summary_df)

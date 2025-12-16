@@ -54,7 +54,12 @@ def fit_scaler(X_train, y_train):
     y_scaler = StandardScaler() 
 
     X_scaler.fit(X_train) 
-    y_scaler.fit(y_train.reshape(-1, 1))
+    if y_train.ndim == 1:
+        y_scaler.fit(y_train.reshape(-1, 1))
+    elif y_train.ndim == 2:
+        y_scaler.fit(y_train)
+    else:
+        raise ValueError(f"y_train must be 1D or 2D; got shape {y_train.shape}")
 
     return X_scaler, y_scaler 
 
@@ -69,8 +74,14 @@ def transform_with_scalers(X: ArrayLike, y: ArrayLike, X_scaler: StandardScaler,
 
     X_scaled = np.asarray(X_scaler.transform(X), dtype=np.float64) 
 
-    y_scaled = y_scaler.transform(y.reshape(-1, 1))
-    y_scaled = np.asarray(y_scaled, dtype=np.float64).ravel() 
+    if y.ndim == 1:
+        y_scaled = y_scaler.transform(y.reshape(-1, 1))
+        y_scaled = np.asarray(y_scaled, dtype=np.float64).ravel()
+    elif y.ndim == 2:
+        y_scaled = y_scaler.transform(y)
+        y_scaled = np.asarray(y_scaled, dtype=np.float64)
+    else:
+        raise ValueError(f"y must be 1D or 2D; got shape {y.shape}")
 
     return X_scaled, y_scaled 
 
@@ -239,10 +250,13 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
     idx = {"lat": 0, "lon": 1}
     X = coords[:, [idx[c] for c in groups]].astype(np.float64, copy=False)
 
+    if target == "all": 
+        y = F.astype(np.float64, copy=False) 
+        return {"features": X, "labels": y, "coords": coords}
+
     cols = [f"{target}_{m}" for m in MONTHS]
     col_idx = [int(np.where(names == c)[0][0]) for c in cols]
     Ym = F[:, col_idx] 
     y = np.column_stack([Ym, Ym.mean(axis=1)])
 
     return {"features": X, "labels": y, "coords": coords}
-

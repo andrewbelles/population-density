@@ -384,7 +384,7 @@ def main():
     _ = abl.compile(df, results_path)
     _ = abl.interpret(abl.merged)
 
-    FeatureAblation.plot(abl.merged, h.project_path("analysis", args.target))
+    FeatureAblation.plot(abl.merged, h.project_path("analysis", "images", args.target))
 
 
 if __name__ == "__main__":
