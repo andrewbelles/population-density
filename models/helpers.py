@@ -261,18 +261,32 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
 
     return {"features": X, "labels": y, "coords": coords}
 
-def load_residual_dataset(filepath: str) -> DatasetDict: 
+def load_residual_dataset(residual_filepath: str, original_filepath: str) -> DatasetDict: 
 
-    data = loadmat(filepath) 
+    residual_data = loadmat(residual_filepath)
+    base = load_geospatial_climate(original_filepath, target="all", groups=["lat", "lon"])
 
-    if "features" not in data or "labels" not in data: 
-        raise ValueError(f"{filepath} missing features/labels")
+    if "features" not in residual_data: 
+        raise ValueError(f"{residual_filepath} missing features")
 
-    X = np.asarray(data["features"], dtype=np.float64)
-    y = np.asarray(data["labels"], dtype=np.float64) 
+    X_resi = np.asarray(residual_data["features"], dtype=np.float64)
+    X_orig = np.asarray(base["features"], dtype=np.float64)
+    y = np.asarray(base["labels"], dtype=np.float64)
+
+    if X_resi.ndim == 1:
+        X_resi = X_resi.reshape(-1, 1)
+    if X_orig.ndim == 1:
+        X_orig = X_orig.reshape(-1, 1)
+
+    if X_resi.shape[0] != X_orig.shape[0]:
+        raise ValueError(
+            f"residual rows ({X_resi.shape[0]}) != original rows ({X_orig.shape[0]})"
+        )
+
+    X = np.hstack([X_orig, X_resi]).astype(np.float64, copy=False)
 
     # Preserve multi-output labels (n, k). Only squeeze the trivial (n, 1) case.
-    if y.ndim == 2 and y.shape[1] == 1: 
+    if y.ndim == 2 and y.shape[1] == 1:
         y = y.reshape(-1)
     elif y.ndim not in (1, 2):
         raise ValueError(f"labels must be 1D or 2D; got shape {y.shape}")
@@ -281,5 +295,6 @@ def load_residual_dataset(filepath: str) -> DatasetDict:
     if y.shape[0] != n: 
         raise ValueError(f"features rows ({n}) != labels row ({y.shape[0]})")
 
-    coords = np.zeros((n,2), dtype=np.float64) 
+    coords = np.asarray(base["coords"], dtype=np.float64)
+
     return {"features": X, "labels": y, "coords": coords}

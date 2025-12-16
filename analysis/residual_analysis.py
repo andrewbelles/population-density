@@ -45,13 +45,16 @@ def main():
     mat = h.loadmat(filepath) 
     output_names = [str(s) for s in h._mat_str_vector(mat["feature_names"]).tolist()]
 
-    _ = cv.run_repeated(
+    baseline = cv.run_repeated(
         models=models, 
         config=config, 
-        n_repeats=1, 
+        n_repeats=3, 
         collect=True, 
         output_names=output_names
     )
+
+    baseline_summary = cv.summarize_repeated(baseline) 
+    cv.format_summary(baseline_summary)
 
     out_path = args.out 
     if out_path is None: 
@@ -70,7 +73,7 @@ def main():
         base_seed=0
     )
 
-    resid_loader = lambda fp: h.load_residual_dataset(fp)
+    resid_loader = lambda fp: h.load_residual_dataset(fp, filepath)
     cv2 = CrossValidator(filepath=out_path, loader=resid_loader)
 
     resid_models = {
