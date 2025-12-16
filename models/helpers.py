@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from scipy.io import loadmat 
 
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
+MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
 
 def project_path(*args):
@@ -113,6 +114,17 @@ def make_xgb_model(
         raise e
 
 
+def _mat_str_vector(x) -> np.ndarray: 
+
+    arr = np.asarray(x) 
+    arr = arr.reshape(-1) 
+    out = []
+    for v in arr: 
+        vv = np.asarray(v).reshape(-1) 
+        out.append(str(vv[0]) if vv.size > 0 else str(v))
+    return np.asarray(out, dtype=str)
+
+
 class ModelInterface(ABC):
     '''
     Abstract Method for model to be trained and predict some y_hat for the provided 
@@ -137,7 +149,7 @@ class DatasetDict(TypedDict):
 
 DatasetLoader = Callable[[str], DatasetDict]
 
-def load_climate_population(filepath: str, decade: int, groups: List[str]) -> DatasetDict: 
+def load_climate_population(filepath: str, *, decade: int, groups: List[str]) -> DatasetDict: 
     
     '''
     Loader Helper for Climate against Population Density. 
@@ -174,7 +186,7 @@ def load_climate_population(filepath: str, decade: int, groups: List[str]) -> Da
 
 CLIMATE_GROUPS = {"degree_days", "palmer_indices"}
 
-def load_climate_geospatial(filepath: str, target: str, groups: List[str]) -> DatasetDict: 
+def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) -> DatasetDict: 
     '''
     Loader Helper for Climate against (lat, lon). 
 
@@ -212,3 +224,25 @@ def load_climate_geospatial(filepath: str, target: str, groups: List[str]) -> Da
 
     features = np.hstack(features) if len(features) > 1 else features[0] 
     return {"features": features, "labels": y, "coords": c}
+
+
+def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat", "lon"]) -> DatasetDict: 
+    
+    data = loadmat(filepath)
+    coords = np.asarray(data["labels"], dtype=np.float64) 
+    if coords.ndim != 2 or coords.shape[1] != 2: 
+        raise ValueError(f"expected shape (n,2): got {coords.shape}")
+    
+    names = _mat_str_vector(data["feature_names"])
+    F = np.asarray(data["features"], dtype=np.float64)
+
+    idx = {"lat": 0, "lon": 1}
+    X = coords[:, [idx[c] for c in groups]].astype(np.float64, copy=False)
+
+    cols = [f"{target}_{m}" for m in MONTHS]
+    col_idx = [int(np.where(names == c)[0][0]) for c in cols]
+    Ym = F[:, col_idx] 
+    y = np.column_stack([Ym, Ym.mean(axis=1)])
+
+    return {"features": X, "labels": y, "coords": coords}
+
