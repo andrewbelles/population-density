@@ -260,3 +260,26 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
     y = np.column_stack([Ym, Ym.mean(axis=1)])
 
     return {"features": X, "labels": y, "coords": coords}
+
+def load_residual_dataset(filepath: str) -> DatasetDict: 
+
+    data = loadmat(filepath) 
+
+    if "features" not in data or "labels" not in data: 
+        raise ValueError(f"{filepath} missing features/labels")
+
+    X = np.asarray(data["features"], dtype=np.float64)
+    y = np.asarray(data["labels"], dtype=np.float64) 
+
+    # Preserve multi-output labels (n, k). Only squeeze the trivial (n, 1) case.
+    if y.ndim == 2 and y.shape[1] == 1: 
+        y = y.reshape(-1)
+    elif y.ndim not in (1, 2):
+        raise ValueError(f"labels must be 1D or 2D; got shape {y.shape}")
+
+    n = X.shape[0]
+    if y.shape[0] != n: 
+        raise ValueError(f"features rows ({n}) != labels row ({y.shape[0]})")
+
+    coords = np.zeros((n,2), dtype=np.float64) 
+    return {"features": X, "labels": y, "coords": coords}

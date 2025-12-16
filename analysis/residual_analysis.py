@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser() 
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--out", type=str, default=None)
+    parser.add_argument("--repeats", type=int, default=20)
     args = parser.parse_args()
 
     filepath = h.project_path("data", "climate_geospatial.mat")
@@ -62,6 +63,34 @@ def main():
     cv.save_residuals_dataset(out_path, model="XGBoost", reducer="mean")
     print(f"> Wrote: {out_path}")
 
+    config2 = CVConfig(
+        n_splits=args.folds, 
+        test_size=0.4, 
+        split_mode="random", 
+        base_seed=0
+    )
+
+    resid_loader = lambda fp: h.load_residual_dataset(fp)
+    cv2 = CrossValidator(filepath=out_path, loader=resid_loader)
+
+    resid_models = {
+            "XGBoost": lambda: XGBoost(
+                gpu=False, 
+                ignore_coords=True, 
+                random_state=0, 
+                early_stopping_rounds=200
+            )
+    } 
+
+    resid_results = cv2.run_repeated(
+        models=resid_models, 
+        config=config2, 
+        n_repeats=args.repeats, 
+        collect=False 
+    )
+
+    resid_summary = cv2.summarize_repeated(resid_results)
+    cv2.format_summary(resid_summary)
 
 if __name__ == "__main__": 
     main()
