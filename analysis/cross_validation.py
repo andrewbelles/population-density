@@ -12,8 +12,16 @@ import numpy as np
 import pandas as pd
 import support.helpers as h
 
-from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Tuple  
- 
+from typing import (
+        Any, 
+        Callable, 
+        Iterator, 
+        Literal, 
+        Mapping, 
+        Optional, 
+        Tuple, 
+)
+
 from sklearn.metrics import mean_squared_error, r2_score 
 from scipy.io import savemat
 
@@ -22,12 +30,19 @@ from models.random_forest_model import RandomForest
 from models.xgboost_model import XGBoost
 from models.gp_xgboost_model import GPBoost
 
+from analysis.tasks import (
+    Task, 
+    PreparedData,
+    TaskSpec,
+)
+
 from dataclasses import dataclass 
 
 ModelFactory = Callable[[], h.ModelInterface]
 
 @dataclass(frozen=True)
 class CVConfig: 
+    task: Task = "regression"
     n_splits: int = 5
     test_size: float = 0.4
     split_mode: Literal["kfold", "random"] = "kfold"
@@ -83,7 +98,7 @@ class CrossValidator:
         if coords.shape[0] != n_samples:
             raise ValueError(f"coords rows ({coords.shape[0]}) != y rows ({n_samples})")
 
-        results: list[dict[str, Any]] = []
+        results: list[dict[str, Any]]   = []
         pred_rows: list[dict[str, Any]] = []
 
         for model_name, make_model in models.items():
