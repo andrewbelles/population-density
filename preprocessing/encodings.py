@@ -17,7 +17,7 @@ from support.helpers import (
 )
 
 from dataclasses import dataclass 
-from typing import Any, Sequence 
+from typing import Any, Literal, Sequence 
 
 from numpy.typing import NDArray
 
@@ -25,12 +25,18 @@ from sklearn.decomposition import PCA, KernelPCA
 from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import StandardScaler 
 
+from scipy.io import savemat 
+
+
 @dataclass(frozen=True)
 class View: 
     X: NDArray[np.float64]
     feature_names: NDArray[np.str_]
     groups: dict[str, slice]
 
+PairMode     = Literal["concat", "diff", "absdiff", "concat_absdiff"]
+NegativeMode = Literal["mismatch", "shuffle"]
+PositiveMode = Literal["augment"]
 
 class Encoder: 
 
@@ -365,6 +371,114 @@ class Encoder:
         ax.set_title(title or "KernelPCA Lambda Ratio against Cumulative")
         return ax 
 
+    # ------- Save Constrastive Dataset 
+
+    @staticmethod 
+    def save_as_constrastive(
+        X_repr: NDArray[np.float64],
+        out_path: str | None = None,
+        *,
+        pair_mode: PairMode = "concat_absdiff", 
+        # positive_mode: PositiveMode = "augment", # does not do anything as of right now  
+        negative_mode: NegativeMode = "mismatch", 
+        n_pos_per_sample: int = 1, 
+        neg_ratio: int = 1, 
+        noise_std: float = 0.05, 
+        mask_prob: float = 0.05,
+        seed: int = 0, 
+    ): 
+
+        '''
+        Writes a contrastive pair dataset to "output_path" with keys: 
+
+        Caller Provides: 
+           Some representation (or raw) of the features matrix 
+           Output Path 
+           And optional kwargs that modify the behavior of the generated dataset.
+             A more detailed explanation can be found in the preprocessing README.md 
+
+        Function Does: 
+            Generates the contrastive dataset and outputs it at .mat to the specified location
+        '''
+
+        X = np.asarray(X_repr, dtype=np.float64)
+        if X.ndim != 2: 
+            raise ValueError(f"X must be 2d, got {X.shape}")
+        if not np.isfinite(X).all(): 
+            raise ValueError("X contains NaN/Inf")
+
+        n, d = X.shape 
+        if n < 2: 
+            raise ValueError("need at least 2 samples")
+
+        if n_pos_per_sample <= 0: 
+            raise ValueError("n_pos_per_sample must be > 0")
+        if neg_ratio <= 0: 
+            raise ValueError("neg_ratio must be > 0")
+        if not (0.0 <= mask_prob < 1.0):
+            raise ValueError("mask_prob must be in [0, 1)")
+        if noise_std < 0.0: 
+            raise ValueError("noise_std must be >= 0")
+
+        rng = np.random.default_rng(seed)
+
+        feats: list[NDArray[np.float64]] = []
+        labels: list[float] = [] 
+        pair_i: list[int]   = []
+        pair_j: list[int]   = []
+
+        for i in range(n): 
+            xi = X[i]
+            for _ in range(n_pos_per_sample): 
+                a = Encoder._augment(xi, mask_prob, rng, noise_std, d)
+                b = Encoder._augment(xi, mask_prob, rng, noise_std, d)
+                feats.append(Encoder._pair_features(a, b, pair_mode))
+                labels.append(1.0)
+                pair_i.append(i)
+                pair_j.append(i)
+
+        n_pos = len(labels) 
+        n_neg = n_pos * neg_ratio 
+
+        # Handle negatives from kwarg 
+
+        if negative_mode == "mismatch": 
+            for _ in range(n_neg): 
+                i = int(rng.integers(0, n))
+                j = int(rng.integers(0, n - 1))
+                if j >= i: 
+                    j += 1 
+                a = Encoder._augment(X[i], mask_prob, rng, noise_std, d)
+                b = Encoder._augment(X[j], mask_prob, rng, noise_std, d)
+                feats.append(Encoder._pair_features(a, b, pair_mode))
+                labels.append(0.0)
+                pair_i.append(i)
+                pair_j.append(j)
+        elif negative_mode == "shuffle": 
+            perm = np.arange(d)
+            for _ in range(n_neg): 
+                i = int(rng.integers(0, n))
+                rng.shuffle(perm)
+                a = Encoder._augment(X[i], mask_prob, rng, noise_std, d)
+                b = Encoder._augment(X[i], mask_prob, rng, noise_std, d)[perm]
+                feats.append(Encoder._pair_features(a, b, pair_mode))
+                labels.append(0.0)
+                pair_i.append(i)
+                pair_j.append(i)
+
+        features = np.vstack(feats).astype(np.float64, copy=False) 
+        y = np.asarray(labels, dtype=np.float64).reshape(-1)
+
+        savemat(
+            out_path,
+            {
+                "features": features, 
+                "labels": y, 
+                "pair_i": np.asarray(pair_i, dtype=np.int32), 
+                "pair_j": np.asarray(pair_j, dtype=np.int32), 
+            }
+        )
+
     # ------- Private Helpers 
 
     def _X_for_pca(self, X: NDArray[np.float64] | None = None) -> NDArray[np.float64]: 
@@ -381,6 +495,38 @@ class Encoder:
         if self.pca is None: 
             raise RuntimeError("PCA not fit, call fit_pca() first")
         return self.pca 
+
+    @staticmethod 
+    def _augment(
+        x: NDArray[np.float64],
+        mask_prob: float, 
+        rng, 
+        noise_std: float,
+        d: int
+    ) -> NDArray[np.float64]: 
+        y = x.copy() 
+        if mask_prob > 0.0: 
+            mask = rng.random(d) < mask_prob 
+            y[mask] = 0.0 
+        if noise_std > 0.0: 
+            y = y + rng.normal(0.0, noise_std, size=d)
+        return y 
+
+    @staticmethod 
+    def _pair_features(
+        a: NDArray[np.float64], 
+        b: NDArray[np.float64], 
+        pair_mode: PairMode, 
+    ) -> NDArray[np.float64]: 
+        if pair_mode == "concat": 
+            return np.concatenate([a, b])
+        elif pair_mode == "diff": 
+            return a - b 
+        elif pair_mode == "absdiff": 
+            return np.abs(a - b) 
+        elif pair_mode == "concat_absdiff": 
+            np.concatenate([a, b, np.abs(a - b)])
+        raise ValueError(f"Unknown pair mode: {pair_mode}")
 
     # ------- Static Methods 
     

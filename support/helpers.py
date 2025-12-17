@@ -371,6 +371,21 @@ def load_residual_dataset(residual_filepath: str, original_filepath: str) -> Dat
 
     return {"features": X, "labels": y, "coords": coords}
 
+def load_contrastive_dataset(filepath: str) -> DatasetDict: 
+    mat = loadmat(filepath)
+
+    if "features" not in mat or "labels" not in mat: 
+        raise ValueError(f"{filepath} missing required keys 'features'/'labels'")
+
+    X = np.asarray(mat["features"], dtype=np.float64) 
+    y = np.asarray(mat["labels"], dtype=np.float64)
+
+    if X.shape[0] != y.shape[0]: 
+        raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({y.shape[0]})")
+
+    coords = np.zeros((y.shape[0], 2), dtype=np.float64) # Satisfy DatasetDict 
+    return {"features": X, "labels": y, "coords": coords}
+
 
 # ---------------------------------------------------------
 # Unsupervised Loader Interface 
