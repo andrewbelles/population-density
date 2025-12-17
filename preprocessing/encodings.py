@@ -21,9 +21,9 @@ from typing import Any, Sequence
 
 from numpy.typing import NDArray
 
-from sklearn.decomposition import PCA 
+from sklearn.decomposition import PCA, KernelPCA  
+from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import StandardScaler 
-
 
 @dataclass(frozen=True)
 class View: 
@@ -130,9 +130,10 @@ class Encoder:
     def fit_pca(
             self, 
             *,
+            pca_class: Any | None = None,
             n_components: int | float | None = None,
             **pca_kwargs: Any
-    ) -> PCA:
+    ) -> Any:
         
         '''
         Fits sklearn PCA on X. 
@@ -144,9 +145,14 @@ class Encoder:
                 - float (in 0,1): variance fraction to retain 
             kwargs specific to PCA __init__
         '''
+        if pca_class is None: 
+            pca_class = PCA
 
         Xp = self._X_for_pca()
-        self.pca = PCA(n_components=n_components, **pca_kwargs)
+        self.pca = pca_class(n_components=n_components, **pca_kwargs)
+        if self.pca is None: 
+            raise TypeError("failed to pass PCA type, found none on encoder.pca")
+
         self.scores_ = np.asarray(self.pca.fit_transform(Xp), dtype=np.float64) 
         return self.pca 
 
@@ -188,6 +194,18 @@ class Encoder:
         return Encoder.broken_stick_expectation(
             int(self.explained_variance_ratio().shape[0])
         )
+
+    def kpca_lambdas(self) -> NDArray[np.float64]: 
+        m = self._require_pca() 
+        
+        if hasattr(m, "eigenvalues_"):
+            vals = getattr(m, "eigenvalues_")
+        elif hasattr(m, "lambdas_"):
+            vals = getattr(m, "lambdas_")
+        else: 
+            raise TypeError("current model is not KernelPCA-like")
+        
+        return np.asarray(vals, dtype=np.float64)
 
     # ------- Plots 
 
@@ -277,6 +295,76 @@ class Encoder:
         ax.set_title(title or "Broken-stick Test")
         return ax 
 
+    def plot_kpca_lambda(
+        self, 
+        *, 
+        ax=None, 
+        logy: bool = False, 
+        normalize: bool = False, 
+        title: str | None = None 
+    ): 
+        import matplotlib.pyplot as plt 
+
+        if ax is None: 
+            _, ax = plt.subplots(figsize=(10,7))
+
+        lam = self.kpca_lambdas()
+        y   = lam / lam.sum() if normalize and lam.sum() > 0 else lam 
+        x   = np.arange(1, y.shape[0] + 1)
+
+        ax.plot(x, y, marker="o", linewidth=1.25)
+        ax.set_xlabel("Component")
+        ax.set_ylabel("Normalized eigenvalues" if normalize else "Kernel eigenvalues")
+        if logy:
+            ax.set_yscale("log")
+
+        ax.grid(True, alpha=0.25)
+        ax.set_title(title or ("Kernel eigenvalue decay" + (" (normalied)" if normalize else "")))
+        return ax 
+
+    def plot_kpca_cumulative(
+        self, 
+        *, 
+        ax=None, 
+        threshold: float | None = 0.9, 
+        title: str | None = None 
+    ): 
+        import matplotlib.pyplot as plt 
+
+        if ax is None: 
+            _, ax = plt.subplots(figsize=(10,7))
+
+        lam   = self.kpca_lambdas()
+        total = float(lam.sum())
+        if total <= 0: 
+            raise ValueError("KernelPCA eigenvalues sum to <= 0. cannot form variance proxy")
+
+        r = lam / total 
+        x = np.arange(1, r.shape[0] + 1)
+        cum = np.cumsum(r)
+
+        ax.bar(x, r, alpha=0.5, label="KPCA Lambda Ratio")
+        ax.plot(x, cum, marker="o", linewidth=1.25, label="Cumulative")
+        ax.set_xlabel("Component")
+        ax.set_ylabel("Variance ratio")
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(True, axis="y", alpha=0.25)
+
+        if threshold is not None: 
+            t = float(threshold)
+            if not (0.0 <= t <= 1.0):
+                raise ValueError("threshold must be in (0, 1]")
+
+            k = int(np.searchsorted(cum, t) + 1)
+            ax.axhline(t, linestyle="--", linewidth=0.8, color="green", alpha=0.8, 
+                       label=f"threshold {t:.0%}")
+            ax.axvline(k, linestyle="--", linewidth=0.8, color="red", alpha=0.7,
+                       label=f"k={k}")
+
+        ax.legend(frameon=False)
+        ax.set_title(title or "KernelPCA Lambda Ratio against Cumulative")
+        return ax 
+
     # ------- Private Helpers 
 
     def _X_for_pca(self, X: NDArray[np.float64] | None = None) -> NDArray[np.float64]: 
@@ -289,7 +377,7 @@ class Encoder:
             return np.asarray(self._scaler.transform(X_use), dtype=np.float64)
         return X_use 
 
-    def _require_pca(self) -> PCA: 
+    def _require_pca(self) -> Any: 
         if self.pca is None: 
             raise RuntimeError("PCA not fit, call fit_pca() first")
         return self.pca 
@@ -318,12 +406,20 @@ def main():
 
     dataset = load_climate_and_geospatial_unsupervised(
         filepath=project_path("data", "climate_geospatial.mat"),
-        include_coords=True,
+        include_coords=False,
         groups=("all",)
     )
 
-    encoder = Encoder(dataset=dataset, standardize=True)
-    encoder.fit_pca()
+    encoder  = Encoder(dataset=dataset, standardize=True)
+    
+    Xp = encoder._X_for_pca()
+    d = pairwise_distances(Xp, metric="euclidean")
+    med = np.median(d[d > 0])
+    gamma = 1.0 / (2.0 * med * med)
+
+    encoder.fit_pca(
+        pca_class=PCA, 
+    )
 
     image_dir = project_path("analysis", "images")
 
@@ -364,6 +460,34 @@ def main():
         bbox_inches="tight"
     ) 
     plt.close(fig)
+
+    encoder.fit_pca(
+        pca_class=KernelPCA,
+        kernel="rbf",
+        gamma=gamma, 
+        eigen_solver="auto", 
+        remove_zero_eig=True
+    )
+
+    fig, ax = plt.subplots(figsize=(10,7))
+    encoder.plot_kpca_lambda(ax=ax, logy=True)
+    fig.savefig(
+        project_path(image_dir, "kpca_lambda_decay.png"), 
+        dpi=200, 
+        bbox_inches="tight"
+    )
+    plt.close(fig)
+
+
+    fig, ax = plt.subplots(figsize=(10,7))
+    encoder.plot_kpca_cumulative(ax=ax, threshold=0.95) 
+    fig.savefig(
+        project_path(image_dir, "kpca_variance_proxy.png"), 
+        dpi=200, 
+        bbox_inches="tight"
+    )
+    plt.close(fig)
+
 
 if __name__ == "__main__":
     main() 
