@@ -177,18 +177,48 @@ class Encoder:
         '''
         Fits pca to dataset, and transforms dataset. 
 
-        caller provides: 
+        Caller provides: 
             n_components: 
                 - none, all components 
                 - int: exact number of components 
                 - float (in 0,1): variance fraction to retain 
             kwargs specific to PCA __init__
+        
+        We return: 
+            The transformed dataset back to the user 
+
         '''
 
         self.fit_pca(n_components=n_components, **pca_kwargs) 
         if self.scores_ is None: 
             raise RuntimeError("scores_ missing after fit_pca()")
         return self.scores_ 
+
+    def get_reduced_pca_scores(
+        self, 
+        threshold: float = 0.95 
+    ) -> tuple[NDArray[np.float64], int]: 
+
+        '''
+        Determines whether Encoder was fit off of KernelPCA or PCA and returns 
+        compact representation on provided threshold 
+        
+        Caller Provides: 
+            threshold to reject on for compact representation  
+
+        We return: 
+            tuple of (reduced_scores, k)
+        '''
+
+        if self.pca is None or self.scores_ is None: 
+            raise RuntimeError("Must call fit_pca() first")
+
+        is_kpca = hasattr(self.pca, "eigenvalues_") or hasattr(self.pca, "lambdas_")
+
+        if is_kpca: 
+            return self._kpca_components_by_lambda(self.pca, threshold)
+        else: 
+            return self._pca_components_by_variance(self.pca, threshold)
 
     def eigenvalues(self) -> NDArray[np.float64]: 
         return np.asarray(self._require_pca().explained_variance_, dtype=np.float64)
@@ -467,7 +497,7 @@ class Encoder:
                 pair_j.append(i)
 
         features = np.vstack(feats).astype(np.float64, copy=False) 
-        y = np.asarray(labels, dtype=np.float64).reshape(-1)
+        y = np.asarray(labels, dtype=np.int64).reshape(-1, 1)
 
         savemat(
             out_path,
@@ -478,6 +508,21 @@ class Encoder:
                 "pair_j": np.asarray(pair_j, dtype=np.int32), 
             }
         )
+
+    # ------- Static Methods 
+    
+    @staticmethod 
+    def broken_stick_expectation(n: int) -> NDArray[np.float64]: 
+        '''
+        Returns expected variance ratios for components 1..n by the formula:
+            E[p_j] = (1/n) * sum_{k=j..n} (1/k)
+        '''
+        if n <= 0: 
+            raise ValueError("n must be > 0")
+
+        j = np.arange(1, n + 1, dtype=np.float64)
+        summations = np.cumsum(1.0 / j[::-1])[::-1]
+        return (summations / float(n)).astype(np.float64, copy=False)
 
     # ------- Private Helpers 
 
@@ -525,23 +570,87 @@ class Encoder:
         elif pair_mode == "absdiff": 
             return np.abs(a - b) 
         elif pair_mode == "concat_absdiff": 
-            np.concatenate([a, b, np.abs(a - b)])
-        raise ValueError(f"Unknown pair mode: {pair_mode}")
+            return np.concatenate([a, b, np.abs(a - b)])
 
-    # ------- Static Methods 
-    
-    @staticmethod 
-    def broken_stick_expectation(n: int) -> NDArray[np.float64]: 
-        '''
-        Returns expected variance ratios for components 1..n by the formula:
-            E[p_j] = (1/n) * sum_{k=j..n} (1/k)
-        '''
-        if n <= 0: 
-            raise ValueError("n must be > 0")
+    def _pca_components_by_variance(
+        self, 
+        pca: Any, 
+        threshold: float = 0.95 
+    ) -> tuple[NDArray[np.float64], int]: 
 
-        j = np.arange(1, n + 1, dtype=np.float64)
-        summations = np.cumsum(1.0 / j[::-1])[::-1]
-        return (summations / float(n)).astype(np.float64, copy=False)
+        '''
+        Returns PCA scores truncated to the minimum components needed to explain some threshold 
+        of variance 
+
+        Caller Provides: 
+            prefit PCA (w/ attr explained_variance_ratio_)
+            threshold of cumulative variance ratio to retain
+
+        We return: 
+            truncated scores in shape (n_samples, k)
+            k retained scores 
+        '''
+
+        if not hasattr(pca, "explained_variance_ratio_"): 
+            raise AttributeError("PCA object must have explained_variance_ratio_")
+        if self.scores_ is None:
+            raise AttributeError("self.scores_ cannot be none")
+
+        if self.scores_.ndim != 2: 
+            raise ValueError(f"scores must be 2d, got shape {self.scores_.shape}")
+
+        evr = np.asarray(pca.explained_variance_ratio_, dtype=np.float64)
+        cumsum = np.cumsum(evr)
+
+        k = int(np.searchsorted(cumsum, threshold) + 1) 
+        k = min(k, self.scores_.shape[1])
+
+        return self.scores_[:, :k].astype(np.float64, copy=False), k
+
+    def _kpca_components_by_lambda(
+        self, 
+        kpca: Any, 
+        threshold: float = 0.95 
+    ) -> tuple[NDArray[np.float64], int]: 
+
+        '''
+        Returns PCA scores truncated to the minimum components needed to explain some threshold 
+        of variance 
+
+        Caller Provides: 
+            prefit KernelPCA (w/ attr eigenvalues_ or lambdas_)
+            threshold of cumulative normalized lambdas to retain
+
+        We return: 
+            truncated scores in shape (n_samples, k)
+            k retained scores 
+        '''
+
+        if hasattr(kpca, "eigenvalues_"):
+            lambdas = np.asarray(kpca.eigenvalues_, dtype=np.float64)
+        elif hasattr(kpca, "lambdas_"):
+            lambdas = np.asarray(kpca.lambdas_, dtype=np.float64)
+        else: 
+            raise AttributeError("KernelPCA must have eigenvalues_ or lambdas_")
+
+        if self.scores_ is None:
+            raise AttributeError("self.scores_ cannot be none")
+
+        if self.scores_.ndim != 2: 
+            raise ValueError(f"scores must be 2d, got shape {self.scores_.shape}")
+
+        total = lambdas.sum() 
+        if total <= 0: 
+            raise ValueError("Eigenvalues sum to <= 0, cannot compute ratio")
+
+        ratios = lambdas / total 
+        cumsum = np.cumsum(ratios)
+
+        k = int(np.searchsorted(cumsum, threshold) + 1) 
+        k = min(k, self.scores_.shape[1])
+
+        return self.scores_[:, :k].astype(np.float64, copy=False), k 
+
 
 def main():
     
@@ -607,6 +716,9 @@ def main():
     ) 
     plt.close(fig)
 
+    pca_path = project_path("data", "climate_pca_contrastive.mat")
+    pca_compact, _ = encoder.get_reduced_pca_scores()
+
     encoder.fit_pca(
         pca_class=KernelPCA,
         kernel="rbf",
@@ -633,6 +745,17 @@ def main():
         bbox_inches="tight"
     )
     plt.close(fig)
+
+    # Save Raw Climate Representation 
+    out_path = project_path("data", "climate_norepr_contrastive.mat")
+    encoder.save_as_constrastive(encoder.X, out_path)
+
+    # Save PCA and KernelPCA Representations 
+    kpca_path = project_path("data", "climate_kpca_contrastive.mat")
+    kpca_compact, _ = encoder.get_reduced_pca_scores()
+
+    encoder.save_as_constrastive(pca_compact, pca_path)
+    encoder.save_as_constrastive(kpca_compact, kpca_path)
 
 
 if __name__ == "__main__":
