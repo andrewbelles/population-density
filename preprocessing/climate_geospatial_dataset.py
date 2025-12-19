@@ -19,7 +19,14 @@ from scipy.io import savemat
 class ClimateGeospatial: 
     MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
     
-    def __init__(self, climate_dir: str, geography_dir: str, variables: List[str], groups: Dict[str, List[str]]): 
+    def __init__(
+        self, 
+        climate_dir: str, 
+        geography_dir: str, 
+        variables: List[str], 
+        groups: Dict[str, List[str]]
+    ): 
+    
         self.variables  = set(variables)
         self.groups     = groups 
         if not self._validate_groups_cover_variables(): 
@@ -46,7 +53,11 @@ class ClimateGeospatial:
         total = sum(len(v) for v in self.groups.values())
         return total == len(union)
 
-    def _load_geometries(self, geography_dir: str) -> pd.DataFrame: 
+    def _load_geometries(
+        self, 
+        geography_dir: str
+    ) -> pd.DataFrame: 
+        
         gaz_path = os.path.join(geography_dir, "2020_Gaz_counties_national.txt")
         df = pd.read_csv(gaz_path, sep="\t", dtype={"GEOID": str})
         df.columns = df.columns.str.strip() 
@@ -68,7 +79,11 @@ class ClimateGeospatial:
         geo = geo.dropna(subset=["INTPTLAT", "INTPTLONG"]).drop_duplicates(subset=["FIPS"])
         return geo.reset_index(drop=True)
 
-    def _load_climate(self, climate_dir: str) -> Optional[pd.DataFrame]: 
+    def _load_climate(
+        self, 
+        climate_dir: str
+    ) -> Optional[pd.DataFrame]: 
+    
         clim_files = self._get_climate_files(climate_dir)  
 
         tables: List[pd.DataFrame] = []
@@ -87,7 +102,11 @@ class ClimateGeospatial:
             features = features.merge(df, on="FIPS", how="inner")
         return features
 
-    def _get_climate_files(self, dir: str) -> Dict[str, str]:
+    def _get_climate_files(
+        self, 
+        dir: str
+    ) -> Dict[str, str]:
+        
         climate_files: Dict[str, str] = {}
         
         for var in sorted(self.variables): 
@@ -99,7 +118,12 @@ class ClimateGeospatial:
 
         return climate_files 
 
-    def _load_single_climate_feature(self, filepath: str, var: str) -> Optional[pd.DataFrame]: 
+    def _load_single_climate_feature(
+        self, 
+        filepath: str, 
+        var: str
+    ) -> Optional[pd.DataFrame]: 
+        
         df = pd.read_csv(filepath, dtype={"fips": str})
         df.columns = df.columns.str.strip().str.lower()
 
@@ -125,7 +149,10 @@ class ClimateGeospatial:
             raise TypeError("aggregation of monthly data failed type check")
         return agg.rename(columns={m: f"{var}_{m}" for m in self.MONTHS}) 
 
-    def _clean_data(self, df: pd.DataFrame) -> Optional[pd.DataFrame]: 
+    def _clean_data(
+        self, 
+        df: pd.DataFrame
+    ) -> Optional[pd.DataFrame]: 
 
         climate_cols = [f"{var}_{m}" for var in sorted(self.variables) for m in self.MONTHS]
         required     = {"FIPS", "INTPTLAT", "INTPTLONG", *climate_cols}
@@ -153,7 +180,10 @@ class ClimateGeospatial:
 
         return out 
 
-    def save(self, export_path: str): 
+    def save(
+        self, 
+        export_path: str
+    ): 
         if self.dataset is None: 
             raise ValueError("dataset is None") 
         if not isinstance(self.dataset, pd.DataFrame): 

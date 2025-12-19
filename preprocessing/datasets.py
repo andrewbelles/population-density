@@ -8,16 +8,15 @@
 
 import argparse 
 import numpy as np 
-import pandas as pd 
 
 from sklearn.decomposition import PCA, KernelPCA 
 from sklearn.metrics import pairwise_distances 
 
-from support.helpers import (
-    load_climate_and_geospatial_unsupervised, 
+from support.helpers import project_path
+
+from preprocessing.loaders import (
     load_climate_population, 
     UnsupervisedDatasetDict, 
-    project_path 
 )
 
 from preprocessing.encodings import Encoder 

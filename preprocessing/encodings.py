@@ -10,10 +10,13 @@ import numpy as np
 import matplotlib.pyplot as plt 
 
 from support.helpers import (
-    UnsupervisedDatasetDict, 
-    load_climate_and_geospatial_unsupervised, 
     project_path,
     _as_tuple_str
+)
+
+from preprocessing.loaders import (
+    UnsupervisedDatasetDict, 
+    load_climate_and_geospatial_unsupervised, 
 )
 
 from dataclasses import dataclass 
@@ -750,9 +753,6 @@ def main():
     ) 
     plt.close(fig)
 
-    pca_path = project_path("data", "climate_pca_contrastive.mat")
-    pca_compact, _ = encoder.get_reduced_pca_scores()
-
     encoder.fit_pca(
         pca_class=KernelPCA,
         kernel="rbf",
@@ -779,17 +779,6 @@ def main():
         bbox_inches="tight"
     )
     plt.close(fig)
-
-    # Save Raw Climate Representation 
-    out_path = project_path("data", "climate_norepr_contrastive.mat")
-    encoder.save_as_constrastive(encoder.X, out_path)
-
-    # Save PCA and KernelPCA Representations 
-    kpca_path = project_path("data", "climate_kpca_contrastive.mat")
-    kpca_compact, _ = encoder.get_reduced_pca_scores()
-
-    encoder.save_as_constrastive(pca_compact, pca_path)
-    encoder.save_as_constrastive(kpca_compact, kpca_path)
 
 
 if __name__ == "__main__":

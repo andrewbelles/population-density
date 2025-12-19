@@ -28,6 +28,13 @@ from models.estimators import (
 
 import support.helpers as h
 
+from preprocessing.loaders import (
+    load_climate_geospatial,
+    load_geospatial_climate, 
+    load_climate_population, 
+    load_compact_dataset,
+)
+
 
 def run_geospatial_from_climate_regression():
 
@@ -35,7 +42,7 @@ def run_geospatial_from_climate_regression():
 
     filepath = h.project_path("data", "climate_geospatial.mat")
 
-    loader = lambda fp: h.load_climate_geospatial(
+    loader = lambda fp: load_climate_geospatial(
         fp, target="all", groups=["degree_days", "palmer_indices"]
     )
 
@@ -65,7 +72,7 @@ def run_climate_from_geospatial_regression():
 
     filepath = h.project_path("data", "climate_geospatial.mat")
 
-    loader = lambda fp: h.load_geospatial_climate(
+    loader = lambda fp: load_geospatial_climate(
         fp, target="all", groups=["lat", "lon"]
     )
 
@@ -96,7 +103,7 @@ def run_contrastive_raw_climate_representation():
 
     filepath = h.project_path("data", "climate_norepr_contrastive.mat")
 
-    loader = h.load_compact_dataset 
+    loader = load_compact_dataset 
 
     task = TaskSpec("classification", metrics=("accuracy", "f1", "roc_auc"))
 
@@ -130,7 +137,7 @@ def run_contrastive_pca_compact_climate_representation():
 
     filepath = h.project_path("data", "climate_pca_contrastive.mat")
 
-    loader = h.load_compact_dataset 
+    loader = load_compact_dataset 
 
     task = TaskSpec("classification", metrics=("accuracy", "f1", "roc_auc"))
 
@@ -164,7 +171,7 @@ def run_contrastive_kernel_pca_compact_climate_representation():
 
     filepath = h.project_path("data", "climate_kpca_contrastive.mat")
 
-    loader = h.load_compact_dataset 
+    loader = load_compact_dataset 
 
     task = TaskSpec("classification", metrics=("accuracy", "f1", "roc_auc"))
 
@@ -198,7 +205,7 @@ def run_climate_to_population():
 
     filepath = h.project_path("data", "climate_population.mat")
 
-    loader = lambda fp: h.load_climate_population(
+    loader = lambda fp: load_climate_population(
         filepath=fp, 
         decade=2020, 
         groups=["climate"]
@@ -231,7 +238,7 @@ def run_pca_climate_to_population():
 
     filepath = h.project_path("data", "climate_population_pca_supervised.mat")
 
-    loader = lambda fp: h.load_compact_dataset(filepath=fp)
+    loader = lambda fp: load_compact_dataset(filepath=fp)
 
     models = {
         "Linear": make_linear(),
@@ -259,7 +266,7 @@ def run_kpca_climate_to_population():
 
     filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
 
-    loader = lambda fp: h.load_compact_dataset(filepath=fp)
+    loader = lambda fp: load_compact_dataset(filepath=fp)
 
     models = {
         "Linear": make_linear(),

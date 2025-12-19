@@ -34,6 +34,8 @@ from sklearn.metrics import (
 
 import support.helpers as h 
 
+from preprocessing.loaders import DatasetLoader
+
 # ---------------------------------------------------------
 # Task Specification 
 # --------------------------------------------------------- 
@@ -236,7 +238,7 @@ class CrossValidator:
         self, 
         *, 
         filepath: str, 
-        loader: h.DatasetLoader, 
+        loader: DatasetLoader, 
         task: TaskSpec = REGRESSION, 
         scale_X: bool = True, 
         scale_y: bool = True 
@@ -402,7 +404,7 @@ class CrossValidator:
 
 def cross_validate_regression(
     filepath: str, 
-    loader: h.DatasetLoader,
+    loader: DatasetLoader,
     models: Mapping[str, h.ModelFactory], 
     *, 
     n_splits: int = 5, 
@@ -416,7 +418,7 @@ def cross_validate_regression(
 
 def cross_validate_classification(
     filepath: str, 
-    loader: h.DatasetLoader,
+    loader: DatasetLoader,
     models: Mapping[str, h.ModelFactory], 
     *, 
     n_splits: int = 5, 
