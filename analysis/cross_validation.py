@@ -60,7 +60,7 @@ class TaskSpec:
         self, 
         y_true: NDArray, 
         y_pred: NDArray, 
-y_prob: NDArray | None = None
+        y_prob: NDArray | None = None
     ) -> dict[str, float]: 
 
         results = {}
@@ -184,6 +184,7 @@ class ScaledEstimator(BaseEstimator):
             self._X_scaler = StandardScaler() 
             X = self._X_scaler.fit_transform(X)
 
+
         if self.scale_y and y.ndim <= 2: 
             self._y_scaler = StandardScaler() 
             y_shape = y.shape 
@@ -246,7 +247,7 @@ class CrossValidator:
         self.filepath = filepath 
         self.task     = task 
         self.scale_X  = scale_X 
-        self.scale_y  = scale_y 
+        self.scale_y  = False if task.task_type == "classification" else scale_y 
 
         data   = loader(filepath)
         self.X = np.asarray(data["features"], dtype=np.float64) 

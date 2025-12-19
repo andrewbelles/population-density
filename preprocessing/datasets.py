@@ -37,7 +37,7 @@ def run_climate_population_pca_supervised():
         "feature_names": feature_names,
         "coords": np.zeros((dataset["features"].shape[0],2), dtype=np.float64), 
         "coord_names": np.empty((0,), dtype="U1"), 
-        "sample_ids": np.empty((0,), dtype="U1"),
+        "sample_ids": dataset["sample_ids"],
         "groups": {}
     })
 
@@ -49,7 +49,12 @@ def run_climate_population_pca_supervised():
     print(f"PCA: {encoder.n_features} -> {k} components")
 
     out_path = project_path("data", "climate_population_pca_supervised.mat")
-    encoder.save_as_compact_supervised(out_path, pca_compact, dataset["labels"])
+    encoder.save_as_compact_supervised(
+        out_path, 
+        pca_compact, 
+        dataset["labels"], 
+        dataset["sample_ids"],
+    )
 
     print(f"Saved: {out_path}")
 
@@ -95,7 +100,12 @@ def run_climate_population_kpca_supervised():
     print(f"KernelPCA: {encoder.n_features} -> {k} components (gamma={gamma:.6f})")
 
     out_path = project_path("data", "climate_population_kpca_supervised.mat")
-    encoder.save_as_compact_supervised(out_path, kpca_compact, dataset["labels"])
+    encoder.save_as_compact_supervised(
+        out_path, 
+        kpca_compact, 
+        dataset["labels"],
+        dataset["sample_ids"]
+    )
 
     print(f"Saved: {out_path}")
 

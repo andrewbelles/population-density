@@ -32,9 +32,8 @@ import pandas as pd
 
 from scipy.io import savemat 
 
-from helpers import NCLIMDIV_RE, project_path
+from support.helpers import NCLIMDIV_RE, project_path
 from typing import List, Dict, Optional 
-
 
 class PopulationDensity: 
     '''

@@ -101,7 +101,6 @@ def run_climate_from_geospatial_regression():
     return results, summary 
 
 
-
 def run_contrastive_raw_climate_representation(): 
 
     print("CLASSIFICATION: Contrastive Pairs on Raw Climate Representation")
@@ -236,7 +235,6 @@ def run_climate_to_population():
     return results, summary 
 
 
-
 def run_pca_climate_to_population(): 
 
     print("REGRESSION: Climate (PCA) -> Population (decade: 2020)")
@@ -299,7 +297,7 @@ def run_raw_similarity_classification():
 
 def run_pca_similarity_classification(): 
     
-    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors"
+    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
           " in terms of similary population density (PCA repr, 2020).")
 
     compact_filepath = h.project_path("data", "climate_population_pca_supervised.mat")
@@ -328,14 +326,14 @@ def run_pca_similarity_classification():
 
     models = {
         "Logistic": make_logistic(C=1.0),
-        "XGBoost": make_xgb_classifier(n_estimators=100)
+        "XGBoost": make_xgb_classifier(n_estimators=400)
     }
 
     config = CVConfig(
         n_splits=5, 
         n_repeats=REPEATS, 
         stratify=True, 
-        random_state=0 
+        random_state=0,
     )
 
     results = abl.run(specs=specs, models=models, config=config, task=CLASSIFICATION)
@@ -346,7 +344,7 @@ def run_pca_similarity_classification():
 
 def run_kpca_similarity_classification(): 
 
-    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors"
+    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
           " in terms of similary population density (KernelPCA repr, 2020).")
 
     compact_filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
@@ -375,7 +373,7 @@ def run_kpca_similarity_classification():
 
     models = {
         "Logistic": make_logistic(C=1.0),
-        "XGBoost": make_xgb_classifier(n_estimators=100)
+        "XGBoost": make_xgb_classifier(n_estimators=400)
     }
 
     config = CVConfig(
@@ -386,6 +384,11 @@ def run_kpca_similarity_classification():
     )
 
     results = abl.run(specs=specs, models=models, config=config, task=CLASSIFICATION)
+    if "error" in results.columns: 
+        errors = results[results["error"].notna()]["error"].unique()
+        if len(errors) > 0: 
+            print(f"\n encountered errors:\n{errors}\n")
+
     summary = abl.interpret(results)
 
     return results, summary 

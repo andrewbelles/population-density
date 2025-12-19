@@ -517,7 +517,8 @@ class Encoder:
         self, 
         out_path: str,  
         X_repr: NDArray[np.float64], 
-        y: NDArray[np.float64] 
+        y: NDArray[np.float64],
+        sample_ids: NDArray[np.str_]
     ): 
 
         X = np.asarray(X_repr, dtype=np.float64)
@@ -544,7 +545,7 @@ class Encoder:
         savemat(
             out_path, 
             {
-                "fips_codes": self.sample_ids, 
+                "fips_codes": sample_ids, 
                 "features": X, 
                 "labels": y
             }

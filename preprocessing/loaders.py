@@ -20,7 +20,7 @@ from support.helpers import (
 )
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
-MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
 # ---------------------------------------------------------
 # Supervised Loader Interface 
@@ -30,6 +30,7 @@ class DatasetDict(TypedDict):
     features: NDArray[np.float64]
     labels: NDArray[np.float64]
     coords: NDArray[np.float64]
+    sample_ids: NDArray[np.str_]
 
 DatasetLoader = Callable[[str], DatasetDict]
 
@@ -67,7 +68,12 @@ def load_climate_population(filepath: str, *, decade: int, groups: List[str]) ->
     else: 
         raise ValueError(f"{groups} does not contain any valid group labels for data")
 
-    return {"features": features, "labels": y, "coords": coords}
+    if "fips_codes" in data: 
+        fips = _mat_str_vector(data["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError(f"dataset failed to extract fips codes")
+        
+    return {"features": features, "labels": y, "coords": coords, "sample_ids": fips}
 
 
 def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) -> DatasetDict: 
@@ -94,6 +100,11 @@ def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) ->
     if c.ndim != 2 or c.shape[1] != 2:
         raise ValueError(f"expected labels to have shape (n, 2); got {c.shape}")
 
+    if "fips_codes" in data: 
+        fips = _mat_str_vector(data["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError(f"expected fips_codes in climate_geospatial dataset")
+
     if target == "all":
         y = c.astype(np.float64, copy=False)
     else:
@@ -110,7 +121,7 @@ def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) ->
         raise ValueError(f"{groups} does not contain any valid group labels for data")
 
     features = np.hstack(features) if len(features) > 1 else features[0] 
-    return {"features": features, "labels": y, "coords": c}
+    return {"features": features, "labels": y, "coords": c, "sample_ids": fips}
 
 
 def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat", "lon"]) -> DatasetDict: 
@@ -120,6 +131,11 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
     if coords.ndim != 2 or coords.shape[1] != 2: 
         raise ValueError(f"expected shape (n,2): got {coords.shape}")
     
+    if "fips_codes" in data: 
+        fips = _mat_str_vector(data["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError(f"expected fips_codes in climate_geospatial dataset")
+
     names = _mat_str_vector(data["feature_names"])
     F = np.asarray(data["features"], dtype=np.float64)
 
@@ -128,14 +144,14 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
 
     if target == "all": 
         y = F.astype(np.float64, copy=False) 
-        return {"features": X, "labels": y, "coords": coords}
+        return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
 
     cols = [f"{target}_{m}" for m in MONTHS]
     col_idx = [int(np.where(names == c)[0][0]) for c in cols]
     Ym = F[:, col_idx] 
     y = np.column_stack([Ym, Ym.mean(axis=1)])
 
-    return {"features": X, "labels": y, "coords": coords}
+    return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
 
 
 def load_residual_dataset(residual_filepath: str, original_filepath: str) -> DatasetDict: 
@@ -174,7 +190,12 @@ def load_residual_dataset(residual_filepath: str, original_filepath: str) -> Dat
 
     coords = np.asarray(base["coords"], dtype=np.float64)
 
-    return {"features": X, "labels": y, "coords": coords}
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": coords, 
+        "sample_ids": base["sample_ids"]
+    }
 
 
 def load_compact_dataset(filepath: str) -> DatasetDict: 
@@ -195,7 +216,19 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
         raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({y.shape[0]})")
 
     coords = np.zeros((y.shape[0], 2), dtype=np.float64) # Satisfy DatasetDict 
-    return {"features": X, "labels": y, "coords": coords}
+
+    if "fips_codes" in mat: 
+        fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError(f"expected fips_codes in climate_geospatial dataset")
+
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": coords,
+        "sample_ids": fips 
+    }
+
 
 def load_neighbors_by_density(
     compact_filepath: str, 
@@ -251,6 +284,9 @@ def load_neighbors_by_density(
     else: 
         raise KeyError(f"Could not extract fips_codes from dataset")
 
+    if len(embed_fips) == 0: 
+        raise ValueError("No fips_codes in embedding dataset")
+
     common_fips, pop_idx, embed_idx = np.intersect1d(
         pop_fips, embed_fips, return_indices=True 
     )
@@ -300,13 +336,14 @@ def load_neighbors_by_density(
     pair_rows = np.concatenate([pos_rows, neg_rows[neg_sample_idx]])
     pair_cols = np.concatenate([pos_cols, neg_cols[neg_sample_idx]])
 
-    X = np.column_stack([mat[pair_rows, pair_cols] for mat in feature_matrices], dtype=np.float64)
+    X = np.column_stack([mat[pair_rows, pair_cols] for mat in feature_matrices])
     y = np.concatenate([np.ones(n_pos), np.zeros(n_neg)])
 
     return {
         "features": X, 
         "labels": y, 
-        "coords": np.zeros_like(pop_coords[pop_idx])
+        "coords": np.zeros_like(pop_coords[pop_idx]), 
+        "sample_ids": common_fips
     }
 
 

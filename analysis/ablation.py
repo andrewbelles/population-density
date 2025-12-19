@@ -83,7 +83,6 @@ class FeatureAblation:
         out: list[pd.DataFrame] = []
 
         for spec in specs: 
-            print(f"> Running ablation: {spec.name}")
             loader = self.loader_factory(spec.tags)
 
             cv = CrossValidator(
