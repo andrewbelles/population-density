@@ -218,11 +218,9 @@ def create_model_factory(model_type: str, params: dict) -> ModelFactory:
     else: 
         raise ValueError(f"unsupported model type: {model_type}")
 
-
 # ---------------------------------------------------------
 # Supervised Loader Interface 
 # ---------------------------------------------------------
-
 
 class DatasetDict(TypedDict): 
     features: NDArray[np.float64]
@@ -230,6 +228,7 @@ class DatasetDict(TypedDict):
     coords: NDArray[np.float64]
 
 DatasetLoader = Callable[[str], DatasetDict]
+
 
 def load_climate_population(filepath: str, *, decade: int, groups: List[str]) -> DatasetDict: 
     
@@ -265,6 +264,7 @@ def load_climate_population(filepath: str, *, decade: int, groups: List[str]) ->
         raise ValueError(f"{groups} does not contain any valid group labels for data")
 
     return {"features": features, "labels": y, "coords": coords}
+
 
 def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) -> DatasetDict: 
     '''
@@ -333,6 +333,7 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
 
     return {"features": X, "labels": y, "coords": coords}
 
+
 def load_residual_dataset(residual_filepath: str, original_filepath: str) -> DatasetDict: 
 
     residual_data = loadmat(residual_filepath)
@@ -371,7 +372,13 @@ def load_residual_dataset(residual_filepath: str, original_filepath: str) -> Dat
 
     return {"features": X, "labels": y, "coords": coords}
 
-def load_contrastive_dataset(filepath: str) -> DatasetDict: 
+
+def load_compact_dataset(filepath: str) -> DatasetDict: 
+
+    '''
+    Note, also loads 
+    '''
+    
     mat = loadmat(filepath)
 
     if "features" not in mat or "labels" not in mat: 

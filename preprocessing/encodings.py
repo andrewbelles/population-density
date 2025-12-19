@@ -509,6 +509,40 @@ class Encoder:
             }
         )
 
+    @staticmethod 
+    def save_as_compact_supervised(
+        out_path: str,  
+        X_repr: NDArray[np.float64], 
+        y: NDArray[np.float64] 
+    ): 
+
+        X = np.asarray(X_repr, dtype=np.float64)
+        if X.ndim != 2: 
+            raise ValueError(f"X must be 2d, got {X.shape}")
+        if not np.isfinite(X).all(): 
+            raise ValueError("X contains NaN/Inf")
+        
+        if y.ndim == 2 and y.shape[1] == 1: 
+            y = y.ravel() 
+        elif y.ndim == 1: 
+            y = y.reshape(-1, 1)
+        elif y.ndim != 2: 
+            raise ValueError(f"labels must be 1d/2d got shape {y.shape}")
+
+        n = y.shape[0]
+
+        if X.shape[0] != n and X.shape[1] == n: 
+            y = y.T 
+
+        if X.shape[0] != n: 
+            raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({n})")
+
+        savemat(
+            out_path, 
+            {"features": X, "labels": y}
+        )
+        
+
     # ------- Static Methods 
     
     @staticmethod 
