@@ -43,7 +43,7 @@ from analysis.ablation import AblationSpec, FeatureAblation
 
 def run_geospatial_from_climate_regression():
 
-    print("REGRESSION: Climate -> Coordinates")
+    print("\nREGRESSION: Climate -> Coordinates")
 
     filepath = h.project_path("data", "climate_geospatial.mat")
 
@@ -73,7 +73,7 @@ def run_geospatial_from_climate_regression():
 
 def run_climate_from_geospatial_regression(): 
 
-    print("REGRESSION: Coordinates -> Climate")
+    print("\nREGRESSION: Coordinates -> Climate")
 
     filepath = h.project_path("data", "climate_geospatial.mat")
 
@@ -103,7 +103,7 @@ def run_climate_from_geospatial_regression():
 
 def run_contrastive_raw_climate_representation(): 
 
-    print("CLASSIFICATION: Contrastive Pairs on Raw Climate Representation")
+    print("\nCLASSIFICATION: Contrastive Pairs on Raw Climate Representation")
 
     filepath = h.project_path("data", "climate_norepr_contrastive.mat")
 
@@ -137,7 +137,7 @@ def run_contrastive_raw_climate_representation():
 
 def run_contrastive_pca_compact_climate_representation(): 
 
-    print("CLASSIFICATION: Contrastive Pairs on Compact PCA Representation (95% threshold)")
+    print("\nCLASSIFICATION: Contrastive Pairs on Compact PCA Representation (95% threshold)")
 
     filepath = h.project_path("data", "climate_pca_contrastive.mat")
 
@@ -171,7 +171,7 @@ def run_contrastive_pca_compact_climate_representation():
 
 def run_contrastive_kernel_pca_compact_climate_representation(): 
 
-    print("CLASSIFICATION: Contrastive Pairs on Compact KernelPCA Representation (95% threshold)")
+    print("\nCLASSIFICATION: Contrastive Pairs on Compact KernelPCA Representation (95% threshold)")
 
     filepath = h.project_path("data", "climate_kpca_contrastive.mat")
 
@@ -205,7 +205,7 @@ def run_contrastive_kernel_pca_compact_climate_representation():
 
 def run_climate_to_population(): 
 
-    print("REGRESSION: Climate (Raw) -> Population (decade: 2020)")
+    print("\nREGRESSION: Climate (Raw) -> Population (decade: 2020)")
 
     filepath = h.project_path("data", "climate_population.mat")
 
@@ -237,7 +237,7 @@ def run_climate_to_population():
 
 def run_pca_climate_to_population(): 
 
-    print("REGRESSION: Climate (PCA) -> Population (decade: 2020)")
+    print("\nREGRESSION: Climate (PCA) -> Population (decade: 2020)")
 
     filepath = h.project_path("data", "climate_population_pca_supervised.mat")
 
@@ -265,7 +265,7 @@ def run_pca_climate_to_population():
 
 def run_kpca_climate_to_population(): 
 
-    print("REGRESSION: Climate (KernelPCA) -> Population (decade: 2020)")
+    print("\nREGRESSION: Climate (KernelPCA) -> Population (decade: 2020)")
 
     filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
 
@@ -297,7 +297,7 @@ def run_raw_similarity_classification():
 
 def run_pca_similarity_classification(): 
     
-    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
+    print("\nCLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
           " in terms of similary population density (PCA repr, 2020).")
 
     compact_filepath = h.project_path("data", "climate_population_pca_supervised.mat")
@@ -309,8 +309,9 @@ def run_pca_similarity_classification():
             label_filepath=fp, 
             groups=tags, 
             decade=2020, 
-            pos_threshold=0.10, 
-            neg_ratio=3.0 
+            pos_threshold=0.20, 
+            neg_threshold=0.65,
+            neg_ratio=1.0 
         )
 
     abl = FeatureAblation(
@@ -326,7 +327,54 @@ def run_pca_similarity_classification():
 
     models = {
         "Logistic": make_logistic(C=1.0),
-        "XGBoost": make_xgb_classifier(n_estimators=400)
+        "XGBoost": make_xgb_classifier(n_estimators=600)
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0,
+    )
+
+    results = abl.run(specs=specs, models=models, config=config, task=CLASSIFICATION)
+    summary = abl.interpret(results)
+
+    return results, summary 
+
+def run_null_test_pca_similarity(): 
+
+    print("\nCLASSIFICATION: (From PCA repr, 2020) Determine if embeddings carry real signal")
+
+    compact_filepath = h.project_path("data", "climate_population_pca_supervised.mat")
+    census_filepath  = h.project_path("data", "climate_population.mat")
+
+    def proxy_loader_factory(tags: list[str]) -> DatasetLoader:
+        return lambda fp: load_neighbors_by_density(
+            compact_filepath=compact_filepath, 
+            label_filepath=fp, 
+            groups=tags, 
+            decade=2020, 
+            pos_threshold=0.20, 
+            neg_threshold=0.65,
+            neg_ratio=1.0,
+            null_test=True
+        )
+
+    abl = FeatureAblation(
+        filepath=census_filepath, 
+        loader_factory=proxy_loader_factory
+    )
+
+    specs = [
+        AblationSpec(name="Baseline (Geography Only)", tags=["coords"]), 
+        AblationSpec(name="Embeddings", tags=["embeddings"]),
+        AblationSpec(name="Hybrid (Geo + Embeddings)", tags=["coords", "embeddings"])
+    ]
+
+    models = {
+        "Logistic": make_logistic(C=1.0),
+        "XGBoost": make_xgb_classifier(n_estimators=600)
     }
 
     config = CVConfig(
@@ -344,7 +392,7 @@ def run_pca_similarity_classification():
 
 def run_kpca_similarity_classification(): 
 
-    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
+    print("\nCLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
           " in terms of similary population density (KernelPCA repr, 2020).")
 
     compact_filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
@@ -356,8 +404,9 @@ def run_kpca_similarity_classification():
             label_filepath=fp, 
             groups=tags, 
             decade=2020, 
-            pos_threshold=0.10, 
-            neg_ratio=3.0 
+            pos_threshold=0.20, 
+            neg_threshold=0.65,
+            neg_ratio=1.0 
         )
 
     abl = FeatureAblation(
@@ -368,12 +417,12 @@ def run_kpca_similarity_classification():
     specs = [
         AblationSpec(name="Baseline (Geography Only)", tags=["coords"]), 
         AblationSpec(name="Embeddings", tags=["embeddings"]),
-        AblationSpec(name="Hybrid (Geo + Embeddings)", tags=["coords", "embeddings"])
+        AblationSpec(name="Hybrid (Geo + Embeddings)", tags=["embeddings", "coords"])
     ]
 
     models = {
         "Logistic": make_logistic(C=1.0),
-        "XGBoost": make_xgb_classifier(n_estimators=400)
+        "XGBoost": make_xgb_classifier(n_estimators=600)
     }
 
     config = CVConfig(
@@ -384,11 +433,6 @@ def run_kpca_similarity_classification():
     )
 
     results = abl.run(specs=specs, models=models, config=config, task=CLASSIFICATION)
-    if "error" in results.columns: 
-        errors = results[results["error"].notna()]["error"].unique()
-        if len(errors) > 0: 
-            print(f"\n encountered errors:\n{errors}\n")
-
     summary = abl.interpret(results)
 
     return results, summary 
@@ -418,6 +462,7 @@ def main():
         "pca_to_pop", 
         "kpca_to_pop", 
         "pca_similarity",
+        "null_test_pca_similarity",
         "kpca_similarity", 
         "all"
     ] 
@@ -432,6 +477,7 @@ def main():
         "pca_to_pop": run_pca_climate_to_population, 
         "kpca_to_pop": run_kpca_climate_to_population,
         "pca_similarity": run_pca_similarity_classification, 
+        "null_test_pca_similarity": run_null_test_pca_similarity, 
         "kpca_similarity": run_kpca_similarity_classification, 
         "all": run_all 
     }

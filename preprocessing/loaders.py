@@ -27,9 +27,9 @@ MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", 
 # ---------------------------------------------------------
 
 class DatasetDict(TypedDict): 
-    features: NDArray[np.float64]
-    labels: NDArray[np.float64]
-    coords: NDArray[np.float64]
+    features: NDArray
+    labels: NDArray
+    coords: NDArray
     sample_ids: NDArray[np.str_]
 
 DatasetLoader = Callable[[str], DatasetDict]
@@ -239,6 +239,8 @@ def load_neighbors_by_density(
     pos_threshold: float = 0.1,      # neighbors if density within 10% 
     neg_threshold: float = 0.5,      # not neighbors if density differs by > .5 
     neg_ratio: float = 3.0,          # 3x negative to every positive 
+    local_radius_km: float = 200.0, 
+    null_test: bool = False, 
     random_state: int = 0
 ) -> DatasetDict: 
     
@@ -276,6 +278,10 @@ def load_neighbors_by_density(
     # Get embeddings
 
     embed_data = loadmat(compact_filepath)
+    if "weights" in embed_data: 
+        weights = np.asarray(embed_data["weights"], dtype=np.float64).reshape(-1)
+    else: 
+        raise ValueError("No weights in dataset for metric")
 
     embeds = np.asarray(embed_data["features"], dtype=np.float64) 
 
@@ -283,9 +289,6 @@ def load_neighbors_by_density(
         embed_fips = _mat_str_vector(embed_data["fips_codes"]) 
     else: 
         raise KeyError(f"Could not extract fips_codes from dataset")
-
-    if len(embed_fips) == 0: 
-        raise ValueError("No fips_codes in embedding dataset")
 
     common_fips, pop_idx, embed_idx = np.intersect1d(
         pop_fips, embed_fips, return_indices=True 
@@ -298,51 +301,65 @@ def load_neighbors_by_density(
     coords    = pop_coords[pop_idx]
     X_emb     = embeds[embed_idx]
 
+    # Destroy link between Location X and Climate X to try and collapse classifier
+    # Used to determine if embedding carries any real signal  
+    if null_test: 
+        rng   = np.random.default_rng(random_state)
+        X_emb = X_emb[rng.permutation(X_emb.shape[0])] 
+
     D_geo = _haversine_dist(coords, coords)
 
-    feature_matrices = []
+    # Scale by variance then by norm  
+    X_emb_scaled = X_emb * np.sqrt(weights)
+    X_emb_norm = X_emb_scaled / (np.linalg.norm(X_emb_scaled, axis=1, keepdims=True) + 1e-12)
+    D_emb = np.linalg.norm(X_emb_norm[:, None, :] - X_emb_norm[None, :, :], axis=-1)
 
-    if "coords" in groups: 
-        feature_matrices.append(D_geo)
-
-    if "embeddings" in groups: 
-        # Get euclidean distance between embeddings 
-        D_emb = np.linalg.norm(X_emb[:, None, :] - X_emb[None, :, :], axis=-1)
-        feature_matrices.append(D_emb)
-
-    if not feature_matrices: 
-        raise ValueError("groups must contain 'coords' or 'embeddings'")
+    mask_locality = (D_geo < local_radius_km) & (D_geo > 0)
 
     # Get similarity as log-difference 
     y_log = np.log1p(y_density)
     diff_density = np.abs(y_log - y_log.T)
 
-    geo_mask = D_geo < 500.0 # lt 500 km threshold to restrict geographic connection 
-
-    pos_mask = (diff_density < pos_threshold) & geo_mask & (D_geo > 0) 
-    neg_mask = (diff_density > neg_threshold)
+    pos_mask = (diff_density < pos_threshold) & mask_locality 
+    neg_mask = (diff_density > neg_threshold) & mask_locality
 
     rng = np.random.default_rng(random_state)
 
-    pos_rows, pos_cols = np.where(pos_mask)
-    neg_rows, neg_cols = np.where(neg_mask)
+    pos_rows, pos_cols = np.where(np.triu(pos_mask, k=1))
+    neg_rows, neg_cols = np.where(np.triu(neg_mask, k=1))
 
     n_pos = len(pos_rows) 
     n_neg = int(n_pos * neg_ratio)
     n_neg = min(n_neg, len(neg_rows))
 
-    neg_sample_idx = rng.choice(len(neg_rows), size=n_neg, replace=False)
+    if n_neg > 0: 
+        neg_sample_idx = rng.choice(len(neg_rows), size=n_neg, replace=False)
+        pair_rows = np.concatenate([pos_rows, neg_rows[neg_sample_idx]])
+        pair_cols = np.concatenate([pos_cols, neg_cols[neg_sample_idx]])
+    else: 
+        pair_rows = pos_rows 
+        pair_cols = pos_cols 
+        n_neg = 0 
 
-    pair_rows = np.concatenate([pos_rows, neg_rows[neg_sample_idx]])
-    pair_cols = np.concatenate([pos_cols, neg_cols[neg_sample_idx]])
+    feature_matrices = []
+    if "coords" in groups: 
+        f_geo = D_geo[pair_rows, pair_cols].reshape(-1, 1)
+        feature_matrices.append(f_geo)
+    
+    if "embeddings" in groups: 
+        f_emb = D_emb[pair_rows, pair_cols].reshape(-1, 1)
+        feature_matrices.append(f_emb)
 
-    X = np.column_stack([mat[pair_rows, pair_cols] for mat in feature_matrices])
-    y = np.concatenate([np.ones(n_pos), np.zeros(n_neg)])
+    if not feature_matrices: 
+        raise ValueError("groups must contain 'coords' or 'embeddings'")
+
+    X = np.hstack(feature_matrices).astype(np.float64, copy=False)
+    y = np.concatenate([np.ones(n_pos), np.zeros(n_neg)]).astype(np.int64, copy=False)
 
     return {
         "features": X, 
         "labels": y, 
-        "coords": np.zeros_like(pop_coords[pop_idx]), 
+        "coords": coords[pair_rows],
         "sample_ids": common_fips
     }
 

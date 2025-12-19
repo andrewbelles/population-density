@@ -49,12 +49,16 @@ def run_climate_population_pca_supervised():
     print(f"PCA: {encoder.n_features} -> {k} components")
 
     out_path = project_path("data", "climate_population_pca_supervised.mat")
-    encoder.save_as_compact_supervised(
+    compact_dataset = encoder.save_as_compact_supervised(
         out_path, 
         pca_compact, 
         dataset["labels"], 
         dataset["sample_ids"],
     )
+
+    # Ensure has weights field
+    if len(compact_dataset["weights"]) == 0:
+        raise RuntimeError("Failure. Expected field 'weights' to be not None")
 
     print(f"Saved: {out_path}")
 
@@ -100,12 +104,16 @@ def run_climate_population_kpca_supervised():
     print(f"KernelPCA: {encoder.n_features} -> {k} components (gamma={gamma:.6f})")
 
     out_path = project_path("data", "climate_population_kpca_supervised.mat")
-    encoder.save_as_compact_supervised(
+    compact_dataset = encoder.save_as_compact_supervised(
         out_path, 
         kpca_compact, 
         dataset["labels"],
         dataset["sample_ids"]
     )
+
+    # Ensure has weights field
+    if len(compact_dataset["weights"]) == 0:
+        raise RuntimeError("Failure. Expected field 'weights' to be not None")
 
     print(f"Saved: {out_path}")
 

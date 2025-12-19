@@ -3,8 +3,6 @@
 # ablation.py  Andrew Belles  Dec 13th, 2025 
 # 
 
-import argparse 
-
 from pathlib import Path
 from analysis.cross_validation import (
     REGRESSION, 
@@ -14,13 +12,11 @@ from analysis.cross_validation import (
 )
 
 from support.helpers import (
-    project_path, 
     ModelFactory,
     ModelInterface, 
 )
 
 from preprocessing.loaders import (
-    load_climate_geospatial,
     DatasetLoader
 )
 
@@ -31,12 +27,6 @@ import matplotlib.pyplot as plt
 
 from dataclasses import dataclass 
 from typing import Callable, Mapping, Optional, Any
-
-from models.estimators import (
-    make_linear, 
-    make_rf_regressor, 
-    make_xgb_regressor
-)
 
 DatasetLoader = DatasetLoader
 LoaderFactory = Callable[[list[str]], DatasetLoader]
@@ -214,6 +204,7 @@ class FeatureAblation:
             "win_r2_gt0": "$P(R^2 > 0)$", 
             "win_accuracy": "WinAcc"
         }
+
         wins_long["metric"] = wins_long["metric"].map(
             lambda x: metric_map.get(x, x)
         )
@@ -260,74 +251,37 @@ class FeatureAblation:
 
         summary = self._summary_by_group(df)
 
+        metrics = sorted(list(set(
+            c.replace("_mean", "")
+            for c in summary.columns 
+            if c.endswith("_mean")
+            and not c.startswith("win_")
+            and not c.startswith("baseline_")
+            and c != "fold_mean"
+        )))
+
         for model_name, model_rows in summary.groupby("model", sort=False):
-            print(f"\n> {model_name}")
+            print(f"\n> Model: {model_name}")
+
+            # Build Header
+            header_parts = [f"{'Ablation':<30}"]
+            for m in metrics: 
+                header_parts.append(f"{m.upper():<25}")
+            
+            print(" ".join(header_parts))
+            print("=" * (30 + 25 * len(metrics)))
+
+            # Build Rows
             for _, row in model_rows.iterrows():
-                group = row["ablation"]
-                parts = [f"    {group}:"]
-
-                # Add metrics
-                for m in ("r2", "rmse", "accuracy"):
-                    if f"{m}_mean" in row:
-                        mean = row[f"{m}_mean"]
-                        ci_lo = row.get(f"{m}_ci_lower", np.nan)
-                        ci_hi = row.get(f"{m}_ci_upper", np.nan)
-                        parts.append(f"{m}={mean:+.3f}[{ci_lo:+.3f},{ci_hi:+.3f}]")
-
-                # Add win rates
-                for w in ("win_rmse", "win_r2", "win_r2_gt0", "win_accuracy"):
-                    if f"{w}_mean" in row:
-                        val = row[f"{w}_mean"]
-                        parts.append(f"{w}={100*val:.1f}%")
-
+                parts = [f"{row['ablation']:<25}"]
+                
+                for m in metrics: 
+                    mean  = row.get(f"{m}_mean", np.nan)
+                    ci_lo = row.get(f"{m}_ci_lower", np.nan) 
+                    ci_hi = row.get(f"{m}_ci_upper", np.nan) 
+                    
+                    parts.append(f"{mean:+.4f} [{ci_lo:+.4f}, {ci_hi:+.4f}]".ljust(25))
+                
                 print(" ".join(parts))
 
         return summary
-
-
-def main(): 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--repeats", type=int, default=10)
-    parser.add_argument("--splits", type=int, default=5)
-    parser.add_argument("--target", type=str, default="lat")
-    args = parser.parse_args()
-
-    filepath = project_path("data", "climate_geospatial.mat")
-
-    def loader_factory(tags: list[str]) -> DatasetLoader: 
-        return lambda fp: load_climate_geospatial(
-            fp, target=args.target, groups=tags 
-        )
-
-    abl   = FeatureAblation(filepath=filepath, loader_factory=loader_factory)
-    specs = FeatureAblation.leave_one_out(
-        all_tags=["degree_days", "palmer_indices"]
-    ) 
-
-    models = {
-        "XGBoost": make_xgb_regressor(n_estimators=400, early_stopping_rounds=200), 
-        "Linear": make_linear(),
-        "RandomForest": make_rf_regressor(n_estimators=400)
-    }
-
-    config = CVConfig(
-        n_splits=args.splits,
-        n_repeats=args.repeats, 
-        random_state=0 
-    )
-
-    df = abl.run(
-        specs=specs, 
-        models=models, 
-        config=config, 
-        task=REGRESSION
-    )
-
-    results_path = project_path("data", "models", "raw", "feature_ablation_results.csv")
-    _ = abl.compile(df, results_path)
-    _ = abl.interpret(abl.merged)
-
-    FeatureAblation.plot(abl.merged, project_path("analysis", "images", args.target))
-
-if __name__ == "__main__":
-    main() 

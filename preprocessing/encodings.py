@@ -234,7 +234,7 @@ class Encoder:
             int(self.explained_variance_ratio().shape[0])
         )
 
-    def kpca_lambdas(self) -> NDArray[np.float64]: 
+    def kpca_lambdas(self) -> NDArray[np.float64] | None: 
         m = self._require_pca() 
         
         if hasattr(m, "eigenvalues_"):
@@ -242,7 +242,7 @@ class Encoder:
         elif hasattr(m, "lambdas_"):
             vals = getattr(m, "lambdas_")
         else: 
-            raise TypeError("current model is not KernelPCA-like")
+            return None 
         
         return np.asarray(vals, dtype=np.float64)
 
@@ -419,7 +419,7 @@ class Encoder:
         noise_std: float = 0.05, 
         mask_prob: float = 0.05,
         seed: int = 0, 
-    ): 
+    ) -> dict[str, NDArray]: 
 
         '''
         Writes a contrastive pair dataset to "output_path" with keys: 
@@ -502,16 +502,16 @@ class Encoder:
         features = np.vstack(feats).astype(np.float64, copy=False) 
         y = np.asarray(labels, dtype=np.int64).reshape(-1, 1)
 
-        savemat(
-            out_path,
-            {
-                "fips_codes": self.sample_ids,
-                "features": features, 
-                "labels": y, 
-                "pair_i": np.asarray(pair_i, dtype=np.int32), 
-                "pair_j": np.asarray(pair_j, dtype=np.int32), 
-            }
-        )
+        data = {
+            "fips_codes": self.sample_ids,
+            "features": features, 
+            "labels": y, 
+            "pair_i": np.asarray(pair_i, dtype=np.int32), 
+            "pair_j": np.asarray(pair_j, dtype=np.int32), 
+        }
+
+        savemat(out_path, data)
+        return data 
 
     def save_as_compact_supervised(
         self, 
@@ -519,7 +519,7 @@ class Encoder:
         X_repr: NDArray[np.float64], 
         y: NDArray[np.float64],
         sample_ids: NDArray[np.str_]
-    ): 
+    ) -> dict[str, NDArray]: 
 
         X = np.asarray(X_repr, dtype=np.float64)
         if X.ndim != 2: 
@@ -542,14 +542,29 @@ class Encoder:
         if X.shape[0] != n: 
             raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({n})")
 
-        savemat(
-            out_path, 
-            {
-                "fips_codes": sample_ids, 
-                "features": X, 
-                "labels": y
-            }
-        )
+        try: 
+            pca = self._require_pca()
+            
+            if hasattr(pca, "explained_variance_ratio_"):
+                weights = pca.explained_variance_ratio_
+            elif hasattr(pca, "eigenvalues_"):
+                weights = pca.eigenvalues_ / pca.eigenvalues_.sum()
+            elif hasattr(pca, "lambdas_"):
+                weights = pca.lambdas_ / pca.lambdas_.sum()
+            else: 
+                weights = np.zeros((0,), dtype=np.float64)
+        except RuntimeError: 
+            weights = np.zeros((0,), dtype=np.float64)
+
+        data = {
+            "fips_codes": sample_ids, 
+            "features": X, 
+            "labels": y,
+            "weights": weights[:X.shape[1]]
+        }
+
+        savemat(out_path, data)
+        return data
         
 
     # ------- Static Methods 
