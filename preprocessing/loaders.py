@@ -238,7 +238,7 @@ def load_neighbors_by_density(
         raise ValueError(f"Decade {decade} not found in {label_filepath}")
 
     decade_struct = pop_data["decades"][f"decade_{decade}"][0, 0]
-    pop_labels = np.asarray(decade_struct["labels"], dtype=np.float64).reshape(-1)
+    pop_labels = np.asarray(decade_struct["labels"][0, 0], dtype=np.float64).reshape(-1)
 
     # Get embeddings
 

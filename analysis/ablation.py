@@ -15,9 +15,12 @@ from analysis.cross_validation import (
 
 from support.helpers import (
     project_path, 
-    load_climate_geospatial,
     ModelFactory,
     ModelInterface, 
+)
+
+from preprocessing.loaders import (
+    load_climate_geospatial,
     DatasetLoader
 )
 

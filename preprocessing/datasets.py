@@ -22,7 +22,7 @@ from preprocessing.loaders import (
 from preprocessing.encodings import Encoder 
 
 
-def test_climate_population_pca_supervised(): 
+def run_climate_population_pca_supervised(): 
 
     print("DATASET: Climate -> Population PCA supervised dataset (2020)")
 
@@ -49,14 +49,14 @@ def test_climate_population_pca_supervised():
     print(f"PCA: {encoder.n_features} -> {k} components")
 
     out_path = project_path("data", "climate_population_pca_supervised.mat")
-    Encoder.save_as_compact_supervised(out_path, pca_compact, dataset["labels"])
+    encoder.save_as_compact_supervised(out_path, pca_compact, dataset["labels"])
 
     print(f"Saved: {out_path}")
 
     return encoder, pca_compact
 
 
-def test_climate_population_kpca_supervised(): 
+def run_climate_population_kpca_supervised(): 
 
     print("DATASET: Climate -> Population KernelPCA supervised dataset (2020)")
 
@@ -95,7 +95,7 @@ def test_climate_population_kpca_supervised():
     print(f"KernelPCA: {encoder.n_features} -> {k} components (gamma={gamma:.6f})")
 
     out_path = project_path("data", "climate_population_kpca_supervised.mat")
-    Encoder.save_as_compact_supervised(out_path, kpca_compact, dataset["labels"])
+    encoder.save_as_compact_supervised(out_path, kpca_compact, dataset["labels"])
 
     print(f"Saved: {out_path}")
 
@@ -104,8 +104,8 @@ def test_climate_population_kpca_supervised():
 
 def run_all(): 
 
-    test_climate_population_pca_supervised()
-    test_climate_population_kpca_supervised()
+    run_climate_population_pca_supervised()
+    run_climate_population_kpca_supervised()
 
 
 def main(): 
@@ -121,8 +121,8 @@ def main():
     args = parser.parse_args()
 
     task_dict = {
-        "climate_pop_pca": test_climate_population_pca_supervised, 
-        "climate_pop_kpca": test_climate_population_kpca_supervised, 
+        "climate_pop_pca": run_climate_population_pca_supervised, 
+        "climate_pop_kpca": run_climate_population_kpca_supervised, 
         "all": run_all 
     }
 

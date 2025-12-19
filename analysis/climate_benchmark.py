@@ -11,6 +11,7 @@ REPEATS=5
 import argparse 
 
 from analysis.cross_validation import (
+    CLASSIFICATION,
     CrossValidator, 
     CVConfig, 
     TaskSpec,
@@ -29,11 +30,15 @@ from models.estimators import (
 import support.helpers as h
 
 from preprocessing.loaders import (
+    DatasetLoader,
     load_climate_geospatial,
     load_geospatial_climate, 
     load_climate_population, 
     load_compact_dataset,
+    load_neighbors_by_density 
 )
+
+from analysis.ablation import AblationSpec, FeatureAblation
 
 
 def run_geospatial_from_climate_regression():
@@ -288,6 +293,104 @@ def run_kpca_climate_to_population():
     return results, summary 
 
 
+def run_raw_similarity_classification(): 
+    pass 
+
+
+def run_pca_similarity_classification(): 
+    
+    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors"
+          " in terms of similary population density (PCA repr, 2020).")
+
+    compact_filepath = h.project_path("data", "climate_population_pca_supervised.mat")
+    census_filepath  = h.project_path("data", "climate_population.mat")
+
+    def proxy_loader_factory(tags: list[str]) -> DatasetLoader:
+        return lambda fp: load_neighbors_by_density(
+            compact_filepath=compact_filepath, 
+            label_filepath=fp, 
+            groups=tags, 
+            decade=2020, 
+            pos_threshold=0.10, 
+            neg_ratio=3.0 
+        )
+
+    abl = FeatureAblation(
+        filepath=census_filepath, 
+        loader_factory=proxy_loader_factory
+    )
+
+    specs = [
+        AblationSpec(name="Baseline (Geography Only)", tags=["coords"]), 
+        AblationSpec(name="Embeddings", tags=["embeddings"]),
+        AblationSpec(name="Hybrid (Geo + Embeddings)", tags=["coords", "embeddings"])
+    ]
+
+    models = {
+        "Logistic": make_logistic(C=1.0),
+        "XGBoost": make_xgb_classifier(n_estimators=100)
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    results = abl.run(specs=specs, models=models, config=config, task=CLASSIFICATION)
+    summary = abl.interpret(results)
+
+    return results, summary 
+
+
+def run_kpca_similarity_classification(): 
+
+    print("CLASSIFICATION: Train classifier to separate neighbors from non-neighbors"
+          " in terms of similary population density (KernelPCA repr, 2020).")
+
+    compact_filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
+    census_filepath  = h.project_path("data", "climate_population.mat")
+
+    def proxy_loader_factory(tags: list[str]) -> DatasetLoader:
+        return lambda fp: load_neighbors_by_density(
+            compact_filepath=compact_filepath, 
+            label_filepath=fp, 
+            groups=tags, 
+            decade=2020, 
+            pos_threshold=0.10, 
+            neg_ratio=3.0 
+        )
+
+    abl = FeatureAblation(
+        filepath=census_filepath, 
+        loader_factory=proxy_loader_factory
+    )
+
+    specs = [
+        AblationSpec(name="Baseline (Geography Only)", tags=["coords"]), 
+        AblationSpec(name="Embeddings", tags=["embeddings"]),
+        AblationSpec(name="Hybrid (Geo + Embeddings)", tags=["coords", "embeddings"])
+    ]
+
+    models = {
+        "Logistic": make_logistic(C=1.0),
+        "XGBoost": make_xgb_classifier(n_estimators=100)
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    results = abl.run(specs=specs, models=models, config=config, task=CLASSIFICATION)
+    summary = abl.interpret(results)
+
+    return results, summary 
+
+
 def run_all(): 
 
     run_climate_from_geospatial_regression() 
@@ -311,6 +414,8 @@ def main():
         "climate_to_pop", 
         "pca_to_pop", 
         "kpca_to_pop", 
+        "pca_similarity",
+        "kpca_similarity", 
         "all"
     ] 
 
@@ -323,6 +428,8 @@ def main():
         "climate_to_pop": run_climate_to_population, 
         "pca_to_pop": run_pca_climate_to_population, 
         "kpca_to_pop": run_kpca_climate_to_population,
+        "pca_similarity": run_pca_similarity_classification, 
+        "kpca_similarity": run_kpca_similarity_classification, 
         "all": run_all 
     }
 
