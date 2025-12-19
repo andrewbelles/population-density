@@ -15,7 +15,8 @@ from typing import Callable, Sequence, TypedDict, List
 from scipy.io import loadmat
 
 from support.helpers import (
-    _mat_str_vector
+    _mat_str_vector,
+    _haversine_dist
 )
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
@@ -196,8 +197,118 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
     coords = np.zeros((y.shape[0], 2), dtype=np.float64) # Satisfy DatasetDict 
     return {"features": X, "labels": y, "coords": coords}
 
-def load_neighbors_by_density(filepath: str, threshold: float = 0.1): 
-    pass 
+def load_neighbors_by_density(
+    compact_filepath: str, 
+    label_filepath: str,
+    *, 
+    decade: int = 2020, 
+    groups: List[str] = ["coords", "embeddings"], 
+    pos_threshold: float = 0.1,      # neighbors if density within 10% 
+    neg_threshold: float = 0.5,      # not neighbors if density differs by > .5 
+    neg_ratio: float = 3.0,          # 3x negative to every positive 
+    random_state: int = 0
+) -> DatasetDict: 
+    
+    '''
+    Loads population data, county centroids (lat, lon), and a climate representation. 
+
+    Then automatically labels counties as neighbors for a classification problem.
+
+    Caller Provides: 
+        decade: decade to classify on 
+        groups: groups to include in feature set 
+        pos_threshold: threshold for counties to be neighbors (1)
+        neg_threshold: threshold for counties to not be neighbors (0) 
+        neg_ratio: class ratio in terms of 0 class 
+        random_state: seed for reproducibility 
+
+    We return: 
+        Dataset dict with features derived from groups. Labels derived from 
+        features. Coords are empty to avoid accidental leakage by caller 
+    '''
+
+    # Get coords & pop density 
+
+    pop_data = loadmat(label_filepath)
+
+    pop_fips   = _mat_str_vector(pop_data["fips_codes"])
+    pop_coords = np.asarray(pop_data["coords"], dtype=np.float64)
+
+    if f"decade_{decade}" not in pop_data["decades"].dtype.names: 
+        raise ValueError(f"Decade {decade} not found in {label_filepath}")
+
+    decade_struct = pop_data["decades"][f"decade_{decade}"][0, 0]
+    pop_labels = np.asarray(decade_struct["labels"], dtype=np.float64).reshape(-1)
+
+    # Get embeddings
+
+    embed_data = loadmat(compact_filepath)
+
+    embeds = np.asarray(embed_data["features"], dtype=np.float64) 
+
+    if "fips_codes" in embed_data: 
+        embed_fips = _mat_str_vector(embed_data["fips_codes"]) 
+    else: 
+        raise KeyError(f"Could not extract fips_codes from dataset")
+
+    common_fips, pop_idx, embed_idx = np.intersect1d(
+        pop_fips, embed_fips, return_indices=True 
+    )
+
+    if len(common_fips) == 0: 
+        raise ValueError("No overlapping fips_codes found between datasets")
+
+    y_density = pop_labels[pop_idx].reshape(-1, 1)
+    coords    = pop_coords[pop_idx]
+    X_emb     = embeds[embed_idx]
+
+    D_geo = _haversine_dist(coords, coords)
+
+    feature_matrices = []
+
+    if "coords" in groups: 
+        feature_matrices.append(D_geo)
+
+    if "embeddings" in groups: 
+        # Get euclidean distance between embeddings 
+        D_emb = np.linalg.norm(X_emb[:, None, :] - X_emb[None, :, :], axis=-1)
+        feature_matrices.append(D_emb)
+
+    if not feature_matrices: 
+        raise ValueError("groups must contain 'coords' or 'embeddings'")
+
+    # Get similarity as log-difference 
+    y_log = np.log1p(y_density)
+    diff_density = np.abs(y_log - y_log.T)
+
+    geo_mask = D_geo < 500.0 # lt 500 km threshold to restrict geographic connection 
+
+    pos_mask = (diff_density < pos_threshold) & geo_mask & (D_geo > 0) 
+    neg_mask = (diff_density > neg_threshold)
+
+    rng = np.random.default_rng(random_state)
+
+    pos_rows, pos_cols = np.where(pos_mask)
+    neg_rows, neg_cols = np.where(neg_mask)
+
+    n_pos = len(pos_rows) 
+    n_neg = int(n_pos * neg_ratio)
+    n_neg = min(n_neg, len(neg_rows))
+
+    neg_sample_idx = rng.choice(len(neg_rows), size=n_neg, replace=False)
+
+    pair_rows = np.concatenate([pos_rows, neg_rows[neg_sample_idx]])
+    pair_cols = np.concatenate([pos_cols, neg_cols[neg_sample_idx]])
+
+    X = np.column_stack([mat[pair_rows, pair_cols] for mat in feature_matrices], dtype=np.float64)
+    y = np.concatenate([np.ones(n_pos), np.zeros(n_neg)])
+
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": np.zeros_like(pop_coords[pop_idx])
+    }
+
 
 # ---------------------------------------------------------
 # Unsupervised Loader Interface 

@@ -406,8 +406,8 @@ class Encoder:
 
     # ------- Save Constrastive Dataset 
 
-    @staticmethod 
     def save_as_constrastive(
+        self, 
         X_repr: NDArray[np.float64],
         out_path: str | None = None,
         *,
@@ -505,6 +505,7 @@ class Encoder:
         savemat(
             out_path,
             {
+                "fips_codes": self.sample_ids,
                 "features": features, 
                 "labels": y, 
                 "pair_i": np.asarray(pair_i, dtype=np.int32), 
@@ -512,8 +513,8 @@ class Encoder:
             }
         )
 
-    @staticmethod 
     def save_as_compact_supervised(
+        self, 
         out_path: str,  
         X_repr: NDArray[np.float64], 
         y: NDArray[np.float64] 
@@ -542,7 +543,11 @@ class Encoder:
 
         savemat(
             out_path, 
-            {"features": X, "labels": y}
+            {
+                "fips_codes": self.sample_ids, 
+                "features": X, 
+                "labels": y
+            }
         )
         
 

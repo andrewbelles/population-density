@@ -177,3 +177,33 @@ class ModelInterface(ABC):
         raise NotImplementedError
 
 ModelFactory = Callable[[], ModelInterface]
+
+
+# ---------------------------------------------------------
+# Distance Functions (vectorized) 
+# ---------------------------------------------------------
+
+
+def _haversine_dist(coords_a: NDArray, coords_b: NDArray) -> NDArray: 
+    '''
+    Haversine distance between two sets of coordinates (lat, lon) in degrees 
+    
+    Caller Provides: 
+        Set of (lat, lon) for two counties 
+
+    We return: 
+        Distance in KM 
+    '''
+
+    R = 6371.0 
+
+    rad_a = np.radians(coords_a)
+    rad_b = np.radians(coords_b)
+
+    dlat = rad_a[:, 0:1] - rad_b[:, 0:1].T 
+    dlon = rad_a[:, 1:2] - rad_b[:, 1:2].T 
+
+    a = np.sin(dlat / 2)**2 + (np.cos(rad_a[:, 0:1]) * np.cos(rad_b[:, 0:1].T) * np.sin(dlon / 2)**2) 
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+
+    return R * c
