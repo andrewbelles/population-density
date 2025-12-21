@@ -304,7 +304,7 @@ class CrossValidator:
 
                 try: 
                     model.fit(X_train, y_train, coords_train)
-                    y_pred = model.predict(X_test, coords)
+                    y_pred = model.predict(X_test, coords_test)
 
                     y_prob = None 
                     if self.task.task_type == "classification":

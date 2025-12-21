@@ -210,7 +210,7 @@ class _GCNRegressorNet(nn.Module):
         dims = (in_dim,) + tuple(hidden_dims) + (1,)
         self.convs = nn.ModuleList([GCNConv(dims[i], dims[i + 1]) for i in range(len(dims) - 1)])
 
-    def foward(
+    def forward(
         self, 
         x, 
         edge_index, 
