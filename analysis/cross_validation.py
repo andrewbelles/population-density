@@ -205,7 +205,7 @@ class ScaledEstimator(BaseEstimator):
             X = self._X_scaler.transform(X)
         
         try: 
-            y_pred = self.estimator.predict(X, coords)
+            y_pred = self.estimator.predict(X, coords=coords)
         except TypeError: 
             y_pred = self.estimator.predict(X)
 
@@ -228,7 +228,7 @@ class ScaledEstimator(BaseEstimator):
 
         if hasattr(self.estimator, "predict_proba"): 
             try: 
-                return self.estimator.predict_proba(X, coords) 
+                return self.estimator.predict_proba(X, coords=coords) 
             except TypeError: 
                 return self.estimator.predict_proba(X) 
         raise AttributeError("Estimator does not support predict_proba")
@@ -309,7 +309,7 @@ class CrossValidator:
                     y_prob = None 
                     if self.task.task_type == "classification":
                         try:
-                            proba  = model.predict_proba(X_test) 
+                            proba  = model.predict_proba(X_test, coords_test) 
                             y_prob = proba[:, 1] if proba.ndim == 2 else proba 
                         except (AttributeError, IndexError): 
                             pass 
