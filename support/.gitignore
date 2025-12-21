@@ -1,6 +1,6 @@
 *.env 
 *.so
 *.o 
-test_geospatial_graph 
+test_graph 
 
 __pycache__/ 

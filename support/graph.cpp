@@ -72,6 +72,7 @@ Graph::Graph(node_index_t num_nodes,
              std::vector<weight_t> weights, 
              bool directed) 
   : num_nodes_(num_nodes),
+    num_edges_(static_cast<edge_index_t>(indices.size())),
     directed_(directed), 
     index_ptr_(std::move(index_ptr)), 
     indices_(std::move(indices)), 
