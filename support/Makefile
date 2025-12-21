@@ -13,16 +13,14 @@ INCLUDES 		= -I.
 
 BUILD_DIR		= build 
 
-SUPPORT_SRC = support.cpp
-GEO_SRC 		= geospatial_graph.cpp 
-TEST_SRC 		= test_geospatial_graph.cpp 
-HEADERS  		= geospatial_graph.hpp support.hpp 
+GEO_SRC 		= graph.cpp 
+TEST_SRC 		= test_graph.cpp 
+HEADERS  		= graph.hpp unittest.h  
 
-SUPPORT_OBJ = support.o 
-GEO_OBJ     = geospatial_graph.o 
-TEST_OBJ    = test_geospatial_graph.o 
+GEO_OBJ     = graph.o 
+TEST_OBJ    = test_graph.o 
 
-TEST_TARGET = test_geospatial_graph
+TEST_TARGET = test_graph
 
 ### 
 # 
@@ -35,10 +33,7 @@ all: $(TEST_TARGET) python install-python
 $(BUILD_DIR): 
 	mkdir -p $(BUILD_DIR)
 
-$(SUPPORT_OBJ): $(SUPPORT_SRC) support.hpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $(SUPPORT_SRC) -o $(SUPPORT_OBJ)
-
-$(GEO_OBJ): $(GEO_SRC) geospatial_graph.hpp support.hpp | $(BUILD_DIR)
+$(GEO_OBJ): $(GEO_SRC) graph.hpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $(GEO_SRC) -o $(GEO_OBJ)
 
 $(TEST_OBJ): $(TEST_SRC) $(HEADERS) | $(BUILD_DIR)
@@ -47,8 +42,8 @@ $(TEST_OBJ): $(TEST_SRC) $(HEADERS) | $(BUILD_DIR)
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
-$(TEST_TARGET): $(SUPPORT_OBJ) $(GEO_OBJ) $(TEST_OBJ)
-	$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -o $(TEST_TARGET) $(SUPPORT_OBJ) $(GEO_OBJ) $(TEST_OBJ)
+$(TEST_TARGET): $(GEO_OBJ) $(TEST_OBJ)
+	$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -o $(TEST_TARGET) $(GEO_OBJ) $(TEST_OBJ)
 
 debug: CXX += $(DEBUG_FLAG) 
 debug: $(MAIN_TARGET)
@@ -68,15 +63,15 @@ valgrind: $(TEST_TARGET)
 
 PYBIND11_INCLUDES  = $(shell python -m pybind11 --includes) 
 PYTHON_SUFFIX 		 = $(shell python3-config --extension-suffix)
-PYTHON_MODULE      = geospatial_graph_cpp$(PYTHON_SUFFIX) 
+PYTHON_MODULE      = graph_cpp$(PYTHON_SUFFIX) 
 
 PYTHON_BINDING_SRC = python_bindings.cpp 
 
 python: $(PYTHON_MODULE)
 
-$(PYTHON_MODULE): $(SUPPORT_OBJ) $(GEO_OBJ) $(PYTHON_BINDING_SRC) 
+$(PYTHON_MODULE): $(GEO_OBJ) $(PYTHON_BINDING_SRC) 
 	$(CXX) -O3 -Wall -shared -std=c++17 -fPIC $(PYBIND11_INCLUDES) \
-		$(shell python3-config --ldflags) $(PYTHON_BINDING_SRC) $(SUPPORT_OBJ) $(GEO_OBJ) -o $(PYTHON_MODULE)
+		$(shell python3-config --ldflags) $(PYTHON_BINDING_SRC) $(GEO_OBJ) -o $(PYTHON_MODULE)
 
 install-python: $(PYTHON_MODULE)
 	cp $(PYTHON_MODULE) ../models/ 

@@ -233,10 +233,10 @@ GraphBuilder::clear(void) noexcept
 
 /************ GraphBuilder::add_edge **********************/ 
 void 
-GraphBuilder::add_edge(const Edge& edge)
+GraphBuilder::add_edge(Edge edge)
 {
   can_add_edge(edge.src, edge.dst, edge.weight);
-  edges_.push_back(edge);
+  edges_.push_back(std::move(edge));
 }
 
 /************ GraphBuilder::add_edge **********************/ 
@@ -291,7 +291,7 @@ GraphBuilder::apply_reverse_edges(std::vector<Edge>& edges, const BuildOptions& 
   const size_t original = edges.size(); 
   edges.reserve(original * 2); 
   for (const auto& e : edges) {
-    edges.emplace_back(e); 
+    edges.push_back(Edge{e.dst, e.src, e.weight}); 
   }
 }
 
@@ -384,16 +384,16 @@ GraphBuilder::deduplicate_edges(std::vector<Edge>& edges, DuplicateEdgePolicy po
           merged.weight = edges[next - 1].weight; 
           break; 
         case DuplicateEdgePolicy::SUM: 
-          merged.weight = sum_weights(edges.begin() + read, edges.end() + next); 
+          merged.weight = sum_weights(edges.begin() + read, edges.begin() + next); 
           break; 
         case DuplicateEdgePolicy::MEAN:  
-          merged.weight = sum_weights(edges.begin() + read, edges.end() + next) / count; 
+          merged.weight = sum_weights(edges.begin() + read, edges.begin() + next) / count; 
           break; 
         case DuplicateEdgePolicy::MIN: 
-          merged.weight = min_weights(edges.begin() + read, edges.end() + next); 
+          merged.weight = min_weights(edges.begin() + read, edges.begin() + next); 
           break;  
         case DuplicateEdgePolicy::MAX: 
-          merged.weight = max_weights(edges.begin() + read, edges.end() + next);
+          merged.weight = max_weights(edges.begin() + read, edges.begin() + next);
           break; 
       }
     }

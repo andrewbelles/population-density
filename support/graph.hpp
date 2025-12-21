@@ -27,6 +27,10 @@ struct Edge {
   node_index_t dst{0}; 
   weight_t weight{1.0}; 
   
+  Edge() = default; 
+  Edge(node_index_t s, node_index_t d, weight_t w)
+    : src(s), dst(d), weight(w) {}
+
   // Lexigraphical ordering 
   bool operator<(const Edge& b) {
     if ( src != b.src ) {
@@ -97,14 +101,14 @@ private:
 
 class GraphBuilder {
 public: 
-  explicit GraphBuilder(node_index_t num_nodeds, BuildOptions options = {}); 
+  explicit GraphBuilder(node_index_t num_nodes, BuildOptions options = {}); 
 
   node_index_t num_nodes() const noexcept { return num_nodes_; }
   const BuildOptions& options() const noexcept { return options_; }
 
   void reserve_edges(std::size_t n); 
 
-  void add_edge(const Edge& edge); 
+  void add_edge(Edge edge); 
   void add_edge(node_index_t src, node_index_t dst, weight_t w = 1.0); 
   void add_edges(const std::vector<Edge>& edges); 
 
