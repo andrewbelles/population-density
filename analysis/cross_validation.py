@@ -142,7 +142,6 @@ class CVConfig:
             )
         
         # No repeats 
-
         if task.task_type == "classification" and self.stratify: 
             return StratifiedKFold(
                 n_splits=self.n_splits, 
@@ -172,7 +171,7 @@ class ScaledEstimator(BaseEstimator):
         self._X_scaler: StandardScaler | None = None 
         self._y_scaler: StandardScaler | None = None 
 
-    def fit(self, X, y): 
+    def fit(self, X, y, coords=None): 
 
         X = np.asarray(X, dtype=np.float64) 
         y = np.asarray(y, dtype=np.float64)
@@ -192,15 +191,23 @@ class ScaledEstimator(BaseEstimator):
             if len(y_shape) == 1: 
                 y = y.ravel() 
 
-        self.estimator.fit(X, y)
+
+        try:
+            self.estimator.fit(X, y, coords=coords)
+        except TypeError: 
+            self.estimator.fit(X, y) 
+
         return self 
 
-    def predict(self, X): 
+    def predict(self, X, coords=None): 
         X = np.asarray(X, dtype=np.float64)
         if self.scale_X and self._X_scaler is not None: 
             X = self._X_scaler.transform(X)
-
-        y_pred = self.estimator.predict(X)
+        
+        try: 
+            y_pred = self.estimator.predict(X, coords)
+        except TypeError: 
+            y_pred = self.estimator.predict(X)
 
         if self.scale_y and self._y_scaler is not None: 
             y_pred = np.asarray(y_pred, dtype=np.float64)
@@ -213,14 +220,17 @@ class ScaledEstimator(BaseEstimator):
 
         return y_pred 
 
-    def predict_proba(self, X): 
+    def predict_proba(self, X, coords=None): 
 
         X = np.asarray(X, dtype=np.float64)
         if self.scale_X and self._X_scaler is not None: 
             X = self._X_scaler.transform(X)
 
         if hasattr(self.estimator, "predict_proba"): 
-            return self.estimator.predict_proba(X) 
+            try: 
+                return self.estimator.predict_proba(X, coords) 
+            except TypeError: 
+                return self.estimator.predict_proba(X) 
         raise AttributeError("Estimator does not support predict_proba")
 
 # ---------------------------------------------------------
@@ -283,6 +293,7 @@ class CrossValidator:
             ): 
                 X_train, X_test = self.X[train_idx], self.X[test_idx]
                 y_train, y_test = self.y[train_idx], self.y[test_idx]
+                coords_train, coords_test = self.coords[train_idx], self.coords[test_idx]
 
                 base_model = make_model()
                 model      = ScaledEstimator(
@@ -292,8 +303,8 @@ class CrossValidator:
                 )
 
                 try: 
-                    model.fit(X_train, y_train)
-                    y_pred = model.predict(X_test)
+                    model.fit(X_train, y_train, coords_train)
+                    y_pred = model.predict(X_test, coords)
 
                     y_prob = None 
                     if self.task.task_type == "classification":

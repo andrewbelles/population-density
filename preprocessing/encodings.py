@@ -518,7 +518,7 @@ class Encoder:
         out_path: str,  
         X_repr: NDArray[np.float64], 
         y: NDArray[np.float64],
-        sample_ids: NDArray[np.str_]
+        sample_ids: NDArray[np.str_] 
     ) -> dict[str, NDArray]: 
 
         X = np.asarray(X_repr, dtype=np.float64)
@@ -556,9 +556,18 @@ class Encoder:
         except RuntimeError: 
             weights = np.zeros((0,), dtype=np.float64)
 
+        coords = np.asarray(self.coords, dtype=np.float64)
+        if coords.size == 0:
+            coords = np.zeros((n, 2), dtype=np.float64)
+        elif coords.ndim == 2 and coords.shape == (2, n):
+            coords = coords.T
+        elif coords.ndim != 2 or coords.shape != (n, 2):
+            coords = np.zeros((n, 2), dtype=np.float64)
+
         data = {
             "fips_codes": sample_ids, 
             "features": X, 
+            "coords": coords, 
             "labels": y,
             "weights": weights[:X.shape[1]]
         }

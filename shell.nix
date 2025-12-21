@@ -73,10 +73,16 @@ pkgs.mkShell {
     mkdir -p data/climate data/census data/geography 
 
     echo "[NIX-SHELL] Injecting pybind11 include path into .clangd"
-    PYBIND11_INC=$(python -c "import pybind11; print('-I' + pybind11.get_include())") 
-    echo "CompileFlags:" > .clangd  
-    echo "  Add:" >> .clangd 
-    echo "    - \"$PYBIND11_INC\"" >> .clangd 
-    echo "    - \"-I${pkgs.python312}/include/python3.14\"" >> .clangd 
-  '';
+    PYBIND11_INC=$(${pkgs.python312}/bin/python -c "import pybind11; print(pybind11.get_include())")
+    PYTHON_INC=$(${pkgs.python312}/bin/python -c "import sysconfig; print(sysconfig.get_paths()
+    ['include'])")
+
+    cat > .clangd <<EOF
+    CompileFlags:
+      Add:
+        - "-std=c++17"
+        - "-I$PYBIND11_INC"
+        - "-I$PYTHON_INC"
+    EOF
+    '';
 }

@@ -32,7 +32,7 @@ TEST(graph_builder_basic)
   BuildOptions opt; 
   opt.directed          = true; 
   opt.sort_by_dst       = true; 
-  opt.add_reverse_edges = true;
+  opt.add_reverse_edges = false;
   opt.allow_self_loops  = true; 
   opt.dedup = DuplicateEdgePolicy::SUM; 
 
@@ -70,8 +70,8 @@ TEST(graph_builder_basic)
   assert(weights.size() == 3); 
 
   assert(edges[0].first == 0 && edges[0].second == 1 && weights[0] == 1.0); 
-  assert(edges[1].first == 0 && edges[0].second == 2 && weights[1] == 2.0); 
-  assert(edges[2].first == 1 && edges[0].second == 2 && weights[2] == 3.0); 
+  assert(edges[1].first == 0 && edges[1].second == 2 && weights[1] == 2.0); 
+  assert(edges[2].first == 1 && edges[2].second == 2 && weights[2] == 3.0); 
 
   // sources should be aligned with prefix sum order 
   auto sources = graph.sources(); 
@@ -143,7 +143,7 @@ TEST(graph_reverse_edges_undirected)
 TEST(graph_deduplicate_sum)
 {
   BuildOptions opt; 
-  opt.directed          = false; 
+  opt.directed          = true; 
   opt.add_reverse_edges = false;
   opt.sort_by_dst       = true; 
   opt.dedup = DuplicateEdgePolicy::SUM; 
@@ -175,7 +175,7 @@ TEST(graph_validate_non_finite_weight)
     );
     (void)g; 
   } catch (const std::runtime_error&) {
-    threw = false; 
+    threw = true; 
   }
   assert(threw); 
 }

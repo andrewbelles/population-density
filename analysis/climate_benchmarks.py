@@ -19,6 +19,7 @@ from analysis.cross_validation import (
 )
 
 from models.estimators import (
+    make_gcn_regressor,
     make_linear,
     make_rf_regressor,
     make_rf_classifier,
@@ -54,7 +55,7 @@ def run_geospatial_from_climate_regression():
     models = {
         "Linear": make_linear(),
         "RandomForest": make_rf_regressor(max_depth=6), 
-        "XGBoost": make_xgb_regressor()
+        "XGBoost": make_xgb_regressor(),
     }
 
     config = CVConfig(
@@ -218,7 +219,8 @@ def run_climate_to_population():
     models = {
         "Linear": make_linear(),
         "RandomForest": make_rf_regressor(max_depth=6), 
-        "XGBoost": make_xgb_regressor()
+        "XGBoost": make_xgb_regressor(), 
+        "GraphNN": make_gcn_regressor(hidden_dims=(64,64))
     }
 
     config = CVConfig(
@@ -246,7 +248,8 @@ def run_pca_climate_to_population():
     models = {
         "Linear": make_linear(),
         "RandomForest": make_rf_regressor(max_depth=6), 
-        "XGBoost": make_xgb_regressor()
+        "XGBoost": make_xgb_regressor(),
+        "GraphNN": make_gcn_regressor(hidden_dims=(64,64))
     }
 
     config = CVConfig(
@@ -274,7 +277,8 @@ def run_kpca_climate_to_population():
     models = {
         "Linear": make_linear(),
         "RandomForest": make_rf_regressor(max_depth=6), 
-        "XGBoost": make_xgb_regressor()
+        "XGBoost": make_xgb_regressor(),
+        "GraphNN": make_gcn_regressor(hidden_dims=(64,64))
     }
 
     config = CVConfig(
@@ -310,8 +314,9 @@ def run_pca_similarity_classification():
             groups=tags, 
             decade=2020, 
             pos_threshold=0.20, 
-            neg_threshold=0.65,
-            neg_ratio=1.0 
+            neg_threshold=0.60,
+            neg_ratio=2.0,
+            local_radius_km=1000.0 
         )
 
     abl = FeatureAblation(
@@ -356,9 +361,10 @@ def run_null_test_pca_similarity():
             groups=tags, 
             decade=2020, 
             pos_threshold=0.20, 
-            neg_threshold=0.65,
-            neg_ratio=1.0,
-            null_test=True
+            neg_threshold=0.60,
+            neg_ratio=2.0,
+            null_test=True,
+            local_radius_km=1000.0
         )
 
     abl = FeatureAblation(
@@ -405,8 +411,9 @@ def run_kpca_similarity_classification():
             groups=tags, 
             decade=2020, 
             pos_threshold=0.20, 
-            neg_threshold=0.65,
-            neg_ratio=1.0 
+            neg_threshold=0.60,
+            neg_ratio=2.0,
+            local_radius_km=1000.0
         )
 
     abl = FeatureAblation(
@@ -490,7 +497,6 @@ def main():
     if args.list: 
         print(f"Available tasks: {task_dict.keys()}")
         return 
-
 
     tasks_to_run = args.task if isinstance(args.task, list) else [args.task]
 

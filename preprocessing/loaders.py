@@ -215,7 +215,14 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
     if X.shape[0] != y.shape[0]: 
         raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({y.shape[0]})")
 
-    coords = np.zeros((y.shape[0], 2), dtype=np.float64) # Satisfy DatasetDict 
+    if "coords" in mat:
+        coords = np.asarray(mat["coords"], dtype=np.float64)
+        if coords.ndim == 2 and coords.shape == (2, y.shape[0]):
+            coords = coords.T
+        if coords.ndim != 2 or coords.shape != (y.shape[0], 2):
+            raise ValueError(f"expected coords shape (n,2), got {coords.shape}")
+    else:
+        coords = np.zeros((y.shape[0], 2), dtype=np.float64)
 
     if "fips_codes" in mat: 
         fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
