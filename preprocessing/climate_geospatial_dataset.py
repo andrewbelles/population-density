@@ -233,8 +233,8 @@ def main():
     Harness for Class to Create Dataset
     '''
 
-    climate_dir   = h.project_path("data", "climate", "nclimdiv_county", "parsed")
-    geography_dir = h.project_path("data", "geography") 
+    climate_dir   = h.project_path("data","climate", "nclimdiv_county", "parsed")
+    geography_dir = h.project_path("data","geography") 
     
     variables = ["hddc", "cddc", "pdsi", "pmdi", "phdi", "zndx"] 
     groups    = {
@@ -243,7 +243,7 @@ def main():
     }
 
     dataset = ClimateGeospatial(climate_dir, geography_dir, variables, groups)
-    dataset.save(h.project_path("data", "climate_geospatial.mat"))
+    dataset.save(h.project_path("data", "datasets", "climate_geospatial.mat"))
 
 if __name__ == "__main__": 
     main() 

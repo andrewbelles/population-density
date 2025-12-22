@@ -154,6 +154,49 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
     return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
 
 
+def load_saipe_population(
+    filepath: str, 
+    *, decade: int, 
+    groups: List[str],
+    label_transform: str | None = None 
+)-> DatasetDict: 
+
+    group_set = set(groups)
+
+    data  = loadmat(filepath)
+    years = data["years"]
+    year_data = years[f"year_{decade}"][0, 0]
+
+    X = np.asarray(year_data["features"][0, 0], dtype=np.float64)
+    y = np.asarray(year_data["labels"][0, 0], dtype=np.float64).reshape(-1)
+
+    if label_transform == "log1p":
+        if np.any(y < 0):
+            raise ValueError("log1p label_transform requires non-negative labels")
+        y = np.log1p(y)
+    elif label_transform is not None: 
+        raise ValueError(f"unknown label_transform: {label_transform}")
+    
+    coords = np.asarray(data["coords"], dtype=np.float64)
+    # Might possible be inserted in wrong shape, transpose if so 
+    if coords.ndim == 2 and coords.shape == (2, y.shape[0]): 
+        coords = coords.T 
+
+    # TODO: SPLIT UP GROUPS ON FEATURE COLUMN INSTEAD OF JUST SAIPE 
+    if "all" in group_set: 
+        features = X 
+    else: 
+        _ = group_set 
+        raise ValueError(f"{groups} does not contain any valid group labels")
+
+    if "fips_codes" in data: 
+        fips = _mat_str_vector(data["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError("dataset failed to extract fips codes")
+
+    return {"features": features, "labels": y, "coords": coords, "sample_ids": fips}
+
+
 def load_residual_dataset(residual_filepath: str, original_filepath: str) -> DatasetDict: 
 
     residual_data = loadmat(residual_filepath)

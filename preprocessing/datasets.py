@@ -27,7 +27,7 @@ def run_climate_contrastive():
 
     print("DATASET: Climate Compact PCA contrastive dataset")
 
-    filepath = project_path("data", "climate_population.mat")
+    filepath = project_path("data", "datasets", "climate_population.mat")
     dataset  = load_climate_population(filepath, decade=2020, groups=["climate"])
 
     n_features    = dataset["features"].shape[1]
@@ -44,7 +44,7 @@ def run_climate_contrastive():
 
     encoder  = Encoder(dataset=unsupervised_dataset, standardize=True)
 
-    out_path = project_path("data", "climate_norepr_contrastive.mat") 
+    out_path = project_path("data", "datasets", "climate_norepr_contrastive.mat") 
     encoder.save_as_constrastive(encoder.X, out_path)
 
     print(f"Saved: {out_path}")
@@ -56,7 +56,7 @@ def run_climate_pca_contrastive():
 
     print("DATASET: Climate Compact PCA contrastive dataset")
 
-    filepath = project_path("data", "climate_population.mat")
+    filepath = project_path("data", "datasets", "climate_population.mat")
     dataset  = load_climate_population(filepath, decade=2020, groups=["climate"])
 
     n_features    = dataset["features"].shape[1]
@@ -79,7 +79,7 @@ def run_climate_pca_contrastive():
 
     print(f"PCA: {encoder.n_features} -> {k} components")
 
-    out_path = project_path("data", "climate_pca_contrastive.mat") 
+    out_path = project_path("data", "datasets", "climate_pca_contrastive.mat") 
     encoder.save_as_constrastive(pca_compact, out_path)
 
     print(f"Saved: {out_path}")
@@ -91,7 +91,7 @@ def run_climate_kpca_contrastive():
 
     print("DATASET: Climate Compact KernelPCA contrastive dataset")
 
-    filepath = project_path("data", "climate_population.mat")
+    filepath = project_path("data", "datasets", "climate_population.mat")
     dataset  = load_climate_population(filepath, decade=2020, groups=["climate"])
 
     n_features    = dataset["features"].shape[1]
@@ -125,7 +125,7 @@ def run_climate_kpca_contrastive():
 
     print(f"PCA: {encoder.n_features} -> {k} components")
 
-    out_path = project_path("data", "climate_kpca_contrastive.mat") 
+    out_path = project_path("data", "datasets", "climate_kpca_contrastive.mat") 
     encoder.save_as_constrastive(kpca_compact, out_path)
 
     print(f"Saved: {out_path}")
@@ -137,7 +137,7 @@ def run_climate_population_pca_supervised():
 
     print("DATASET: Climate -> Population PCA supervised dataset (2020)")
 
-    filepath = project_path("data", "climate_population.mat")
+    filepath = project_path("data", "datasets", "climate_population.mat")
     dataset  = load_climate_population(filepath, decade=2020, groups=["climate"])
 
     n_features    = dataset["features"].shape[1]
@@ -159,7 +159,7 @@ def run_climate_population_pca_supervised():
 
     print(f"PCA: {encoder.n_features} -> {k} components")
 
-    out_path = project_path("data", "climate_population_pca_supervised.mat")
+    out_path = project_path("data", "datasets", "climate_population_pca_supervised.mat")
     compact_dataset = encoder.save_as_compact_supervised(
         out_path, 
         pca_compact, 
@@ -180,7 +180,7 @@ def run_climate_population_kpca_supervised():
 
     print("DATASET: Climate -> Population KernelPCA supervised dataset (2020)")
 
-    filepath = project_path("data", "climate_population.mat")
+    filepath = project_path("data", "datasets", "climate_population.mat")
     dataset  = load_climate_population(filepath, decade=2020, groups=["climate"])
 
     n_features    = dataset["features"].shape[1]
@@ -214,7 +214,7 @@ def run_climate_population_kpca_supervised():
 
     print(f"KernelPCA: {encoder.n_features} -> {k} components (gamma={gamma:.6f})")
 
-    out_path = project_path("data", "climate_population_kpca_supervised.mat")
+    out_path = project_path("data", "datasets", "climate_population_kpca_supervised.mat")
     compact_dataset = encoder.save_as_compact_supervised(
         out_path, 
         kpca_compact, 

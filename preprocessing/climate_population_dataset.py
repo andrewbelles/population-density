@@ -517,7 +517,7 @@ def main():
     '''
 
     dataset     = ClimateDataset() 
-    output_path = project_path("data", "climate_population.mat")
+    output_path = project_path("data", "datasets", "climate_population.mat")
     dataset.save(output_path)
     export_climate_county_metadata(dataset.features, project_path("data", "climate_counties.tsv"), decade_for_order=2020)
 

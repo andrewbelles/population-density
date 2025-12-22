@@ -727,7 +727,7 @@ def main():
     '''
 
     dataset = load_climate_and_geospatial_unsupervised(
-        filepath=project_path("data", "climate_geospatial.mat"),
+        filepath=project_path("data", "datasets", "climate_geospatial.mat"),
         include_coords=False,
         groups=("all",)
     )

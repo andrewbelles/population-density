@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass, field 
-from typing import Any, Literal, Mapping 
+from typing import Any, Callable, Literal, Mapping 
 from numpy.typing import NDArray 
 
 from sklearn.model_selection import (
@@ -252,7 +252,7 @@ class CrossValidator:
         loader: DatasetLoader, 
         task: TaskSpec = REGRESSION, 
         scale_X: bool = True, 
-        scale_y: bool = True 
+        scale_y: bool = True,
     ): 
         self.filepath = filepath 
         self.task     = task 
@@ -260,6 +260,7 @@ class CrossValidator:
         self.scale_y  = False if task.task_type == "classification" else scale_y 
 
         data   = loader(filepath)
+    
         self.X = np.asarray(data["features"], dtype=np.float64) 
         self.y = np.asarray(data["labels"], dtype=np.float64)
         self.coords = np.asarray(data["coords"], dtype=np.float64)
@@ -277,6 +278,7 @@ class CrossValidator:
         self, 
         *, 
         models: Mapping[str, h.ModelFactory], 
+        label_transforms: Mapping[str, tuple[Callable, Callable | None]] | None,
         config: CVConfig, 
         collect: bool = False 
     ) -> pd.DataFrame: 
@@ -288,6 +290,7 @@ class CrossValidator:
         pred_rows: list[dict[str, Any]] = []
 
         for model_name, make_model in models.items(): 
+            print(f"> {model_name} now folding...")
             for fold_i, (train_idx, test_idx) in enumerate(
                 splitter.split(self.X, y_for_split)
             ): 
@@ -302,8 +305,13 @@ class CrossValidator:
                     scale_y=self.scale_y 
                 )
 
+                transform, inverse = label_transforms.get(model_name, (None, None))
+                if transform is not None and self.task.task_type != "regression": 
+                    raise ValueError("label_transforms only supported for regression")
+
                 try: 
-                    model.fit(X_train, y_train, coords_train)
+                    y_train_fit = transform(y_train) if transform else y_train
+                    model.fit(X_train, y_train_fit, coords_train)
                     y_pred = model.predict(X_test, coords_test)
 
                     y_prob = None 
@@ -314,8 +322,15 @@ class CrossValidator:
                         except (AttributeError, IndexError): 
                             pass 
 
-                    metrics  = self.task.compute_metrics(y_test, y_pred, y_prob)
-                    baseline = self.task.compute_baseline(y_train, y_test) 
+                    y_test_eval = y_test 
+                    y_train_eval = y_train
+                    
+                    y_pred_eval = y_pred 
+                    if inverse is not None and self.task.task_type == "regression": 
+                        y_pred_eval  = inverse(y_pred)
+
+                    metrics  = self.task.compute_metrics(y_test_eval, y_pred_eval, y_prob)
+                    baseline = self.task.compute_baseline(y_train_eval, y_test_eval) 
 
                     row = {
                         "model": model_name, 

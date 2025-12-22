@@ -2,7 +2,7 @@
 # 
 # climate_geospatial_benchmark.py  Andrew Belles  Dec 16th, 2025 
 # 
-# Flexible testbench for running any models/datasets.  
+# Flexible Testbench for Datasets Derived from Climate Based Datasets
 # 
 # 
 
@@ -46,7 +46,7 @@ def run_geospatial_from_climate_regression():
 
     print("\nREGRESSION: Climate -> Coordinates")
 
-    filepath = h.project_path("data", "climate_geospatial.mat")
+    filepath = h.project_path("data", "datasets", "climate_geospatial.mat")
 
     loader = lambda fp: load_climate_geospatial(
         fp, target="all", groups=["degree_days", "palmer_indices"]
@@ -76,7 +76,7 @@ def run_climate_from_geospatial_regression():
 
     print("\nREGRESSION: Coordinates -> Climate")
 
-    filepath = h.project_path("data", "climate_geospatial.mat")
+    filepath = h.project_path("data", "datasets", "climate_geospatial.mat")
 
     loader = lambda fp: load_geospatial_climate(
         fp, target="all", groups=["lat", "lon"]
@@ -106,7 +106,7 @@ def run_contrastive_raw_climate_representation():
 
     print("\nCLASSIFICATION: Contrastive Pairs on Raw Climate Representation")
 
-    filepath = h.project_path("data", "climate_norepr_contrastive.mat")
+    filepath = h.project_path("data", "datasets", "climate_norepr_contrastive.mat")
 
     loader = load_compact_dataset 
 
@@ -140,7 +140,7 @@ def run_contrastive_pca_compact_climate_representation():
 
     print("\nCLASSIFICATION: Contrastive Pairs on Compact PCA Representation (95% threshold)")
 
-    filepath = h.project_path("data", "climate_pca_contrastive.mat")
+    filepath = h.project_path("data", "datasets", "climate_pca_contrastive.mat")
 
     loader = load_compact_dataset 
 
@@ -174,7 +174,7 @@ def run_contrastive_kernel_pca_compact_climate_representation():
 
     print("\nCLASSIFICATION: Contrastive Pairs on Compact KernelPCA Representation (95% threshold)")
 
-    filepath = h.project_path("data", "climate_kpca_contrastive.mat")
+    filepath = h.project_path("data", "datasets", "climate_kpca_contrastive.mat")
 
     loader = load_compact_dataset 
 
@@ -208,7 +208,7 @@ def run_climate_to_population():
 
     print("\nREGRESSION: Climate (Raw) -> Population (decade: 2020)")
 
-    filepath = h.project_path("data", "climate_population.mat")
+    filepath = h.project_path("data", "datasets", "climate_population.mat")
 
     loader = lambda fp: load_climate_population(
         filepath=fp, 
@@ -241,7 +241,7 @@ def run_pca_climate_to_population():
 
     print("\nREGRESSION: Climate (PCA) -> Population (decade: 2020)")
 
-    filepath = h.project_path("data", "climate_population_pca_supervised.mat")
+    filepath = h.project_path("data", "datasets", "climate_population_pca_supervised.mat")
 
     loader = lambda fp: load_compact_dataset(filepath=fp)
 
@@ -270,7 +270,7 @@ def run_kpca_climate_to_population():
 
     print("\nREGRESSION: Climate (KernelPCA) -> Population (decade: 2020)")
 
-    filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
+    filepath = h.project_path("data", "datasets", "climate_population_kpca_supervised.mat")
 
     loader = lambda fp: load_compact_dataset(filepath=fp)
 
@@ -304,8 +304,8 @@ def run_pca_similarity_classification():
     print("\nCLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
           " in terms of similary population density (PCA repr, 2020).")
 
-    compact_filepath = h.project_path("data", "climate_population_pca_supervised.mat")
-    census_filepath  = h.project_path("data", "climate_population.mat")
+    compact_filepath = h.project_path("data", "datasets", "climate_population_pca_supervised.mat")
+    census_filepath  = h.project_path("data", "datasets", "climate_population.mat")
 
     def proxy_loader_factory(tags: list[str]) -> DatasetLoader:
         return lambda fp: load_neighbors_by_density(
@@ -351,8 +351,8 @@ def run_null_test_pca_similarity():
 
     print("\nCLASSIFICATION: (From PCA repr, 2020) Determine if embeddings carry real signal")
 
-    compact_filepath = h.project_path("data", "climate_population_pca_supervised.mat")
-    census_filepath  = h.project_path("data", "climate_population.mat")
+    compact_filepath = h.project_path("data", "datasets", "climate_population_pca_supervised.mat")
+    census_filepath  = h.project_path("data", "datasets", "climate_population.mat")
 
     def proxy_loader_factory(tags: list[str]) -> DatasetLoader:
         return lambda fp: load_neighbors_by_density(
@@ -401,8 +401,8 @@ def run_kpca_similarity_classification():
     print("\nCLASSIFICATION: Train classifier to separate neighbors from non-neighbors\n"
           " in terms of similary population density (KernelPCA repr, 2020).")
 
-    compact_filepath = h.project_path("data", "climate_population_kpca_supervised.mat")
-    census_filepath  = h.project_path("data", "climate_population.mat")
+    compact_filepath = h.project_path("data", "datasets", "climate_population_kpca_supervised.mat")
+    census_filepath  = h.project_path("data", "datasets", "climate_population.mat")
 
     def proxy_loader_factory(tags: list[str]) -> DatasetLoader:
         return lambda fp: load_neighbors_by_density(

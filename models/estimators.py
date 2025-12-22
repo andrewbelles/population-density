@@ -34,7 +34,7 @@ class LinearRegressor(BaseEstimator, RegressorMixin):
 
     '''Linear Regression with optional Regularization'''
 
-    def __init__(self, alpha: float = 0.0): 
+    def __init__(self, alpha: float = 1.0): 
         self.alpha = alpha 
 
     def fit(self, X, y): 
@@ -46,7 +46,7 @@ class LinearRegressor(BaseEstimator, RegressorMixin):
 
         # with regularization 
         if self.alpha > 0: 
-            I = np.eye(X_b.shape[0])
+            I = np.eye(X_b.shape[1])
             I[0, 0] = 0 # bias does not get regularized 
             self.coef_ = np.linalg.solve(
                 X_b.T @ X_b + self.alpha * I, X_b.T @ y
@@ -147,7 +147,7 @@ class XGBRegressorWrapper(BaseEstimator, RegressorMixin):
             device=device,
             random_state=self.random_state,
             n_jobs=self.n_jobs,
-            kwargs=self.kwargs
+            **self.kwargs
         )
 
         if self.early_stopping_rounds and self.eval_fraction > 0: 
@@ -476,7 +476,7 @@ class LogisticWrapper(BaseEstimator, ClassifierMixin):
 # Factory Functions (backwards compatibility with CrossValidator)
 # ---------------------------------------------------------
 
-def make_linear(alpha: float = 0.0):
+def make_linear(alpha: float = 1.0):
     return lambda: LinearRegressor(alpha=alpha)
 
 def make_rf_regressor(n_estimators: int = 400, **kwargs): 
