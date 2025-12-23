@@ -27,21 +27,68 @@ from models.estimators import (
 )
 
 from preprocessing.loaders import (
-    # DatasetLoader,
     load_viirs_nchs,
 )
 
+REPEATS = 10
+
+from support.helpers import project_path
+
+def run_viirs_nchs_full(): 
+    
+    print("CLASSIFICATION: VIIRS Nighttime Lights classification via NCHS Scheme (2023)")
+
+    filepath = project_path("data", "datasets", "viirs_nchs_2023.mat") 
+    
+    loader = lambda fp: load_viirs_nchs(filepath=fp)
+
+    models = {
+        "Logistic": make_logistic(C=1.0), 
+        "RandomForest": make_rf_classifier(),
+        "XGBoost": make_xgb_classifier(), 
+        "SVM": make_svm_classifier()
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    cv = CrossValidator(
+        filepath=filepath, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    results = cv.run(
+        models=models, 
+        config=config, 
+    )
+
+    summary = cv.summarize(results)
+    cv.format_summary(summary)
+
+    return summary, results 
+
 
 def run_all(): 
-    pass 
+
+    run_viirs_nchs_full() 
 
 
 def main(): 
 
     TASKS = [
+        "viirs", 
+        "all"
     ] 
 
     task_dict = {
+        "viirs": run_viirs_nchs_full, 
+        "all": run_all
     }
 
     parser = argparse.ArgumentParser() 

@@ -72,7 +72,7 @@ class ViirsDataset:
                 if fips.isdigit(): 
                     fips = fips.zfill(5)
                 try: 
-                    labels[fips] = int(code)
+                    labels[fips] = int(code) - 1
                 except ValueError: 
                     continue 
 

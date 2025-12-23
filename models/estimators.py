@@ -397,9 +397,12 @@ class XGBClassifierWrapper(BaseEstimator, RegressorMixin):
 
     def fit(self, X, y): 
         X = np.asarray(X, dtype=np.float64)
-        y = np.asarray(y, dtype=np.float64) 
+        y = np.asarray(y, dtype=np.int64) 
 
         device = "cuda" if self.gpu else "cpu"
+
+        n_classes = len(np.unique(y))
+        is_multi  = n_classes > 2 
 
         self.model_ = XGBClassifier(
             n_estimators=self.n_estimators,
@@ -411,8 +414,10 @@ class XGBClassifierWrapper(BaseEstimator, RegressorMixin):
             device=device,
             random_state=self.random_state,
             n_jobs=self.n_jobs,
-            eval_metric="logloss", 
-            kwargs=self.kwargs
+            eval_metric="mlogloss" if is_multi else "logloss",
+            objective="multi:softprob" if is_multi else "binary:logistic", 
+            num_class=n_classes if is_multi else None, 
+            **self.kwargs
         )
 
         if self.early_stopping_rounds and self.eval_fraction > 0: 
@@ -564,5 +569,5 @@ def make_xgb_classifier(
 def make_logistic(C: float = 1.0, **kwargs):
     return lambda: LogisticWrapper(C=C, **kwargs)
 
-def make_svm_classifier(**kwargs): 
-    return lambda: SVMClassifier(**kwargs)
+def make_svm_classifier(probability=True, **kwargs): 
+    return lambda: SVMClassifier(probability=probability, **kwargs)

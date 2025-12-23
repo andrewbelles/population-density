@@ -51,7 +51,7 @@ class TaskSpec:
     def __post_init__(self): 
         defaults = {
             "regression": ("r2", "rmse"), 
-            "classification": ("accuracy", "f1", "roc_auc")
+            "classification": ("accuracy", "f1_macro", "roc_auc")
         }
         if not self.metrics: 
             object.__setattr__(self, "metrics", defaults[self.task_type])
@@ -63,6 +63,9 @@ class TaskSpec:
         y_prob: NDArray | None = None
     ) -> dict[str, float]: 
 
+
+        y_true = np.asarray(y_true).ravel()
+        n_classes = len(np.unique(y_true))
         results = {}
 
         if self.task_type == "regression": 
@@ -76,12 +79,24 @@ class TaskSpec:
                 if m == "accuracy": 
                     results["accuracy"] = float(accuracy_score(y_true, y_pred))
                 elif m == "f1": 
-                    results["f1"] = float(f1_score(y_true, y_pred, average="binary"))
+                    avg = "binary" if n_classes == 2 else "macro"
+                    results["f1"] = float(f1_score(y_true, y_pred, average=avg))
                 elif m == "f1_macro": 
                     results["f1_macro"] = float(f1_score(y_true, y_pred, average="macro"))
                 elif m == "roc_auc" and y_prob is not None: 
                     try: 
-                        results["roc_auc"] = float(roc_auc_score(y_true, y_prob)) 
+                        y_prob_arr = np.asarray(y_prob)
+                        if (y_prob_arr.ndim == 1 or 
+                            (y_prob_arr.ndim == 2 and y_prob_arr.shape[1] == 1)):
+                            results["roc_auc"] = float(roc_auc_score(y_true, y_prob_arr.ravel()))
+                        else: 
+                            results["roc_auc"] = float(roc_auc_score(
+                                y_true, 
+                                y_prob_arr,
+                                multi_class="ovr", 
+                                average="macro"
+                            )) 
+
                     except ValueError:
                         results["roc_auc"] = np.nan 
                 elif m == "log_loss" and y_prob is not None: 
@@ -278,8 +293,8 @@ class CrossValidator:
         self, 
         *, 
         models: Mapping[str, h.ModelFactory], 
-        label_transforms: Mapping[str, tuple[Callable, Callable | None]] | None,
         config: CVConfig, 
+        label_transforms: Mapping[str, tuple[Callable, Callable | None]] | None = None,
         collect: bool = False 
     ) -> pd.DataFrame: 
 
@@ -305,9 +320,12 @@ class CrossValidator:
                     scale_y=self.scale_y 
                 )
 
-                transform, inverse = label_transforms.get(model_name, (None, None))
-                if transform is not None and self.task.task_type != "regression": 
-                    raise ValueError("label_transforms only supported for regression")
+                if label_transforms is not None: 
+                    transform, inverse = label_transforms.get(model_name, (None, None))
+                    if transform is not None and self.task.task_type != "regression": 
+                        raise ValueError("label_transforms only supported for regression")
+                else: 
+                    transform, inverse = None, None
 
                 try: 
                     y_train_fit = transform(y_train) if transform else y_train
@@ -318,7 +336,12 @@ class CrossValidator:
                     if self.task.task_type == "classification":
                         try:
                             proba  = model.predict_proba(X_test, coords_test) 
-                            y_prob = proba[:, 1] if proba.ndim == 2 else proba 
+                            if proba.ndim == 2 and proba.shape[1] == 2: 
+                                y_prob = proba[:, 1]
+                            elif proba.ndim == 2 and proba.shape[1] == 1: 
+                                y_prob = proba.ravel() 
+                            else: 
+                                y_prob = proba 
                         except (AttributeError, IndexError): 
                             pass 
 
