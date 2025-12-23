@@ -197,6 +197,28 @@ def load_saipe_population(
     return {"features": features, "labels": y, "coords": coords, "sample_ids": fips}
 
 
+def load_viirs_nchs(filepath: str) -> DatasetDict: 
+
+    mat = loadmat(filepath)
+
+    if "features" not in mat or "labels" not in mat: 
+        raise ValueError(f"{filepath} missing required keys 'features'/'labels'")
+
+    X = np.asarray(mat["features"], dtype=np.float64) 
+    y = np.asarray(mat["labels"], dtype=np.int64).reshape(-1)
+
+    if X.shape[0] != y.shape[0]: 
+        raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({y.shape[0]})")
+
+    if "fips_codes" in mat: 
+        fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError(f"{filepath} missing fips_codes")
+
+    coords = np.zeros((X.shape[0],2), dtype=np.float64)
+    return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
+
+
 def load_residual_dataset(residual_filepath: str, original_filepath: str) -> DatasetDict: 
 
     residual_data = loadmat(residual_filepath)

@@ -6,7 +6,7 @@
 # 
 # 
 
-REPEATS=15
+REPEATS=5
 
 import argparse 
 import numpy as np
@@ -22,7 +22,7 @@ from analysis.cross_validation import (
 from analysis.optimizer import optimize_hyperparameters
 
 from models.estimators import (
-    make_gcn_regressor,
+    # make_gcn_regressor,
     make_linear,
     make_rf_regressor,
     # make_rf_classifier,
@@ -53,12 +53,13 @@ def run_full_against_population():
 
     models = {
         "Linear": make_linear(),
-        # "RandomForest": make_rf_regressor(max_depth=6), 
+        "RandomForest": make_rf_regressor(max_depth=6), 
         "XGBoost": make_xgb_regressor(
-            learning_rate=0.01,
-            max_depth=6,
+            learning_rate=0.1,
+            max_depth=5,
             n_estimators=500,
-            subsample=0.8
+            subsample=0.8,
+            colsample_bytree=0.8
         ), 
         # "GraphNN": make_gcn_regressor(hidden_dims=(64,64))
     }
@@ -70,10 +71,10 @@ def run_full_against_population():
     )
 
     transforms = {
-        # "RandomForest": (np.log1p, np.expm1), 
+        "RandomForest": (np.log1p, np.expm1), 
         "XGBoost": (np.log1p, np.expm1), 
         "Linear": (None, None), 
-        "GraphNN": (None, None)
+        # "GraphNN": (None, None)
     }
 
     cv = CrossValidator(
@@ -96,18 +97,18 @@ def run_full_against_population():
 
 def run_full_optimize_xgboost(): 
 
-    print("\nREGRESSION: SAIPE -> Population (decade: 2020)")
+    print("\nOPTIMIZATION: Grid Search over XGBoost Hyperparams. SAIPE 2020")
 
     filepath = h.project_path("data", "datasets", "saipe_population.mat")
 
     loader = lambda fp: load_saipe_population(fp, decade=2020, groups=["all"])
 
     xgb_grid = {
-        "n_estimators": 50 * [300, 350, 400, 450, 500, 550, 600], 
-        "max_depth": [3, 4, 5, 6, 7, 8, 9, 10], 
+        "n_estimators": [300, 350, 400, 450, 500], 
+        "max_depth": [5, 6, 7, 8], 
         "learning_rate": [0.01, 0.1], 
-        "subsample": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        "colsample_bytree": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        "subsample": [0.7, 0.8, 0.9],
+        "colsample_bytree": [0.7, 0.8, 0.9]
     }
 
     summary, best_model_name = optimize_hyperparameters(
@@ -123,23 +124,54 @@ def run_full_optimize_xgboost():
     return summary, best_model_name
 
 
+def run_full_optimize_rf(): 
+
+    print("\nOPTIMIZATION: Grid Search over RandomForest Hyperparams. SAIPE 2020")
+
+    filepath = h.project_path("data", "datasets", "saipe_population.mat")
+
+    loader = lambda fp: load_saipe_population(fp, decade=2020, groups=["all"])
+
+    rf_grid = {
+        "n_estimators": [300, 350, 400, 450, 500], 
+        "max_depth": [6, 7, 8, 9], 
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 5, 8, 10, 20]
+    }
+
+    summary, best_model_name = optimize_hyperparameters(
+        base_name="RF",
+        filepath=filepath, 
+        loader_func=loader, 
+        base_factory_func=make_rf_regressor,
+        param_grid=rf_grid,
+        task=REGRESSION,
+        transform=(np.log1p, np.expm1)
+    )
+
+    return summary, best_model_name
+
+
 def run_all(): 
     print("SAIPE STORES: (Poverty Rate/County, Median Income, Under 18 in Poverty)")
 
     run_full_against_population() 
     run_full_optimize_xgboost()
+    run_full_optimize_rf()
 
 
 def main(): 
 
     TASKS = [
         "full", 
-        "full_optimize_xgboost"
+        "full_optimize_xgboost",
+        "full_optimize_rf"
     ] 
 
     task_dict = {
         "full": run_full_against_population, 
         "full_optimize_xgboost": run_full_optimize_xgboost, 
+        "full_optimize_rf": run_full_optimize_rf, 
         "all": run_all 
     }
 

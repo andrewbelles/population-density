@@ -12,8 +12,10 @@ import numpy as np
 
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier 
+from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression 
 
+from sklearn.utils import class_weight
 from xgboost import XGBClassifier, XGBRegressor  
 
 import torch 
@@ -472,6 +474,50 @@ class LogisticWrapper(BaseEstimator, ClassifierMixin):
         return self.model_.predict_proba(X)
 
 
+class SVMClassifier(BaseEstimator, ClassifierMixin):
+
+    def __init__(
+        self, 
+        *, 
+        C: float = 1.0, 
+        kernel: str = "rbf", 
+        gamma: str = "scale", 
+        probability: bool = False, 
+        class_weight: str | dict | None = None, 
+        random_state: int | None = None, 
+        **kwargs
+    ): 
+        self.C = C 
+        self.kernel       = kernel 
+        self.gamma        = gamma 
+        self.probability  = probability 
+        self.class_weight = class_weight 
+        self.random_state = random_state 
+        self.kwargs       = kwargs
+
+    def fit(self, X, y): 
+        self.model_ = SVC(
+            C=self.C, 
+            kernel=self.kernel, 
+            gamma=self.gamma, 
+            probability=self.probability,
+            class_weight=self.class_weight,
+            random_state=self.random_state,
+            **self.kwargs
+        )
+        self.model_.fit(X, y)
+        self.classes_ = self.model_.classes_ 
+        return self 
+
+    def predict(self, X):
+        return self.model_.predict(X)
+
+    def predict_proba(self, X):
+        if not self.probability: 
+            raise AttributeError("SVMClassifier was instantiated with probability=False")
+        return self.model_.predict_proba(X)
+
+
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)
 # ---------------------------------------------------------
@@ -517,3 +563,6 @@ def make_xgb_classifier(
 
 def make_logistic(C: float = 1.0, **kwargs):
     return lambda: LogisticWrapper(C=C, **kwargs)
+
+def make_svm_classifier(**kwargs): 
+    return lambda: SVMClassifier(**kwargs)

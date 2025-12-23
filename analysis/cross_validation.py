@@ -21,7 +21,7 @@ from sklearn.model_selection import (
     BaseCrossValidator
 )
 
-from sklearn.preprocessing import StandardScaler 
+from sklearn.preprocessing import StandardScaler, label_binarize 
 from sklearn.base import BaseEstimator, clone 
 from sklearn.metrics import (
     mean_squared_error, 
@@ -432,7 +432,8 @@ class CrossValidator:
 def cross_validate_regression(
     filepath: str, 
     loader: DatasetLoader,
-    models: Mapping[str, h.ModelFactory], 
+    models: Mapping[str, h.ModelFactory],
+    transforms: Mapping[str, tuple[Callable, Callable | None]],
     *, 
     n_splits: int = 5, 
     n_repeats: int = 1, 
@@ -441,12 +442,17 @@ def cross_validate_regression(
 
     cv = CrossValidator(filepath=filepath, loader=loader, task=REGRESSION)
     config = CVConfig(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
-    return cv.run(models=models, config=config)
+    return cv.run(
+        models=models, 
+        config=config,
+        label_transforms=transforms
+    )
 
 def cross_validate_classification(
     filepath: str, 
     loader: DatasetLoader,
     models: Mapping[str, h.ModelFactory], 
+    transforms: Mapping[str, tuple[Callable, Callable | None]],
     *, 
     n_splits: int = 5, 
     n_repeats: int = 1, 
@@ -456,4 +462,8 @@ def cross_validate_classification(
 
     cv = CrossValidator(filepath=filepath, loader=loader, task=CLASSIFICATION, scale_y=False)
     config = CVConfig(n_splits=n_splits, n_repeats=n_repeats, stratify=stratify, random_state=random_state)
-    return cv.run(models=models, config=config)
+    return cv.run(
+        models=models, 
+        config=config,
+        label_transforms=transforms
+    )

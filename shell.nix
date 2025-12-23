@@ -6,6 +6,9 @@ pkgs.mkShell {
     gcc
     gnumake
     swayimg
+    gdal 
+    proj 
+    geos 
 
     # Python packages from nixpkgs
     python312Packages.numpy
@@ -20,6 +23,7 @@ pkgs.mkShell {
     python312Packages.rasterio
     python312Packages.pybind11
     python312Packages.torch-geometric
+    python312Packages.fiona
 
     # PyTorch with CUDA
     python312Packages.torch
@@ -62,7 +66,7 @@ pkgs.mkShell {
     pip install --upgrade pip
     
     # Only install packages not available in nixpkgs
-    pip install gpytorch  # if not available in nixpkgs
+    pip install rasterstats
     
     echo "[NIX-SHELL] Installing CUDA XGBoost"
     pip install --upgrade pip
