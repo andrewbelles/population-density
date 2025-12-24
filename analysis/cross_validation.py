@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass, field 
-from typing import Any, Callable, Literal, Mapping 
+from typing import Callable, Literal, Mapping 
 from numpy.typing import NDArray 
 
 from sklearn.model_selection import (
@@ -21,7 +21,7 @@ from sklearn.model_selection import (
     BaseCrossValidator
 )
 
-from sklearn.preprocessing import StandardScaler, label_binarize 
+from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator, clone 
 from sklearn.metrics import (
     mean_squared_error, 
@@ -32,9 +32,13 @@ from sklearn.metrics import (
     log_loss 
 )
 
-import support.helpers as h 
+from support.helpers import (
+    ModelFactory,
+) 
 
 from preprocessing.loaders import DatasetLoader
+
+from scipy.io import savemat
 
 # ---------------------------------------------------------
 # Task Specification 
@@ -284,131 +288,265 @@ class CrossValidator:
             self.y = self.y.ravel() 
 
         self.predictions_ : pd.DataFrame | None = None  
+        self.oof_: dict | None = None 
+        self.sample_ids = np.asarray(
+            data["sample_ids"], dtype="U5"
+        ) if "sample_ids" in data else np.asarray(np.arange(self.X.shape[0]), dtype=np.int64) - 1
         
-    @property
-    def n_samples(self) -> int: 
-        return self.X.shape[0]
-
     def run(
         self, 
-        *, 
-        models: Mapping[str, h.ModelFactory], 
+        *,
+        models: Mapping[str, ModelFactory], 
         config: CVConfig, 
-        label_transforms: Mapping[str, tuple[Callable, Callable | None]] | None = None,
-        collect: bool = False 
+        label_transforms: Mapping[str, tuple[Callable, Callable | None]] | None = None, 
+        oof: bool = False, 
+        collect: bool = False, 
+        splits=None
     ) -> pd.DataFrame: 
 
         splitter    = config.get_splitter(self.task)
-        y_for_split = self.y if self.y.ndim == 1 else self.y[:, 0]
+        y_for_split = self._split_target()
+        splits_iter = self._resolve_splits(splitter, y_for_split, splits)
 
-        results: list[dict[str, Any]]   = []
-        pred_rows: list[dict[str, Any]] = []
+        results   = []
+        pred_rows = []
+
+        oof_preds, oof_classes = (None, None)
+        if oof: 
+            oof_preds, oof_classes = self._init_oof(models, y_for_split)
 
         for model_name, make_model in models.items(): 
             print(f"> {model_name} now folding...")
-            for fold_i, (train_idx, test_idx) in enumerate(
-                splitter.split(self.X, y_for_split)
-            ): 
+            for fold_i, (train_idx, test_idx) in enumerate(splits_iter): 
                 X_train, X_test = self.X[train_idx], self.X[test_idx]
                 y_train, y_test = self.y[train_idx], self.y[test_idx]
                 coords_train, coords_test = self.coords[train_idx], self.coords[test_idx]
 
                 base_model = make_model()
-                model      = ScaledEstimator(
-                    clone(base_model) if hasattr(base_model, "get_params") else base_model, 
-                    scale_X=self.scale_X, 
-                    scale_y=self.scale_y 
-                )
-
-                if label_transforms is not None: 
-                    transform, inverse = label_transforms.get(model_name, (None, None))
-                    if transform is not None and self.task.task_type != "regression": 
-                        raise ValueError("label_transforms only supported for regression")
-                else: 
-                    transform, inverse = None, None
+                model      = self._build_model(base_model)
+                transform, inverse = self._get_transform(label_transforms, model_name)
 
                 try: 
-                    y_train_fit = transform(y_train) if transform else y_train
-                    model.fit(X_train, y_train_fit, coords_train)
-                    y_pred = model.predict(X_test, coords_test)
+                    y_pred = self._fit_predict(
+                        model,
+                        X_train,
+                        y_train, 
+                        coords_train,
+                        X_test, 
+                        coords_test, 
+                        transform 
+                    )
+                    y_pred_eval = inverse(y_pred) if inverse is not None else y_pred 
 
-                    y_prob = None 
-                    if self.task.task_type == "classification":
-                        try:
-                            proba  = model.predict_proba(X_test, coords_test) 
-                            if proba.ndim == 2 and proba.shape[1] == 2: 
-                                y_prob = proba[:, 1]
-                            elif proba.ndim == 2 and proba.shape[1] == 1: 
-                                y_prob = proba.ravel() 
-                            else: 
-                                y_prob = proba 
-                        except (AttributeError, IndexError): 
-                            pass 
+                    proba  = self._predict_proba(model, X_test, coords_test)
+                    y_prob = self._align_proba(proba, model, oof_classes)
+                    if y_prob is not None and y_prob.ndim == 2 and y_prob.shape[1] == 2: 
+                        y_prob_eval = y_prob[:, 1]
+                    else: 
+                        y_prob_eval = y_prob 
 
-                    y_test_eval = y_test 
-                    y_train_eval = y_train
-                    
-                    y_pred_eval = y_pred 
-                    if inverse is not None and self.task.task_type == "regression": 
-                        y_pred_eval  = inverse(y_pred)
-
-                    metrics  = self.task.compute_metrics(y_test_eval, y_pred_eval, y_prob)
-                    baseline = self.task.compute_baseline(y_train_eval, y_test_eval) 
-
-                    row = {
-                        "model": model_name, 
-                        "fold": fold_i, 
-                        "n_train": len(train_idx), 
-                        "n_test": len(test_idx)
-                    }
-                    for k, v in metrics.items():
-                        row[k] = v 
-                        row[f"baseline_{k}"] = baseline.get(k, np.nan)
-
-                    if "r2" in metrics: 
-                        row["win_r2"] = float(metrics["r2"] > baseline.get("r2", -np.inf))
-                        row["win_r2_gt0"] = float(metrics["r2"] > 0)
-                    if "rmse" in metrics: 
-                        row["win_rmse"] = float(metrics["rmse"] < baseline.get("rmse", np.inf))
-                    if "accuracy" in metrics: 
-                        row["win_accuracy"] = float(metrics["accuracy"] > baseline.get("accuracy", 0))
-
-                    results.append(row)
+                    results.append(self._metrics_row(
+                        model_name,
+                        fold_i, 
+                        train_idx, test_idx, 
+                        y_train, y_test, 
+                        y_pred_eval, y_prob_eval 
+                    ))
 
                     if collect: 
-                        y_test_flat = y_test.ravel() if y_test.ndim > 1 else y_test 
-                        y_pred_flat = (
-                            np.asarray(y_pred).ravel() 
-                            if hasattr(y_pred, "ravel")
-                            else y_pred 
+                        self._collect_rows(
+                            pred_rows, 
+                            model_name, 
+                            fold_i, 
+                            test_idx,  
+                            y_test, 
+                            y_pred_eval
                         )
-                        for i, idx in enumerate(test_idx): 
-                            pred_rows.append({
-                                "model": model_name, 
-                                "fold": fold_i, 
-                                "idx": int(idx), 
-                                "y_true": float(y_test_flat[i]),
-                                "y_pred": float(y_pred_flat[i]),
-                                "residual": float(y_test_flat[i] - y_pred_flat[i])
-                            })
+
+                    if oof: 
+                        self._update_oof(
+                            oof_preds, 
+                            model_name, 
+                            test_idx, 
+                            y_pred_eval,
+                            y_prob
+                        )
 
                 except Exception as e: 
-                    row = {
-                        "model": model_name, 
-                        "fold": fold_i, 
-                        "n_train": len(train_idx), 
-                        "n_test": len(test_idx), 
-                        "error": str(e)
-                    }
-                    for m in self.task.metrics: 
-                        row[m] = np.nan 
-                        row[f"baseline_{m}"] = np.nan 
-                    results.append(row)
-
-        if collect and pred_rows:
+                    results.append(self._error_row(model_name, fold_i, train_idx, test_idx, e))
+                
+        if collect and pred_rows: 
             self.predictions_ = pd.DataFrame(pred_rows)
 
-        return pd.DataFrame(results)
+        if oof: 
+            self.oof_ = {"preds": oof_preds, "classes": oof_classes}
+
+        return pd.DataFrame(results )
+
+    # -----------------------------------------------------
+    # Run Helper functions 
+    # -----------------------------------------------------
+
+    def _split_target(self) -> NDArray: 
+        return self.y if self.y.ndim ==1 else self.y[:, 0]
+
+    def _resolve_splits(self, splitter, y_for_split, splits): 
+        if splits is not None: 
+            self.splits_ = list(splits)
+            return self.splits_ 
+        self.splits_ = list(splitter.split(self.X, y_for_split))
+        return self.splits_
+
+    def _build_model(self, base_model): 
+        return ScaledEstimator(
+            clone(base_model) if hasattr(base_model, "get_params") else base_model, 
+            scale_X=self.scale_X, 
+            scale_y=self.scale_y 
+        )
+
+    def _get_transform(self, label_transforms, model_name): 
+        if label_transforms is None: 
+            return None, None 
+        transform, inverse = label_transforms.get(model_name, (None, None))
+        if transform is not None and self.task.task_type != "regression":
+            raise ValueError("label_transforms only supported for regression")
+        return transform, inverse 
+
+    def _fit_predict(
+        self, 
+        model, 
+        X_train, 
+        y_train, 
+        coords_train, 
+        X_test, 
+        coords_test, 
+        transform
+    ): 
+
+        y_train_fit = transform(y_train) if transform else y_train 
+        model.fit(X_train, y_train_fit, coords_train)
+        return model.predict(X_test, coords_test) 
+
+    def _predict_proba(self, model, X_test, coords_test): 
+        try: 
+            return np.asarray(model.predict_proba(X_test, coords_test))
+        except (AttributeError, TypeError, IndexError): 
+            return None 
+
+    def _align_proba(self, proba, model, oof_classes): 
+        if proba is None: 
+            return None 
+        if proba.ndim ==1: 
+            proba = np.column_stack([1.0 - proba, proba])
+
+        classes = getattr(model, "classes_", None)
+        if classes is None and hasattr(model, "estimator"): 
+            classes = getattr(model.estimator, "classes_", None)
+        
+        if classes is not None and oof_classes is not None: 
+            aligned   = np.zeros((proba.shape[0], len(oof_classes)), dtype=np.float64)
+            class_map = {c: i for i, c in enumerate(classes)}
+            for j, c in enumerate(oof_classes): 
+                if c in class_map: 
+                    aligned[:, j] = proba[:, class_map[c]]
+            return aligned 
+        return proba 
+
+    def _init_oof(self, models, y_for_split): 
+        if self.task.task_type == "classification": 
+            oof_classes = np.unique(y_for_split)
+            n_classes   = len(oof_classes)
+        else: 
+            oof_classes, n_classes = None, 1 
+
+        oof_preds = {}
+        for model_name in models: 
+            oof_preds[model_name] = np.full((self.n_samples, n_classes), np.nan)
+        return oof_preds, oof_classes
+
+    def _metrics_row(
+        self,
+        model_name,
+        fold_i, 
+        train_idx, 
+        test_idx, 
+        y_train, 
+        y_test, 
+        y_pred_eval,
+        y_prob
+    ): 
+
+        metrics  = self.task.compute_metrics(y_test, y_pred_eval, y_prob)
+        baseline = self.task.compute_baseline(y_train, y_test)
+
+        row = {
+            "model": model_name, 
+            "fold": fold_i, 
+            "n_train": len(train_idx),
+            "n_test": len(test_idx)
+        }
+
+        for k, v in metrics.items(): 
+            row[k] = v
+            row[f"baseline_{k}"] = baseline.get(k, np.nan)
+            
+        if "r2" in metrics: 
+            row["win_r2"]     = float(metrics["r2"] > baseline.get("r2", -np.inf))
+            row["win_r2_gt0"] = float(metrics["r2"] > 0)
+        
+        if "rmse" in metrics: 
+            row["win_rmse"] = float(metrics["rmse"] < baseline.get("rmse", np.inf))
+
+        if "accuracy" in metrics: 
+            row["win_accuracy"] = float(metrics["accuracy"] > baseline.get("accuracy", 0))
+        
+        return row 
+
+    def _collect_rows(
+        self, 
+        pred_rows, 
+        model_name, 
+        fold_i, 
+        test_idx, 
+        y_test, 
+        y_pred
+    ):
+        y_test_flat = y_test.ravel() if y_test.ndim > 1 else y_test 
+        y_pred_flat = np.asarray(y_pred).ravel() if hasattr(y_pred, "ravel") else y_pred 
+        for i, idx in enumerate(test_idx): 
+            pred_rows.append({
+                "model": model_name, 
+                "fold": fold_i, 
+                "idx": int(idx), 
+                "y_true": float(y_test_flat[i]), 
+                "y_pred": float(y_pred_flat[i]), 
+                "residual": float(y_test_flat[i] - y_pred_flat[i])
+            })
+
+    def _update_oof(self, oof_preds, model_name, test_idx, y_pred_eval, y_prob): 
+        if self.task.task_type == "classification": 
+            if y_prob is None: 
+                raise ValueError(f"{model_name} missing predict_proba for OOF stacking")
+            oof_preds[model_name][test_idx] = y_prob 
+        else: 
+            oof_preds[model_name][test_idx] = np.asarray(y_pred_eval).reshape(-1, 1)
+
+    def _error_row(self, model_name, fold_i, train_idx, test_idx, e): 
+        row = {
+            "model": model_name, 
+            "fold": fold_i, 
+            "n_train": len(train_idx), 
+            "n_test": len(test_idx), 
+            "error": str(e)
+        }
+        for m in self.task.metrics:
+            row[m] = np.nan 
+            row[f"baseline_{m}"] = np.nan 
+        return row 
+
+    # -----------------------------------------------------
+    # Summary functions 
+    # -----------------------------------------------------
 
     def summarize(self, results_df: pd.DataFrame) -> pd.DataFrame: 
 
@@ -448,45 +586,39 @@ class CrossValidator:
                 parts.append(f"{mean:+.4f} [{ci_lo:+.4f}, {ci_hi:+.4f}]".ljust(30))
             print(" ".join(parts))
 
-# ---------------------------------------------------------
-# Convenience Wrapper Functions   
-# ---------------------------------------------------------
+    def save_oof(self, out_path: str, model_order: list[str] | None = None): 
+        if self.oof_ is None: 
+            raise ValueError("OOF not collected. run with oof=True")
 
-def cross_validate_regression(
-    filepath: str, 
-    loader: DatasetLoader,
-    models: Mapping[str, h.ModelFactory],
-    transforms: Mapping[str, tuple[Callable, Callable | None]],
-    *, 
-    n_splits: int = 5, 
-    n_repeats: int = 1, 
-    random_state: int = 0
-) -> pd.DataFrame: 
+        preds   = self.oof_["preds"]
+        classes = self.oof_.get("classes")
 
-    cv = CrossValidator(filepath=filepath, loader=loader, task=REGRESSION)
-    config = CVConfig(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
-    return cv.run(
-        models=models, 
-        config=config,
-        label_transforms=transforms
-    )
+        if model_order is None: 
+            model_order = list(preds.keys())
 
-def cross_validate_classification(
-    filepath: str, 
-    loader: DatasetLoader,
-    models: Mapping[str, h.ModelFactory], 
-    transforms: Mapping[str, tuple[Callable, Callable | None]],
-    *, 
-    n_splits: int = 5, 
-    n_repeats: int = 1, 
-    stratify: bool = True, 
-    random_state: int = 0
-) -> pd.DataFrame: 
+        blocks = [preds[m] for m in model_order]
+        X = np.hstack(blocks)
 
-    cv = CrossValidator(filepath=filepath, loader=loader, task=CLASSIFICATION, scale_y=False)
-    config = CVConfig(n_splits=n_splits, n_repeats=n_repeats, stratify=stratify, random_state=random_state)
-    return cv.run(
-        models=models, 
-        config=config,
-        label_transforms=transforms
-    )
+        if classes is None: 
+            feature_names = np.array(
+                [f"{m}_pred" for m in model_order], dtype="U64"
+            )
+        else: 
+            feature_names = np.array(
+                [f"{m}_p{c}" for m in model_order for c in classes], dtype="U64"
+            )
+
+        mat = {
+            "features": X, 
+            "labels": self.y.reshape(-1, 1) if self.y.ndim == 1 else self.y, 
+            "feature_names": feature_names, 
+            "fips_codes": self.sample_ids, 
+            "model_names": np.array(model_order, dtype="U64"), 
+            "class_labels": np.array(classes) if classes is not None else np.array([]), 
+            "n_samples": X.shape[0]
+        }
+        savemat(out_path, mat)
+
+    @property
+    def n_samples(self) -> int: 
+        return self.X.shape[0]

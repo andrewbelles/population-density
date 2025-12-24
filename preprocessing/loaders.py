@@ -302,6 +302,29 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
     }
 
 
+def load_stacking(filepaths: Sequence[str]) -> DatasetDict:  
+    mats = [loadmat(p) for p in filepaths]
+
+    feats  = [np.asarray(m["features"], dtype=np.float64) for m in mats]
+    labels = np.asarray(mats[0]["labels"]).reshape(-1) 
+    fips_list = [_mat_str_vector(m["fips_codes"]).astype("U5") for m in mats]
+
+    idx_maps = [{f: i for i, f in enumerate(fips)} for fips in fips_list]
+
+    common = [f for f in fips_list[0] if all(f in m for m in idx_maps[1:])]
+
+    idx_lists = [[m[f] for f in common] for m in idx_maps]
+
+    feats  = [X[idx] for X, idx in zip(feats, idx_lists)]
+    labels = labels[idx_lists[0]]
+    fips   = np.array(common, dtype="U5")
+
+    X = np.hstack(feats)
+    coords = np.zeros((X.shape[0], 2), dtype=np.float64)
+
+    return {"features": X, "labels": labels, "coords": coords, "sample_ids": fips}
+
+
 def load_neighbors_by_density(
     compact_filepath: str, 
     label_filepath: str,

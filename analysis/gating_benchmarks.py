@@ -27,6 +27,7 @@ from models.estimators import (
 
 from preprocessing.loaders import (
     load_viirs_nchs, # also loads tiger dataset for now 
+    load_stacking 
 )
 
 REPEATS = 10
@@ -153,7 +154,7 @@ def run_tiger_nchs_full():
 
     results = cv.run(
         models=models, 
-        config=config, 
+        config=config,
     )
 
     summary = cv.summarize(results)
@@ -203,6 +204,113 @@ def run_tiger_nchs_smushed():
     return summary, results 
 
 
+def create_oof_datasets(): 
+    print("DATASET: Creates OOF datasets for each best performer per dataset.")
+
+    viirs = project_path("data", "datasets", "viirs_nchs_2023.mat")
+    tiger = project_path("data", "datasets", "tiger_nchs_2023.mat")
+
+    loader = lambda fp: load_viirs_nchs(filepath=fp)
+
+    viirs_model = {
+        "SVM": make_svm_classifier(
+            C=140.0, 
+            kernel="rbf", 
+            gamma=0.06
+        ),
+    }
+
+    tiger_model = {
+        "Logistic": make_logistic(),
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    viirs_cv = CrossValidator(
+        filepath=viirs, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    tiger_cv = CrossValidator(
+        filepath=tiger, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False 
+    )
+
+    viirs_cv.run(
+        models=viirs_model, 
+        config=config,
+        oof=True 
+    )
+    splits = viirs_cv.splits_ 
+
+    tiger_cv.run(
+        models=tiger_model, 
+        config=config, 
+        oof=True, 
+        splits=splits
+    )
+
+    viirs_cv.save_oof(project_path("data", "stacking", "viirs_2023_oof.mat"))
+    tiger_cv.save_oof(project_path("data", "stacking", "tiger_2023_oof.mat"))
+
+
+def run_stacking(): 
+
+    print("CLASSIFICATION: Stacking Classifier from Layer A Classifier's Probabilities")
+    
+    viirsstack = project_path("data", "stacking", "viirs_2023_oof.mat") 
+    tigerstack = project_path("data", "stacking", "tiger_2023_oof.mat")
+    files = [
+        viirsstack, 
+        # tigerstack
+    ]
+
+    def stacking_loader(fp: str):
+        _ = fp 
+        return load_stacking(files)
+
+    models = {
+        "Logistic": make_logistic(), 
+        "RandomForest": make_rf_classifier(),
+        "XGBoost": make_xgb_classifier(), 
+        "SVM": make_svm_classifier()
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    cv = CrossValidator(
+        filepath=viirsstack, 
+        loader=stacking_loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    results = cv.run(
+        models=models, 
+        config=config, 
+    )
+
+    summary = cv.summarize(results)
+    cv.format_summary(summary)
+
+    return summary, results 
+
+
+
 def optimize_svm_viirs(): 
     print("OPTIMIZATION: SVM For VIIRS multi-classification for NCHS Urban-Rural Labels (2023)")
 
@@ -234,7 +342,8 @@ def run_all():
     run_viirs_nchs_smushed()
     run_tiger_nchs_full()
     run_tiger_nchs_smushed()
-
+    create_oof_datasets()
+    run_stacking() 
     optimize_svm_viirs()
 
 
@@ -245,6 +354,8 @@ def main():
         "viirs_smushed", 
         "tiger", 
         "tiger_smushed", 
+        "oof", 
+        "stacking", 
         "optimize_svm", 
         "all"
     ] 
@@ -254,6 +365,8 @@ def main():
         "viirs_smushed": run_viirs_nchs_smushed, 
         "tiger": run_tiger_nchs_full,
         "tiger_smushed": run_tiger_nchs_smushed, 
+        "oof": create_oof_datasets,
+        "stacking": run_stacking, 
         "optimize_svm": optimize_svm_viirs,  
         "all": run_all
     }
