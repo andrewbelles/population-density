@@ -8,6 +8,7 @@
 
 
 import numpy as np 
+import pandas as pd 
 
 from numpy.typing import NDArray
 from typing import Callable, Sequence, TypedDict, List 
@@ -16,7 +17,6 @@ from scipy.io import loadmat
 
 from support.helpers import (
     _mat_str_vector,
-    _haversine_dist
 )
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
@@ -30,6 +30,7 @@ class DatasetDict(TypedDict):
     features: NDArray
     labels: NDArray
     coords: NDArray
+    feature_names: NDArray[np.str_]
     sample_ids: NDArray[np.str_]
 
 DatasetLoader = Callable[[str], DatasetDict]
@@ -73,7 +74,13 @@ def load_climate_population(filepath: str, *, decade: int, groups: List[str]) ->
     else: 
         raise ValueError(f"dataset failed to extract fips codes")
         
-    return {"features": features, "labels": y, "coords": coords, "sample_ids": fips}
+    return {
+        "features": features, 
+        "labels": y, 
+        "coords": coords,
+        "feature_names": np.array([]), 
+        "sample_ids": fips
+    }
 
 
 def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) -> DatasetDict: 
@@ -121,7 +128,13 @@ def load_climate_geospatial(filepath: str, *, target: str, groups: List[str]) ->
         raise ValueError(f"{groups} does not contain any valid group labels for data")
 
     features = np.hstack(features) if len(features) > 1 else features[0] 
-    return {"features": features, "labels": y, "coords": c, "sample_ids": fips}
+    return {
+        "features": features, 
+        "labels": y, 
+        "coords": c,
+        "feature_names": np.array([]),
+        "sample_ids": fips
+    }
 
 
 def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat", "lon"]) -> DatasetDict: 
@@ -144,14 +157,26 @@ def load_geospatial_climate(filepath, *, target: str, groups: List[str] = ["lat"
 
     if target == "all": 
         y = F.astype(np.float64, copy=False) 
-        return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
+        return {
+            "features": X, 
+            "labels": y, 
+            "coords": coords, 
+            "feature_names": names, 
+            "sample_ids": fips
+        }
 
     cols = [f"{target}_{m}" for m in MONTHS]
     col_idx = [int(np.where(names == c)[0][0]) for c in cols]
     Ym = F[:, col_idx] 
     y = np.column_stack([Ym, Ym.mean(axis=1)])
 
-    return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": coords,
+        "feature_names": names, 
+        "sample_ids": fips
+    }
 
 
 def load_saipe_population(
@@ -194,7 +219,13 @@ def load_saipe_population(
     else: 
         raise ValueError("dataset failed to extract fips codes")
 
-    return {"features": features, "labels": y, "coords": coords, "sample_ids": fips}
+    return {
+        "features": features, 
+        "labels": y, 
+        "coords": coords, 
+        "feature_names": np.array([]), 
+        "sample_ids": fips
+    }
 
 
 def load_viirs_nchs(filepath: str) -> DatasetDict: 
@@ -215,8 +246,20 @@ def load_viirs_nchs(filepath: str) -> DatasetDict:
     else: 
         raise ValueError(f"{filepath} missing fips_codes")
 
+    if "feature_names" in mat: 
+        feature_names = _mat_str_vector(mat["feature_names"]).astype("U")
+        feature_names = np.array([n.strip() for n in feature_names], dtype="U")
+    else: 
+        feature_names = None 
+
     coords = np.zeros((X.shape[0],2), dtype=np.float64)
-    return {"features": X, "labels": y, "coords": coords, "sample_ids": fips}
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": coords,
+        "feature_names": feature_names,
+        "sample_ids": fips
+    }
 
 
 def load_residual_dataset(residual_filepath: str, original_filepath: str) -> DatasetDict: 
@@ -259,6 +302,7 @@ def load_residual_dataset(residual_filepath: str, original_filepath: str) -> Dat
         "features": X, 
         "labels": y, 
         "coords": coords, 
+        "feature_names": np.array([]), 
         "sample_ids": base["sample_ids"]
     }
 
@@ -298,6 +342,7 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
         "features": X, 
         "labels": y, 
         "coords": coords,
+        "feature_names": np.array([]), 
         "sample_ids": fips 
     }
 
@@ -322,141 +367,12 @@ def load_stacking(filepaths: Sequence[str]) -> DatasetDict:
     X = np.hstack(feats)
     coords = np.zeros((X.shape[0], 2), dtype=np.float64)
 
-    return {"features": X, "labels": labels, "coords": coords, "sample_ids": fips}
-
-
-def load_neighbors_by_density(
-    compact_filepath: str, 
-    label_filepath: str,
-    *, 
-    decade: int = 2020, 
-    groups: List[str] = ["coords", "embeddings"], 
-    pos_threshold: float = 0.1,      # neighbors if density within 10% 
-    neg_threshold: float = 0.5,      # not neighbors if density differs by > .5 
-    neg_ratio: float = 3.0,          # 3x negative to every positive 
-    local_radius_km: float = 200.0, 
-    null_test: bool = False, 
-    random_state: int = 0
-) -> DatasetDict: 
-    
-    '''
-    Loads population data, county centroids (lat, lon), and a climate representation. 
-
-    Then automatically labels counties as neighbors for a classification problem.
-
-    Caller Provides: 
-        decade: decade to classify on 
-        groups: groups to include in feature set 
-        pos_threshold: threshold for counties to be neighbors (1)
-        neg_threshold: threshold for counties to not be neighbors (0) 
-        neg_ratio: class ratio in terms of 0 class 
-        random_state: seed for reproducibility 
-
-    We return: 
-        Dataset dict with features derived from groups. Labels derived from 
-        features. Coords are empty to avoid accidental leakage by caller 
-    '''
-
-    # Get coords & pop density 
-
-    pop_data = loadmat(label_filepath)
-
-    pop_fips   = _mat_str_vector(pop_data["fips_codes"])
-    pop_coords = np.asarray(pop_data["coords"], dtype=np.float64)
-
-    if f"decade_{decade}" not in pop_data["decades"].dtype.names: 
-        raise ValueError(f"Decade {decade} not found in {label_filepath}")
-
-    decade_struct = pop_data["decades"][f"decade_{decade}"][0, 0]
-    pop_labels = np.asarray(decade_struct["labels"][0, 0], dtype=np.float64).reshape(-1)
-
-    # Get embeddings
-
-    embed_data = loadmat(compact_filepath)
-    if "weights" in embed_data: 
-        weights = np.asarray(embed_data["weights"], dtype=np.float64).reshape(-1)
-    else: 
-        raise ValueError("No weights in dataset for metric")
-
-    embeds = np.asarray(embed_data["features"], dtype=np.float64) 
-
-    if "fips_codes" in embed_data: 
-        embed_fips = _mat_str_vector(embed_data["fips_codes"]) 
-    else: 
-        raise KeyError(f"Could not extract fips_codes from dataset")
-
-    common_fips, pop_idx, embed_idx = np.intersect1d(
-        pop_fips, embed_fips, return_indices=True 
-    )
-
-    if len(common_fips) == 0: 
-        raise ValueError("No overlapping fips_codes found between datasets")
-
-    y_density = pop_labels[pop_idx].reshape(-1, 1)
-    coords    = pop_coords[pop_idx]
-    X_emb     = embeds[embed_idx]
-
-    # Destroy link between Location X and Climate X to try and collapse classifier
-    # Used to determine if embedding carries any real signal  
-    if null_test: 
-        rng   = np.random.default_rng(random_state)
-        X_emb = X_emb[rng.permutation(X_emb.shape[0])] 
-
-    D_geo = _haversine_dist(coords, coords)
-
-    # Scale by variance then by norm  
-    X_emb_scaled = X_emb * np.sqrt(weights)
-    X_emb_norm = X_emb_scaled / (np.linalg.norm(X_emb_scaled, axis=1, keepdims=True) + 1e-12)
-    D_emb = np.linalg.norm(X_emb_norm[:, None, :] - X_emb_norm[None, :, :], axis=-1)
-
-    mask_locality = (D_geo < local_radius_km) & (D_geo > 0)
-
-    # Get similarity as log-difference 
-    y_log = np.log1p(y_density)
-    diff_density = np.abs(y_log - y_log.T)
-
-    pos_mask = (diff_density < pos_threshold) & mask_locality 
-    neg_mask = (diff_density > neg_threshold) & mask_locality
-
-    rng = np.random.default_rng(random_state)
-
-    pos_rows, pos_cols = np.where(np.triu(pos_mask, k=1))
-    neg_rows, neg_cols = np.where(np.triu(neg_mask, k=1))
-
-    n_pos = len(pos_rows) 
-    n_neg = int(n_pos * neg_ratio)
-    n_neg = min(n_neg, len(neg_rows))
-
-    if n_neg > 0: 
-        neg_sample_idx = rng.choice(len(neg_rows), size=n_neg, replace=False)
-        pair_rows = np.concatenate([pos_rows, neg_rows[neg_sample_idx]])
-        pair_cols = np.concatenate([pos_cols, neg_cols[neg_sample_idx]])
-    else: 
-        pair_rows = pos_rows 
-        pair_cols = pos_cols 
-        n_neg = 0 
-
-    feature_matrices = []
-    if "coords" in groups: 
-        f_geo = D_geo[pair_rows, pair_cols].reshape(-1, 1)
-        feature_matrices.append(f_geo)
-    
-    if "embeddings" in groups: 
-        f_emb = D_emb[pair_rows, pair_cols].reshape(-1, 1)
-        feature_matrices.append(f_emb)
-
-    if not feature_matrices: 
-        raise ValueError("groups must contain 'coords' or 'embeddings'")
-
-    X = np.hstack(feature_matrices).astype(np.float64, copy=False)
-    y = np.concatenate([np.ones(n_pos), np.zeros(n_neg)]).astype(np.int64, copy=False)
-
     return {
         "features": X, 
-        "labels": y, 
-        "coords": coords[pair_rows],
-        "sample_ids": common_fips
-    }
+        "labels": labels, 
+        "coords": coords, 
+        "feature_names": np.array([]),   
+        "sample_ids": fips}
 
 
 # ---------------------------------------------------------
@@ -565,3 +481,127 @@ def load_climate_and_geospatial_unsupervised(
         "coords": np.empty((0,2), dtype=np.float64), 
         "coord_names": np.empty((0,), dtype="U1")
     }
+
+# --------------------------------------------------------- 
+# OOF, Probability Datasets 
+# --------------------------------------------------------- 
+
+class OOFDatasetDict(TypedDict):
+    probs: NDArray
+    preds: NDArray
+    labels: NDArray
+    fips_codes: NDArray[np.str_]
+    model_names: NDArray[np.str_]
+    class_labels: NDArray
+
+def load_oof_predictions(filepath: str) -> OOFDatasetDict: 
+
+    mat = loadmat(filepath) 
+
+    if "fips_codes" not in mat: 
+        raise ValueError(f"{filepath} missing fips_codes")
+    fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+
+    if "model_names" not in mat: 
+        raise ValueError(f"{filepath} missing model_names")
+    model_names = _mat_str_vector(mat["model_names"]).astype("U64")
+
+    if "class_labels" in mat:
+        class_labels = np.asarray(mat["class_labels"]).reshape(-1).astype(np.int64)
+    else: 
+        class_labels = np.array([], dtype=np.int64)
+
+    if "probs" in mat: 
+        probs = np.asarray(mat["probs"], dtype=np.float64)
+        if probs.ndim != 3: 
+            raise ValueError(f"{filepath} expected probs with shape (n, m, c), got {probs.shape}")
+    else: 
+        if "features" not in mat: 
+            raise ValueError(f"{filepath} missing probs/features for OOF")
+        feats = np.asarray(mat["features"], dtype=np.float64)
+        n_models  = model_names.shape[0]
+        n_classes = class_labels.shape[0] if class_labels.size else 1 
+        expected = n_models * n_classes 
+        if feats.shape[1] != expected: 
+            raise ValueError(f"{filepath} features cols ({feats.shape[1]} != {expected})") 
+        probs = feats.reshape(feats.shape[0], n_models, n_classes)
+
+    if "preds" in mat: 
+        preds = np.asarray(mat["preds"], dtype=np.int64)
+    else: 
+        pred_idx = np.argmax(probs, axis=2)
+        preds = class_labels[pred_idx] if class_labels.size else pred_idx 
+
+    if "labels" not in mat: 
+        raise ValueError(f"{filepath} missing labels")
+    labels = np.asarray(mat["labels"]).reshape(-1)
+
+    if probs.shape[0] != labels.shape[0]: 
+        raise ValueError(f"{filepath} probs rows ({probs.shape[0]}) !- label rows ({labels.shape[0]})")
+
+    return {
+        "probs": probs, 
+        "preds": preds, 
+        "labels": labels, 
+        "fips_codes": fips, 
+        "model_names": model_names, 
+        "class_labels": class_labels 
+    }
+
+def load_oof_errors(
+    oof_path: str, 
+    label_path: str | None = None, 
+    coords_path: str | None = None, 
+    model_name: str | None = None 
+) -> pd.DataFrame: 
+
+    oof   = loadmat(oof_path)
+    label = loadmat(label_path)
+
+    fips_oof   = _mat_str_vector(oof["fips_codes"]).astype("U5")
+    fips_label = _mat_str_vector(label["fips_codes"]).astype("U5")
+
+    idx_oof   = {f: i for i, f in enumerate(fips_oof)}
+    idx_label = {f: i for i, f in enumerate(fips_label)}
+
+    common    = [f for f in fips_label if f in idx_oof]
+    oof_idx   = np.array([idx_oof[f] for f in common], dtype=int)
+    label_idx = np.array([idx_label[f] for f in common], dtype=int)
+
+    y_true = np.asarray(label["labels"]).reshape(-1)[label_idx]
+
+    preds = np.asarray(oof["preds"])
+    model_names = _mat_str_vector(oof["model_names"]).astype("U64")
+
+    if preds.ndim == 2 and preds.shape[1] > 1: 
+        if model_name is None: 
+            raise ValueError(f"model_name required when OOF has multiple models")
+        m_idx  = int(np.where(model_names == model_name)[0][0])
+        y_pred = preds[oof_idx, m_idx]
+    else: 
+        y_pred = preds[oof_idx].reshape(-1)
+
+    if "coords" in label: 
+        coords = np.asarray(label["coords"], dtype=np.float64)
+        if coords.ndim == 2 and coords.shape == (2, coords.shape[1]):
+            coords = coords.T 
+        coords = coords[label_idx]
+    elif coords_path is not None:
+        cm     = loadmat(coords_path)
+        fips_c = _mat_str_vector(cm["fips_codes"]).astype("U5")
+        coords = np.asarray(cm["coords"], dtype=np.float64)
+        if coords.ndim == 2 and coords.shape == (2, coords.shape[1]): 
+            coords = coords.T 
+        idx_c = {f: i for i, f in enumerate(fips_c)}
+        coords = np.array([coords[idx_c[f]] for f in common], dtype=np.float64)
+    else: 
+        coords = np.full((len(common), 2), np.nan, dtype=np.float64)
+
+    return pd.DataFrame({
+        "FIPS": common, 
+        "Lat": coords[:, 0], 
+        "Lon": coords[:, 1], 
+        "True_Class": y_true, 
+        "Predicted_Class": y_pred,
+        "Class_Distance": y_true - y_pred
+    })

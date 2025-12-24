@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd 
 
 from scipy.io import savemat 
-from scipy.stats import entropy
+from scipy.stats import entropy, kurtosis, skew
 
 from rasterstats import zonal_stats 
 import fiona 
@@ -22,8 +22,8 @@ import fiona
 from support.helpers import project_path
 
 class ViirsDataset: 
-    STATS = ["min", "max", "median", "mean"]
-    EXTRA = ["variance", "entropy"]
+    STATS = ["min", "max", "mean"]
+    EXTRA = ["variance", "entropy", "skew", "kurtosis"]
 
     def __init__(
         self, 
@@ -103,7 +103,9 @@ class ViirsDataset:
 
         custom_stats_map = {
             "variance": self._get_variance, 
-            "entropy": self._get_entropy
+            "entropy": self._get_entropy, 
+            "skew": self._get_skew, 
+            "kurtosis": self._get_kurtosis
         }
 
         with fiona.open(counties_path) as source: 
@@ -128,9 +130,18 @@ class ViirsDataset:
                     if any(s.get(k) is None for k in all_stats_keys): 
                         continue 
 
+                    mean_val = float(s["mean"])
+                    var_val  = float(s["variance"])
+
+                    if mean_val > 1e-6: 
+                        cv = np.sqrt(var_val) / mean_val 
+                    else: 
+                        cv = 0.0 
+
                     rows.append({
                         "FIPS": fips, 
                         **{f"viirs_{k}": float(s[k]) for k in all_stats_keys}, 
+                        "viirs_cv": cv, 
                         "label": self.label_map[fips]
                     })
 
@@ -170,7 +181,8 @@ class ViirsDataset:
         if self.df is None or self.df.empty: 
             raise ValueError("No dataset to save")
 
-        feature_cols = [f"viirs_{k}" for k in self.STATS]
+        feature_cols = [c for c in self.df.columns if c.startswith("viirs_")]
+        feature_cols.sort() 
 
         mat = {
             "features": self.df[feature_cols].to_numpy(dtype=np.float64), 
@@ -195,6 +207,16 @@ class ViirsDataset:
 
         counts, _ = np.histogram(valid, bins=100, density=False)
         return entropy(counts)
+
+    @staticmethod 
+    def _get_skew(x): 
+        valid = x.compressed() if hasattr(x, "compressed") else x 
+        return skew(valid) if valid.size > 0 else 0.0 
+
+    @staticmethod
+    def _get_kurtosis(x):
+        valid = x.compressed() if hasattr(x, "compressed") else x 
+        return kurtosis(valid) if valid.size > 0 else 0.0
 
     @staticmethod
     def _coarse_label(code: int) -> int: 

@@ -364,6 +364,10 @@ class RFClassifierWrapper(BaseEstimator, ClassifierMixin):
     def predict_proba(self, X): 
         return self.model_.predict_proba(X)
 
+    @property 
+    def feature_importances_(self):
+        return self.model_.feature_importances_
+
 
 class XGBClassifierWrapper(BaseEstimator, RegressorMixin): 
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 #
-# tiger_nchs_dataset.py  Andrew Belles  Dec 23rd, 2025  
+# tiger_nchs_dataset.py  Andrew Belles  Dec 24, 2025
 #
-# Processes road data on a per county basis from TIGER dataset
+# Processes road data on a per county basis from TIGER dataset.
+# Computes 7 Structural Features (Density, Topology, Granularity, Shape).
+# Parallelized for performance.
 #
 
-import argparse, os, fiona, time
+import argparse, os, fiona, time, math
 import geopandas as gpd
 import pandas as pd
 import numpy as np 
@@ -16,24 +18,18 @@ from scipy.io import savemat
 from multiprocessing import Pool, cpu_count
 from support.helpers import project_path
 
-# Global variables for workers (avoids pickling large objects)
+# Global variables for workers
 WORKER_GDF = None
 WORKER_SINDEX = None
 WORKER_TRANSFORMER = None
 WORKER_MTFCC_HWY = None
-WORKER_MTFCC_DRIVE = None
 WORKER_LABEL_MAP = None
 
 def init_worker(county_shp, src_crs, proj_crs, label_map):
-    """
-    Initializes each worker process.
-    Loads the county shapefile ONCE per core so we don't pass it over IPC.
-    """
     global WORKER_GDF, WORKER_SINDEX, WORKER_TRANSFORMER
-    global WORKER_MTFCC_HWY, WORKER_MTFCC_DRIVE, WORKER_LABEL_MAP
+    global WORKER_MTFCC_HWY, WORKER_LABEL_MAP
     
     # 1. Load Counties
-    # print(f"[Worker {os.getpid()}] Loading counties...")
     gdf = gpd.read_file(county_shp).to_crs(src_crs)
     gdf["FIPS"] = gdf["GEOID"]
     
@@ -43,38 +39,31 @@ def init_worker(county_shp, src_crs, proj_crs, label_map):
     WORKER_GDF = gdf
     WORKER_SINDEX = gdf.sindex
     WORKER_LABEL_MAP = label_map
-    
-    # 2. Setup Transformers & Constants
     WORKER_TRANSFORMER = Transformer.from_crs(src_crs, proj_crs, always_xy=True).transform
-    
-    # Constants
     WORKER_MTFCC_HWY = {'S1100', 'S1200'}
-    WORKER_MTFCC_DRIVE = {'S1100', 'S1200', 'S1400'}
 
 def process_batch(features_batch):
     """
-    Pure CPU task: Takes a list of raw feature dicts, performs spatial operations.
-    Returns a dictionary of aggregated stats for the batch.
+    Computes local stats including Euclidean distance for Circuity.
     """
-    # Local aggregation for this batch
-    # FIPS -> {len_hwy, len_local, nodes: {}}
     local_stats = {}
     
     for props, geom_obj in features_batch:
         mtfcc = props.get('MTFCC', '')
         
-        # 1. Spatial Lookup (Lat/Lon)
-        # Using the global worker sindex
+        # 1. Spatial Lookup
         possible_idxs = list(WORKER_SINDEX.query(geom_obj.centroid, predicate='intersects'))
-        
-        if not possible_idxs:
-            continue
+        if not possible_idxs: continue
             
         matched_fips = WORKER_GDF.iloc[possible_idxs[0]]["FIPS"]
         
-        # Initialize if new for this batch
         if matched_fips not in local_stats:
-            local_stats[matched_fips] = {"len_hwy": 0.0, "len_local": 0.0, "nodes": {}}
+            local_stats[matched_fips] = {
+                "len_hwy": 0.0, "cnt_hwy": 0,
+                "len_local": 0.0, "cnt_local": 0,
+                "euclid_local": 0.0, # Track straight-line dist for circuity
+                "nodes": {}
+            }
         
         stats = local_stats[matched_fips]
         
@@ -84,11 +73,31 @@ def process_batch(features_batch):
         
         if mtfcc in WORKER_MTFCC_HWY:
             stats["len_hwy"] += length_m
+            stats["cnt_hwy"] += 1
         else:
             stats["len_local"] += length_m
+            stats["cnt_local"] += 1
             
-        # 3. Topology
-        # Extract endpoints logic inline for speed
+            # Compute Euclidean Distance (Start-to-End) for Circuity
+            # If loop, dist is 0 (Circuity is infinite, handled by sum aggregation)
+            if geom_proj.geom_type == "LineString":
+                c = geom_proj.coords
+                if len(c) >= 2:
+                    dx = c[-1][0] - c[0][0]
+                    dy = c[-1][1] - c[0][1]
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    stats["euclid_local"] += dist
+            elif geom_proj.geom_type == "MultiLineString":
+                # For MultiLine, sum euclidean of parts
+                for line in geom_proj.geoms:
+                    c = line.coords
+                    if len(c) >= 2:
+                        dx = c[-1][0] - c[0][0]
+                        dy = c[-1][1] - c[0][1]
+                        dist = math.sqrt(dx*dx + dy*dy)
+                        stats["euclid_local"] += dist
+            
+        # 3. Topology (Nodes)
         pts = []
         if geom_proj.geom_type == "LineString":
             c = geom_proj.coords
@@ -111,25 +120,21 @@ class TigerProcessorMulti:
     
     SRC_CRS = "EPSG:4269"
     PROJ_CRS = "EPSG:5070"
-    BATCH_SIZE = 20000 # Tune this: Larger = less IPC overhead, more RAM
+    BATCH_SIZE = 20000 
     
     def __init__(self, gdb_path, county_shp, out_path, labels_path=None, state_filter=None):
         self.gdb_path = gdb_path
         self.county_shp = county_shp
         self.out_path = out_path
-        self.state_filter = state_filter
+        self.state_filter = state_filter # Not used in production run but good for debug
         
-        # Load labels in main process to pass to workers
         if labels_path is None:
-             # Adjust this import path if needed based on where you run it
-             labels_path = "data/nchs/nchs_classification.csv"
-        
+             labels_path = project_path("data", "nchs", "nchs_classification.csv")
         self.label_map = self._load_labels(labels_path)
 
     def _load_labels(self, path):
         labels = {}
         if not os.path.exists(path):
-            # Fallback or empty if not found, but better to fail early
             print(f"[WARN] Labels file not found at {path}")
             return {}
         df = pd.read_csv(path, dtype=str)
@@ -149,9 +154,7 @@ class TigerProcessorMulti:
 
     def run(self):
         start_time = time.time()
-        
-        # 1. Setup Multiprocessing Pool
-        n_cores = max(1, cpu_count() - 1) # Leave one for OS/Main
+        n_cores = max(1, cpu_count() - 1) 
         print(f"[INFO] Initializing Pool with {n_cores} workers...")
         
         pool = Pool(
@@ -160,71 +163,63 @@ class TigerProcessorMulti:
             initargs=(self.county_shp, self.SRC_CRS, self.PROJ_CRS, self.label_map)
         )
 
-        # 2. Stream Data
         target_layer = self._find_edges_layer()
         print(f"[INFO] Streaming from GDB Layer: {target_layer}")
         
         batch = []
         jobs = []
-        
-        # Allow filtering driving roads early to reduce IPC payload
         DRIVING = {'S1100', 'S1200', 'S1400'}
         
         with fiona.open(self.gdb_path, layer=target_layer) as src:
             for feature in src:
-                props = feature['properties']
-                if props.get('MTFCC') not in DRIVING:
+                if feature['properties'].get('MTFCC') not in DRIVING:
                     continue
-                
-                # Convert to shapely object HERE (lightweight) or inside worker
-                # Converting here allows us to filter empty geometries early
                 try:
                     geom = shape(feature['geometry'])
                     if not geom.is_empty:
-                        batch.append((props, geom))
-                except:
-                    continue
+                        batch.append((feature['properties'], geom))
+                except: continue
 
                 if len(batch) >= self.BATCH_SIZE:
                     jobs.append(pool.apply_async(process_batch, (batch,)))
                     batch = []
-                    
                     if len(jobs) % 10 == 0:
                         print(f"> Submitted {len(jobs) * self.BATCH_SIZE} roads...", end="\r")
 
-            # Final batch
-            if batch:
-                jobs.append(pool.apply_async(process_batch, (batch,)))
+            if batch: jobs.append(pool.apply_async(process_batch, (batch,)))
 
         print(f"\n[INFO] All tasks submitted. Waiting for results...")
         pool.close()
         pool.join()
 
-        # 3. Aggregate Results (Reduce)
         print("[INFO] Aggregating worker results...")
-        final_stats = {} # FIPS -> {len_hwy, len_local, nodes: {}}
+        final_stats = {} 
         
         for job in jobs:
-            batch_result = job.get() # Blocking get
+            batch_result = job.get() 
             for fips, data in batch_result.items():
                 if fips not in final_stats:
-                    final_stats[fips] = {"len_hwy": 0.0, "len_local": 0.0, "nodes": {}}
+                    final_stats[fips] = {
+                        "len_hwy": 0.0, "cnt_hwy": 0,
+                        "len_local": 0.0, "cnt_local": 0,
+                        "euclid_local": 0.0,
+                        "nodes": {}
+                    }
                 
-                target = final_stats[fips]
-                target["len_hwy"] += data["len_hwy"]
-                target["len_local"] += data["len_local"]
+                t = final_stats[fips]
+                t["len_hwy"] += data["len_hwy"]
+                t["cnt_hwy"] += data["cnt_hwy"]
+                t["len_local"] += data["len_local"]
+                t["cnt_local"] += data["cnt_local"]
+                t["euclid_local"] += data["euclid_local"]
                 
-                # Merge nodes (expensive but necessary)
                 for k, v in data["nodes"].items():
-                    target["nodes"][k] = target["nodes"].get(k, 0) + v
+                    t["nodes"][k] = t["nodes"].get(k, 0) + v
 
-        # 4. Final Dataframe Build (Same as before)
         self._save(final_stats)
         print(f"[DONE] Total time: {time.time() - start_time:.2f}s")
 
     def _save(self, stats):
-        # ... (Same logic as previous script to load county ALAND and save .mat) ...
-        # Reloading counties briefly to get ALAND and ensure all FIPS are present
         gdf = gpd.read_file(self.county_shp)
         gdf["FIPS"] = gdf["GEOID"]
         
@@ -241,27 +236,79 @@ class TigerProcessorMulti:
             
             if area_km2 < 0.1: area_km2 = 0.1
             
-            # Calculate Ratios
-            deg3, deg4 = 0, 0
+            # --- FEATURE 1-2: Densities ---
+            dens_hwy = (data["len_hwy"]/1000)/area_km2
+            dens_local = (data["len_local"]/1000)/area_km2
+            
+            # --- FEATURE 3-4: Avg Lengths ---
+            cnt_local = data.get("cnt_local", 0)
+            avg_len_local = (data["len_local"] / cnt_local) if cnt_local > 0 else 0.0
+            
+            cnt_hwy = data.get("cnt_hwy", 0)
+            avg_len_hwy = (data["len_hwy"] / cnt_hwy) if cnt_hwy > 0 else 0.0
+            
+            # --- FEATURE 5: 4-Way Ratio (Grid) ---
+            # --- FEATURE 6: Dead-End Density (Suburban) ---
+            deg1, deg3, deg4 = 0, 0, 0
             for _, count in data["nodes"].items():
-                # Node aggregation across batches creates exact counts
-                if count == 3: deg3 += 1
+                if count == 1: deg1 += 1
+                elif count == 3: deg3 += 1
                 elif count >= 4: deg4 += 1
             
-            total = deg3 + deg4
-            ratio = deg4 / total if total > 0 else 0.0
+            total_int = deg3 + deg4
+
+            ratio_4way = deg4 / total_int if total_int > 0 else 0.0
+
+            ratio_3way = deg3 / total_int if total_int > 0 else 0.0 
             
+            # Dead End Density (Dead Ends / km2)
+            dens_deadend = deg1 / area_km2
+            
+            # Circuity (Shape) ---
+            # Ratio of Actual Length / Straight Line Length
+            # 1.0 = Straight, >1.2 = Winding
+            sum_euclid = data.get("euclid_local", 0)
+            if sum_euclid > 0:
+                circuity = data["len_local"] / sum_euclid
+            else:
+                circuity = 1.0 # Default to straight if no data
+            
+            # Meshedness Coefficient 
+            V = len(data["nodes"])
+            E = cnt_local 
+
+            if V > 5: 
+                meshedness = (E - V + 1) / (2 * V - 5)
+            else: 
+                meshedness = 0.0
+
             rows.append({
                 "FIPS": fips,
                 "label": self.label_map[fips],
-                "tiger_density_hwy": (data["len_hwy"]/1000)/area_km2,
-                "tiger_density_local": (data["len_local"]/1000)/area_km2,
-                "tiger_ratio_4way": ratio
+                "tiger_density_hwy": dens_hwy,
+                "tiger_density_local": dens_local,
+                "tiger_ratio_4way": ratio_4way,
+                "tiger_ratio_3way": ratio_3way, 
+                "tiger_meshedness": meshedness, 
+                "tiger_avg_len_local": avg_len_local,
+                "tiger_avg_len_hwy": avg_len_hwy,
+                "tiger_density_deadend": dens_deadend,
+                "tiger_circuity_local": circuity
             })
             
         df = pd.DataFrame(rows)
         if not df.empty:
-            feature_cols = ["tiger_density_hwy", "tiger_density_local", "tiger_ratio_4way"]
+            feature_cols = [
+                "tiger_density_hwy", 
+                "tiger_density_local", 
+                "tiger_ratio_4way",
+                "tiger_ratio_3way", 
+                "tiger_avg_len_local", 
+                "tiger_avg_len_hwy",
+                "tiger_density_deadend", 
+                "tiger_circuity_local", 
+                "tiger_meshedness"
+            ]
             mat = {
                 "features": df[feature_cols].to_numpy(dtype=np.float64),
                 "labels": df["label"].to_numpy(dtype=np.int64).reshape(-1, 1), 
@@ -276,17 +323,15 @@ class TigerProcessorMulti:
 
 
 def main(): 
-    label_file = project_path("data", "nchs", "nchs_classification.csv")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--gdb", required=True)
     parser.add_argument("--shapefile", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--labels", default=label_file)
+    parser.add_argument("--labels", default=project_path("data", "nchs", "nchs_classification.csv"))
     args = parser.parse_args()
     
-    proc = TigerProcessorMulti(args.gdb, args.shapefile, args.out, args.labels)
-    proc.run()
+    TigerProcessorMulti(args.gdb, args.shapefile, args.out, args.labels).run()
 
 
 if __name__ == "__main__":

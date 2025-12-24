@@ -289,6 +289,7 @@ class CrossValidator:
 
         self.predictions_ : pd.DataFrame | None = None  
         self.oof_: dict | None = None 
+        self.models_: dict[str, list[BaseEstimator]] = {} 
         self.sample_ids = np.asarray(
             data["sample_ids"], dtype="U5"
         ) if "sample_ids" in data else np.asarray(np.arange(self.X.shape[0]), dtype=np.int64) - 1
@@ -310,10 +311,11 @@ class CrossValidator:
 
         results   = []
         pred_rows = []
+        model_store = {name: [] for name in models}
 
-        oof_preds, oof_classes = (None, None)
+        oof_sums, oof_counts, oof_classes = (None, None, None)
         if oof: 
-            oof_preds, oof_classes = self._init_oof(models, y_for_split)
+            oof_sums, oof_counts, oof_classes = self._init_oof(models, y_for_split)
 
         for model_name, make_model in models.items(): 
             print(f"> {model_name} now folding...")
@@ -365,7 +367,8 @@ class CrossValidator:
 
                     if oof: 
                         self._update_oof(
-                            oof_preds, 
+                            oof_sums, 
+                            oof_counts, 
                             model_name, 
                             test_idx, 
                             y_pred_eval,
@@ -374,12 +377,16 @@ class CrossValidator:
 
                 except Exception as e: 
                     results.append(self._error_row(model_name, fold_i, train_idx, test_idx, e))
-                
+
+                model_store[model_name].append(model)
+
+        self.models_ = model_store
+
         if collect and pred_rows: 
             self.predictions_ = pd.DataFrame(pred_rows)
 
         if oof: 
-            self.oof_ = {"preds": oof_preds, "classes": oof_classes}
+            self.oof_ = {"sums": oof_sums, "counts": oof_counts, "classes": oof_classes}
 
         return pd.DataFrame(results )
 
@@ -459,10 +466,12 @@ class CrossValidator:
         else: 
             oof_classes, n_classes = None, 1 
 
-        oof_preds = {}
+        oof_counts = {}
+        oof_sums   = {}
         for model_name in models: 
-            oof_preds[model_name] = np.full((self.n_samples, n_classes), np.nan)
-        return oof_preds, oof_classes
+            oof_sums[model_name]  = np.zeros((self.n_samples, n_classes), dtype=np.float64) 
+            oof_counts[model_name] = np.zeros((self.n_samples, 1), dtype=np.int64)
+        return oof_sums, oof_counts, oof_classes
 
     def _metrics_row(
         self,
@@ -523,13 +532,16 @@ class CrossValidator:
                 "residual": float(y_test_flat[i] - y_pred_flat[i])
             })
 
-    def _update_oof(self, oof_preds, model_name, test_idx, y_pred_eval, y_prob): 
+    def _update_oof(self, oof_sums, oof_counts, model_name, test_idx, y_pred_eval, y_prob): 
         if self.task.task_type == "classification": 
             if y_prob is None: 
                 raise ValueError(f"{model_name} missing predict_proba for OOF stacking")
-            oof_preds[model_name][test_idx] = y_prob 
+            oof_sums[model_name][test_idx]   += y_prob
+            oof_counts[model_name][test_idx] += 1 
         else: 
-            oof_preds[model_name][test_idx] = np.asarray(y_pred_eval).reshape(-1, 1)
+            y_pred = np.asarray(y_pred_eval).reshape(-1, 1)
+            oof_sums[model_name][test_idx]   += y_pred 
+            oof_counts[model_name][test_idx] += 1
 
     def _error_row(self, model_name, fold_i, train_idx, test_idx, e): 
         row = {
@@ -590,34 +602,57 @@ class CrossValidator:
         if self.oof_ is None: 
             raise ValueError("OOF not collected. run with oof=True")
 
-        preds   = self.oof_["preds"]
+        sums    = self.oof_["sums"]
+        counts  = self.oof_["counts"]
         classes = self.oof_.get("classes")
 
         if model_order is None: 
-            model_order = list(preds.keys())
+            model_order = list(sums.keys())
 
-        blocks = [preds[m] for m in model_order]
-        X = np.hstack(blocks)
+        probs = {}
+        for m in model_order: 
+            denom = np.clip(counts[m], 1, None)
+            probs[m] = sums[m] / denom 
+
+        probs_stack = np.stack([probs[m] for m in model_order], axis=1)
 
         if classes is None: 
-            feature_names = np.array(
-                [f"{m}_pred" for m in model_order], dtype="U64"
-            )
+            preds_stack   = np.stack([probs[m].reshape(-1) for m in model_order], axis=1)
+            feature_names = np.array([f"{m}_pred" for m in model_order], dtype="U64")
+            class_labels  = np.array([], dtype=np.int64)
         else: 
-            feature_names = np.array(
-                [f"{m}_p{c}" for m in model_order for c in classes], dtype="U64"
-            )
+            class_labels  = np.array(classes)
+            preds_stack   = np.stack([class_labels[np.argmax(probs[m], axis=1)] for m in model_order], 
+                                     axis=1)
+            feature_names = np.array([f"{m}_p{c}" for m in model_order for c in class_labels], 
+                                     dtype="U64") 
+
+        features = np.hstack([probs[m] for m in model_order])
 
         mat = {
-            "features": X, 
+            "features": features, 
+            "probs": probs_stack, 
+            "preds": preds_stack, 
             "labels": self.y.reshape(-1, 1) if self.y.ndim == 1 else self.y, 
             "feature_names": feature_names, 
             "fips_codes": self.sample_ids, 
             "model_names": np.array(model_order, dtype="U64"), 
             "class_labels": np.array(classes) if classes is not None else np.array([]), 
-            "n_samples": X.shape[0]
+            "n_samples": features.shape[0], 
+            "n_models": len(model_order), 
+            "n_classes": int(probs_stack.shape[2]) if probs_stack.ndim == 3 else 1 
         }
         savemat(out_path, mat)
+
+    def get_model(self, model_name: str, fold: int = -1) -> BaseEstimator:
+        return self._get_models(model_name)[fold]
+
+    def _get_models(self, model_name: str) -> list[BaseEstimator]:
+        if self.models_ is None: 
+            raise ValueError("models not collected")
+        if model_name not in self.models_: 
+            raise KeyError(f"model {model_name} not found")
+        return self.models_[model_name]
 
     @property
     def n_samples(self) -> int: 

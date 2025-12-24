@@ -6,9 +6,13 @@
 # various datasets identified as key for gating layer of HMoE model 
 # 
 
-import argparse 
+import argparse, os 
 
+from matplotlib.colors import BoundaryNorm
 import numpy as np
+import pandas as pd 
+import geopandas as gpd 
+import matplotlib.pyplot as plt
 
 from analysis.cross_validation import (
     CLASSIFICATION,
@@ -26,8 +30,17 @@ from models.estimators import (
 )
 
 from preprocessing.loaders import (
-    load_viirs_nchs, # also loads tiger dataset for now 
+    DatasetDict,
+    load_oof_errors,
+    load_oof_predictions,
+    load_viirs_nchs, # also loads tiger/nlcd datasets for now 
     load_stacking 
+)
+
+from preprocessing.disagreement import (
+    DisagreementSpec,
+    build_disagreement_dataset,
+    load_pass_through_stacking
 )
 
 REPEATS = 10
@@ -125,7 +138,7 @@ def run_viirs_nchs_smushed():
 
 def run_tiger_nchs_full(): 
 
-    print("CLASSIFICATION: (TIGER 2023) Intersection Density and Road Lengths on NCHS")
+    print("CLASSIFICATION: (TIGER 2023) Road Topology, Density, and Texture against NCHS")
 
     filepath = project_path("data", "datasets", "tiger_nchs_2023.mat") 
     
@@ -165,8 +178,7 @@ def run_tiger_nchs_full():
 
 def run_tiger_nchs_smushed(): 
 
-    print("CLASSIFICATION: (TIGER 2023) Intersection Density and Road Lengths on NCHS")
-    print("3-Class Scheme")
+    print("CLASSIFICATION: (TIGER 2023) Road Topology, Density, and Texture against 3-Class NCHS")
 
     filepath = project_path("data", "datasets", "tiger_nchs_2023_smushed.mat") 
     
@@ -204,13 +216,119 @@ def run_tiger_nchs_smushed():
     return summary, results 
 
 
+def run_nlcd_nchs_full():
+    print("CLASSIFICATION: (NLCD 2023) Land Usage Prediction of Urban-Rural Classifications (2023)")
+
+    filepath = project_path("data", "datasets", "nlcd_nchs_2023.mat") 
+    
+    loader = lambda fp: load_viirs_nchs(filepath=fp)
+
+    models = {
+        "Logistic": make_logistic(), 
+        "RandomForest": make_rf_classifier(),
+        "XGBoost": make_xgb_classifier(), 
+        "SVM": make_svm_classifier()
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    cv = CrossValidator(
+        filepath=filepath, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    results = cv.run(
+        models=models, 
+        config=config,
+    )
+
+    summary = cv.summarize(results)
+    cv.format_summary(summary)
+
+    return summary, results 
+
+
+def run_nlcd_nchs_smushed():
+    print("CLASSIFICATION: (NLCD 2023) Land Usage Prediction of 3-Class Urban-Rural"
+          "Classifications (2023)")
+
+    filepath = project_path("data", "datasets", "nlcd_nchs_2023_smushed.mat") 
+    
+    loader = lambda fp: load_viirs_nchs(filepath=fp)
+
+    models = {
+        "Logistic": make_logistic(), 
+        "RandomForest": make_rf_classifier(),
+        "XGBoost": make_xgb_classifier(), 
+        "SVM": make_svm_classifier()
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    cv = CrossValidator(
+        filepath=filepath, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    results = cv.run(
+        models=models, 
+        config=config,
+    )
+
+    summary = cv.summarize(results)
+    cv.format_summary(summary)
+
+    return summary, results 
+
+
 def create_oof_datasets(): 
     print("DATASET: Creates OOF datasets for each best performer per dataset.")
 
     viirs = project_path("data", "datasets", "viirs_nchs_2023.mat")
     tiger = project_path("data", "datasets", "tiger_nchs_2023.mat")
+    nlcd  = project_path("data", "datasets", "nlcd_nchs_2023.mat")
+    
+    # Pre-load data to get common index 
+    viirs_data = load_viirs_nchs(viirs)
+    tiger_data = load_viirs_nchs(tiger)
+    nlcd_data  = load_viirs_nchs(nlcd)
 
-    loader = lambda fp: load_viirs_nchs(filepath=fp)
+    common_fips = sorted(
+        set(viirs_data["sample_ids"]) & 
+        set(tiger_data["sample_ids"]) & 
+        set(nlcd_data["sample_ids"])
+    )
+
+    def _align_loader(base_loader, fips):
+        fips_set = set(fips)
+        def _loader(fp) -> DatasetDict: 
+            data = base_loader(fp)
+            idx_map = {f: i for i, f in enumerate(data["sample_ids"])}
+            idx = np.array([idx_map[f] for f in fips_set if f in idx_map], dtype=int)
+            return {
+                "features": data["features"][idx], 
+                "labels": data["labels"][idx], 
+                "coords": data["coords"][idx], 
+                "feature_names": data["feature_names"], 
+                "sample_ids": data["sample_ids"][idx]
+            }
+        return _loader 
+
+    loader = _align_loader(load_viirs_nchs, common_fips)
 
     viirs_model = {
         "SVM": make_svm_classifier(
@@ -222,6 +340,10 @@ def create_oof_datasets():
 
     tiger_model = {
         "Logistic": make_logistic(),
+    }
+
+    nlcd_model = {
+        "RandomForest": make_rf_classifier()
     }
 
     config = CVConfig(
@@ -245,6 +367,13 @@ def create_oof_datasets():
         scale_y=False 
     )
 
+    nlcd_cv = CrossValidator(
+        filepath=nlcd, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False 
+    )
+
     viirs_cv.run(
         models=viirs_model, 
         config=config,
@@ -259,8 +388,16 @@ def create_oof_datasets():
         splits=splits
     )
 
+    nlcd_cv.run(
+        models=nlcd_model,
+        config=config,
+        oof=True,
+        splits=splits
+    )
+
     viirs_cv.save_oof(project_path("data", "stacking", "viirs_2023_oof.mat"))
     tiger_cv.save_oof(project_path("data", "stacking", "tiger_2023_oof.mat"))
+    nlcd_cv.save_oof(project_path("data", "stacking", "nlcd_2023_oof.mat"))
 
 
 def run_stacking(): 
@@ -269,9 +406,12 @@ def run_stacking():
     
     viirsstack = project_path("data", "stacking", "viirs_2023_oof.mat") 
     tigerstack = project_path("data", "stacking", "tiger_2023_oof.mat")
+    nlcdstack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+
     files = [
         viirsstack, 
-        # tigerstack
+        tigerstack, 
+        nlcdstack
     ]
 
     def stacking_loader(fp: str):
@@ -280,9 +420,7 @@ def run_stacking():
 
     models = {
         "Logistic": make_logistic(), 
-        "RandomForest": make_rf_classifier(),
         "XGBoost": make_xgb_classifier(), 
-        "SVM": make_svm_classifier()
     }
 
     config = CVConfig(
@@ -310,6 +448,162 @@ def run_stacking():
     return summary, results 
 
 
+def run_disagreement():
+    print("DISAGREEMENT: Classification of rows as conflicting vs. agreeing predictions")
+
+    viirs = project_path("data", "datasets", "viirs_nchs_2023.mat")
+    tiger = project_path("data", "datasets", "tiger_nchs_2023.mat")
+    nlcd  = project_path("data", "datasets", "nlcd_nchs_2023.mat")
+
+    viirsstack = project_path("data", "stacking", "viirs_2023_oof.mat") 
+    tigerstack = project_path("data", "stacking", "tiger_2023_oof.mat")
+    nlcdstack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+
+    specs: list[DisagreementSpec] = [
+        {
+            "name": "viirs", 
+            "raw_path": viirs, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": viirsstack, 
+            "oof_loader": load_oof_predictions 
+        }, 
+        {
+            "name": "tiger",
+            "raw_path": tiger, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": tigerstack,
+            "oof_loader": load_oof_predictions 
+        },
+        {
+            "name": "nlcd",
+            "raw_path": nlcd, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": nlcdstack,
+            "oof_loader": load_oof_predictions 
+        }
+    ]
+
+    loader = lambda _: build_disagreement_dataset(specs)
+    feature_names  = build_disagreement_dataset(specs)["feature_names"]
+    
+    models = {
+        "Logistic": make_logistic(), 
+        "RandomForest": make_rf_classifier(), 
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    cv = CrossValidator(
+        filepath=viirs, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    results = cv.run(
+        models=models, 
+        config=config, 
+    )
+
+    summary = cv.summarize(results)
+    cv.format_summary(summary)
+
+    # Load feature importances 
+    rf = cv.get_model("RandomForest")
+    importances = pd.Series(rf.estimator.feature_importances_, index=feature_names) 
+    top = importances.sort_values(ascending=False).head(10)
+
+    print(top)
+
+    return summary, results 
+
+
+def run_passthrough_stacking(): 
+    print("CLASSIFICATION: Meta-Learner classification of Urban-Rural w/ Passthroug Features")
+    print("[viirs_variance, nlcd_urban_core, tiger_density_deadend, nlcd_edge_dens]")
+    viirs = project_path("data", "datasets", "viirs_nchs_2023.mat")
+    tiger = project_path("data", "datasets", "tiger_nchs_2023.mat")
+    nlcd  = project_path("data", "datasets", "nlcd_nchs_2023.mat")
+
+    viirsstack = project_path("data", "stacking", "viirs_2023_oof.mat") 
+    tigerstack = project_path("data", "stacking", "tiger_2023_oof.mat")
+    nlcdstack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+
+    specs: list[DisagreementSpec] = [
+        {
+            "name": "viirs", 
+            "raw_path": viirs, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": viirsstack, 
+            "oof_loader": load_oof_predictions 
+        },
+        {
+            "name": "tiger",
+            "raw_path": tiger, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": tigerstack,
+            "oof_loader": load_oof_predictions 
+        },
+        {
+            "name": "nlcd",
+            "raw_path": nlcd, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": nlcdstack,
+            "oof_loader": load_oof_predictions 
+        }
+    ]
+
+    nchs_loader = lambda fp: load_viirs_nchs(fp)
+
+    loader = lambda label_fp: load_pass_through_stacking(
+        specs,
+        label_path=label_fp, 
+        label_loader=nchs_loader,
+        passthrough_features=[
+            "viirs_variance", 
+            "nlcd_urban_core", 
+            "tiger_density_deadend", 
+            "nlcd_edge_dens"
+        ]
+    )
+    
+    models = {
+        "RandomForest": make_rf_classifier(), 
+    }
+
+    config = CVConfig(
+        n_splits=5, 
+        n_repeats=REPEATS, 
+        stratify=True, 
+        random_state=0 
+    )
+
+    cv = CrossValidator(
+        filepath=viirs, 
+        loader=loader, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+
+    results = cv.run(
+        models=models, 
+        config=config,
+        oof=True 
+    )
+
+    summary = cv.summarize(results)
+    cv.format_summary(summary)
+
+    stacking_oof_path = project_path("data", "stacking", "stacking_passthrough_oof.mat")
+    cv.save_oof(stacking_oof_path)
+
+    return summary, results 
+
 
 def optimize_svm_viirs(): 
     print("OPTIMIZATION: SVM For VIIRS multi-classification for NCHS Urban-Rural Labels (2023)")
@@ -336,14 +630,97 @@ def optimize_svm_viirs():
     return best_model_name
 
 
+def run_gating_visualization(): 
+    print("VISUALIZATION: True, Predicted, and Class Distance plots for CONUS (2023)")
+
+    oof_path   = project_path("data", "stacking", "stacking_passthrough_oof.mat")
+    label_path = project_path("data", "datasets", "viirs_nchs_2023.mat")
+    shapefile  = project_path("data", "geography", "county_shapefile", "tl_2020_us_county.shp")
+    out_dir    = project_path("analysis", "figures")
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    df = load_oof_errors(
+        oof_path=oof_path,
+        label_path=label_path,
+        coords_path=None, 
+    )
+     
+    avg_dist = float(np.abs(df["Class_Distance"]).mean())
+
+    counties = gpd.read_file(shapefile)
+    counties["FIPS"] = counties["GEOID"].astype(str).str.zfill(5)
+    
+    exclude  = {"02", "15", "60", "66", "69", "72", "78"}
+    counties = counties[~counties["STATEFP"].isin(exclude)] 
+
+    gdf = counties.merge(df, on="FIPS", how="left")
+
+    def _plot_discrete(column, title, out_path, cmap, vmin=None, vmax=None): 
+        vals = gdf[column].dropna() 
+        if vals.empty: 
+            return 
+
+        lo = int(vals.min()) if vmin is None else vmin 
+        hi = int(vals.max()) if vmax is None else vmax 
+        bounds = np.arange(lo, hi + 2) - 0.5 
+        ticks  = np.arange(lo, hi + 1) 
+
+        fig, ax = plt.subplots(1, 1, figsize=(9, 6))
+        norm = BoundaryNorm(bounds, cmap.N)
+        gdf.plot(
+            column=column, ax=ax, 
+            cmap=cmap, norm=norm, 
+            linewidth=0, edgecolor="none", 
+            missing_kwds={"color": "lightgrey"}
+        )
+        ax.set_title(title)
+        ax.axis("off")
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm._A = []
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.02, ticks=ticks)
+        cbar.ax.set_yticklabels([str(t) for t in ticks])
+
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
+
+    _plot_discrete(
+        "True_Class",
+        "True Class",
+        os.path.join(out_dir, "true_class.png"),
+        cmap=plt.cm.viridis
+    )
+
+    _plot_discrete(
+        "Predicted_Class",
+        "Predicted Classes",
+        os.path.join(out_dir, "predicted_class.png"),
+        cmap=plt.cm.viridis
+    )
+
+    _plot_discrete(
+        "Class_Distance",
+        f"Class Distance (avg={avg_dist:.3f})", 
+        os.path.join(out_dir, "class_distance.png"),
+        vmin=-5,
+        vmax=5,
+        cmap=plt.cm.magma
+    )
+
+
 def run_all(): 
 
     run_viirs_nchs_full() 
     run_viirs_nchs_smushed()
     run_tiger_nchs_full()
     run_tiger_nchs_smushed()
+    run_nlcd_nchs_full()
+    run_nlcd_nchs_smushed()
     create_oof_datasets()
     run_stacking() 
+    run_gating_visualization()
     optimize_svm_viirs()
 
 
@@ -354,9 +731,14 @@ def main():
         "viirs_smushed", 
         "tiger", 
         "tiger_smushed", 
+        "nlcd",
+        "nlcd_smushed", 
         "oof", 
         "stacking", 
+        "disagree", 
+        "stacking_passthrough", 
         "optimize_svm", 
+        "visualize_gating",
         "all"
     ] 
 
@@ -365,9 +747,14 @@ def main():
         "viirs_smushed": run_viirs_nchs_smushed, 
         "tiger": run_tiger_nchs_full,
         "tiger_smushed": run_tiger_nchs_smushed, 
+        "nlcd": run_nlcd_nchs_full,
+        "nlcd_smushed": run_nlcd_nchs_smushed, 
         "oof": create_oof_datasets,
         "stacking": run_stacking, 
+        "disagree": run_disagreement,
+        "stacking_passthrough": run_passthrough_stacking,
         "optimize_svm": optimize_svm_viirs,  
+        "visualize_gating": run_gating_visualization, 
         "all": run_all
     }
 
