@@ -6,20 +6,24 @@
 # with NCHS Urban-Rural classification labels. 
 # 
 
-import argparse, csv
+import csv
 from pathlib import Path
 from typing import Dict 
 
 import numpy as np 
 import pandas as pd 
+
 from scipy.io import savemat 
+from scipy.stats import entropy
+
 from rasterstats import zonal_stats 
 import fiona 
 
 from support.helpers import project_path
 
 class ViirsDataset: 
-    STATS = ["min", "max", "median", "mean", "std"]
+    STATS = ["min", "max", "median", "mean"]
+    EXTRA = ["variance", "entropy"]
 
     def __init__(
         self, 
@@ -28,7 +32,8 @@ class ViirsDataset:
         labels_path: str | None = None, 
         *, 
         chunk_size: int = 200, 
-        all_touched: bool = False 
+        all_touched: bool = False,
+        smush: bool = False 
     ): 
 
         if viirs_path is None: 
@@ -46,8 +51,13 @@ class ViirsDataset:
         self.fips_field    = "GEOID"
         self.chunk_size    = int(chunk_size)
         self.all_touched   = bool(all_touched)
+        self.smush         = bool(smush)
 
         self.label_map = self._load_labels() 
+        if self.smush:
+            self.label_map = {
+                fips: self._coarse_label(code) for fips, code in self.label_map.items() 
+            }
         self.df = self._build() 
 
     def _load_labels(self) -> Dict[str, int]: 
@@ -90,6 +100,12 @@ class ViirsDataset:
             raise FileNotFoundError(f"county shapefile not found: {counties_path}")
 
         rows = []
+
+        custom_stats_map = {
+            "variance": self._get_variance, 
+            "entropy": self._get_entropy
+        }
+
         with fiona.open(counties_path) as source: 
 
             for geoms, fips_list in self._iter_chunks(source):
@@ -97,21 +113,24 @@ class ViirsDataset:
                     geoms, 
                     str(viirs_path),
                     stats=self.STATS, 
+                    add_stats=custom_stats_map,
                     nodata=None,
                     all_touched=self.all_touched, 
                     geojson_out=False 
                 )
 
+                all_stats_keys = self.STATS + self.EXTRA 
+
                 for fips, s in zip(fips_list, stats): 
                     # Skip an entire row if NaN value for any stat
                     if s is None: 
                         continue 
-                    if any(s.get(k) is None for k in self.STATS): 
+                    if any(s.get(k) is None for k in all_stats_keys): 
                         continue 
 
                     rows.append({
                         "FIPS": fips, 
-                        **{f"viirs_{k}": float(s[k]) for k in self.STATS}, 
+                        **{f"viirs_{k}": float(s[k]) for k in all_stats_keys}, 
                         "label": self.label_map[fips]
                     })
 
@@ -164,11 +183,34 @@ class ViirsDataset:
         savemat(output_path, mat)
         print(f"Saved .mat file: {output_path} ({self.df.shape[0]} rows)")
 
+    @staticmethod 
+    def _get_variance(x): 
+        return np.var(x)
+
+    @staticmethod 
+    def _get_entropy(x): 
+        valid = x.compressed() if hasattr(x, "compressed") else x
+        if valid.size == 0: 
+            return 0.0 
+
+        counts, _ = np.histogram(valid, bins=100, density=False)
+        return entropy(counts)
+
+    @staticmethod
+    def _coarse_label(code: int) -> int: 
+        if code in (0, 1): 
+            return 0 
+        if code in (2, 3): 
+            return 1 
+        if code in (4, 5): 
+            return 2 
+        raise ValueError(f"unexpected class code: {code}")
+
 
 def main(): 
 
     output_path = project_path("data", "datasets", "viirs_nchs_2023.mat")
-    dataset = ViirsDataset() 
+    dataset = ViirsDataset(smush=False) 
     dataset.save(output_path)
 
 

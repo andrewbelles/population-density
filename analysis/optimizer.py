@@ -6,8 +6,6 @@
 # For use in dataset benchmark files  
 # 
 
-import numpy as np
-
 from sklearn.model_selection import ParameterGrid 
 
 from analysis.cross_validation import (
@@ -30,7 +28,7 @@ def optimize_hyperparameters(
 ): 
     grid = ParameterGrid(param_grid)
     models_to_test = {}
-    transforms = {}
+    transforms: dict = {}
 
     print(f"> Generating {len(grid)} configurations for {base_name}...")
 
@@ -40,7 +38,8 @@ def optimize_hyperparameters(
         model_key = f"{base_name}_{i}|{param_str}"
 
         models_to_test[model_key] =  base_factory_func(**params)
-        transforms[model_key] = transform
+        if transform is not None: 
+            transforms[model_key] = transform
 
     config = CVConfig(
         n_splits=5, 
@@ -56,17 +55,25 @@ def optimize_hyperparameters(
     results = cv.run(
         models=models_to_test, 
         config=config,
-        label_transforms=transforms
+        label_transforms=transforms if transform is not None else None
     )
 
     summary = cv.summarize(results)
 
-    if "r2_mean" in summary.columns: 
-        best_row = summary.loc[summary["r2_mean"].idxmax()]
-        metric_val  = best_row["r2_mean"]
-        metric_name = "r2"
+    if task.task_type == "regression":
+        metric_order = ["r2", "rmse"]
     else: 
-        raise ValueError 
+        metric_order = ["f1_macro", "accuracy", "roc_auc"]
+
+    metric_name = None 
+    for m in metric_order: 
+        col = f"{m}_mean"
+        if col in summary.columns and not summary[col].isna().all(): 
+            metric_name = m 
+            break 
+
+    best_row = summary.loc[summary[f"{metric_name}_mean"].idxmax()]
+    metric_val  = best_row[f"{metric_name}_mean"]
 
     print("\n> Optimization Results:")
     print(f"Best Configuration: {best_row['model']}")
