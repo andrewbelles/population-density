@@ -23,7 +23,7 @@ from support.helpers import project_path
 
 class ViirsDataset: 
     STATS = ["min", "max", "mean"]
-    EXTRA = ["variance", "entropy", "skew", "kurtosis"]
+    EXTRA = ["variance", "entropy"]
 
     def __init__(
         self, 

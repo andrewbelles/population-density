@@ -30,25 +30,6 @@ def project_path(*args):
 def unwrap_scalar(v): 
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v 
 
-
-def make_xgb_model(
-    cls: type, 
-    *, 
-    gpu: bool, 
-    base_params: dict[str, Any], 
-    default_tree_method: str = "hist"
-):
-    params = dict(base_params) 
-    params.setdefault("tree_method", default_tree_method)
-
-    params.setdefault("device", "cuda" if gpu else "cpu")
-
-    try: 
-        return cls(**params) 
-    except TypeError as e: 
-        raise e
-
-
 def _mat_str_vector(x) -> np.ndarray: 
 
     arr = np.asarray(x) 
@@ -67,6 +48,15 @@ def _as_tuple_str(x: str | Sequence[str] | None) -> tuple[str, ...]:
         return (x,)
     return tuple(str(v) for v in x)
 
+# ---------------------------------------------------------
+# Dataset Manipulation  
+# ---------------------------------------------------------
+
+def resolve_feature_subset(feature_names, subset): 
+    if subset is None: 
+        return list(range(len(feature_names))) 
+    idx = [int(np.where(feature_names == s)[0][0]) for s in subset]
+    return idx 
 
 # ---------------------------------------------------------
 # Fold/Fit Functions 
@@ -207,3 +197,4 @@ def _haversine_dist(coords_a: NDArray, coords_b: NDArray) -> NDArray:
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
     return R * c
+

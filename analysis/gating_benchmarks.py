@@ -7,13 +7,15 @@
 # 
 
 import argparse, os 
-import itertools 
 
 from matplotlib.colors import BoundaryNorm
 import numpy as np
 import pandas as pd 
 import geopandas as gpd 
+
 import matplotlib.pyplot as plt
+from scipy.io import savemat
+import seaborn as sns 
 
 from analysis.cross_validation import (
     CLASSIFICATION,
@@ -24,6 +26,7 @@ from analysis.cross_validation import (
 from analysis.optimizer import optimize_hyperparameters
 
 from models.estimators import (
+    make_linear, 
     make_rf_classifier,
     make_xgb_classifier,
     make_logistic, 
@@ -32,8 +35,10 @@ from models.estimators import (
 
 from preprocessing.loaders import (
     DatasetDict,
+    load_compact_dataset,
     load_oof_errors,
     load_oof_predictions,
+    load_tiger_nlcd_viirs_feature_matrix,
     load_viirs_nchs, # also loads tiger/nlcd datasets for now 
     load_stacking 
 )
@@ -58,6 +63,11 @@ from sklearn.metrics import (
     accuracy_score,
     f1_score,
     roc_auc_score
+)
+
+from analysis.vif import (
+    PairwiseVIF,
+    PairwiseReducer
 )
 
 REPEATS = 10
@@ -312,22 +322,153 @@ def run_nlcd_nchs_smushed():
     return summary, results 
 
 
+def run_vif_all(): 
+    print("ANALYSIS: Variance Inflation Factor computation pairwise for NLCD, TIGER, VIIRS (2023)")
+
+    paths = [
+        project_path("data", "datasets", "viirs_nchs_2023.mat"),
+        project_path("data", "datasets", "nlcd_nchs_2023.mat"),
+        project_path("data", "datasets", "tiger_nchs_2023.mat")
+    ]
+
+    def loader(_):
+        return load_tiger_nlcd_viirs_feature_matrix(paths)
+
+    config = CVConfig(
+        n_splits=5,
+        n_repeats=1, 
+        shuffle=True, 
+        random_state=0,
+        verbose=False 
+    )
+
+    vif = PairwiseVIF(
+        model_factory=make_linear(1.0), 
+        config=config, 
+        verbose=True 
+    )
+
+    results = vif.compute("__in_memory__", loader)
+    
+    # Plots heatmap of resulting vif matrix 
+
+    m = results.replace(np.inf, np.nan).to_numpy() 
+    mask = np.triu(np.ones_like(m, dtype=bool))
+    f = plt.figure(figsize=(10,7))
+    sns.heatmap(
+        np.log10(m), 
+        mask=mask,
+        cmap="mako",
+        cbar_kws={"label": "log10(VIF)"}
+    )
+    plt.title("Pairwise VIF (log10)")
+    plt.tight_layout()
+    f.savefig(project_path("analysis", "figures", "vif_heatmap.png"))
+    plt.close()
+
+    m = results.to_numpy() 
+    n = m.shape[0]
+    i, j = np.tril_indices(n, k=-1)
+    pairs = pd.DataFrame({
+        "feature_i": results.index[i],
+        "feature_j": results.index[j], 
+        "vif": m[i, j]
+    })
+    pairs = pairs.sort_values("vif", ascending=False)
+    print(pairs.head(12))
+
+    def _split_prefix(matrix, prefix): 
+        idx = [i for i, n in enumerate(matrix.feature_names) if str(n).startswith(prefix)]
+        if not idx: 
+            raise ValueError(f"no features with prefix {prefix}")
+        return matrix.subset(idx)
+
+    def _save_features(matrix, label_path, out_path): 
+        labels = load_compact_dataset(label_path)
+        label_ids = labels["sample_ids"]
+        label_map = {f: i for i, f in enumerate(label_ids)}
+        feat_map  = {f: i for i, f in enumerate(matrix.sample_ids)}
+        common    = [f for f in matrix.sample_ids if f in label_map]
+        if not common: 
+            raise ValueError("no overalapping sample_ids between features and labels")
+        feat_idx  = [feat_map[f] for f in common]
+        label_idx = [label_map[f] for f in common]
+        
+        X = matrix.X[feat_idx]
+        y = labels["labels"][label_idx]
+        coords = labels["coords"][label_idx]
+
+        if y.ndim == 1: 
+            y = y.reshape(-1, 1)
+
+        savemat(out_path, {
+            "features": X, 
+            "labels": y, 
+            "coords": coords, 
+            "feature_names": matrix.feature_names, 
+            "fips_codes": np.asarray(common, dtype="U5")
+        })
+
+    feature_matrix = loader("__in_memory__")
+    pairs = [
+        ("nlcd_dev_med", "viirs_mean"),
+        ("nlcd_dev_high", "viirs_mean"),
+    ]
+
+    reducer = PairwiseReducer(verbose=True)
+    reduced = reducer.combine(feature_matrix, pairs)
+
+    labels_path = paths[0]
+    rem = reducer.save(
+        out_path=project_path("data", "datasets", "pairwise_pca_reduced.mat"), 
+        labels_filepath=labels_path, 
+        combined=reduced, 
+        original=feature_matrix,
+        pairs=pairs
+    )
+
+    viirs_rem = _split_prefix(rem, "viirs_")
+    tiger_rem = _split_prefix(rem, "tiger_")
+    nlcd_rem = _split_prefix(rem, "nlcd_")
+
+    _save_features(
+        viirs_rem, 
+        labels_path,
+        project_path("data", "datasets", "viirs_2023_remainder.mat")
+    )
+
+    _save_features(
+        tiger_rem, 
+        labels_path,
+        project_path("data", "datasets", "tiger_2023_remainder.mat")
+    )
+
+    _save_features(
+        nlcd_rem, 
+        labels_path,
+        project_path("data", "datasets", "nlcd_2023_remainder.mat")
+    )
+
+
 def create_oof_datasets(): 
     print("DATASET: Creates OOF datasets for each best performer per dataset.")
 
-    viirs = project_path("data", "datasets", "viirs_nchs_2023.mat")
-    tiger = project_path("data", "datasets", "tiger_nchs_2023.mat")
-    nlcd  = project_path("data", "datasets", "nlcd_nchs_2023.mat")
+    viirs = project_path("data", "datasets", "viirs_2023_remainder.mat")
+    tiger = project_path("data", "datasets", "tiger_2023_remainder.mat")
+    nlcd  = project_path("data", "datasets", "nlcd_2023_remainder.mat")
+    comb  = project_path("data", "datasets", "pairwise_pca_reduced.mat")
     
     # Pre-load data to get common index 
     viirs_data = load_viirs_nchs(viirs)
     tiger_data = load_viirs_nchs(tiger)
     nlcd_data  = load_viirs_nchs(nlcd)
+    comb_data  = load_viirs_nchs(comb)
 
     common_fips = sorted(
         set(viirs_data["sample_ids"]) & 
         set(tiger_data["sample_ids"]) & 
-        set(nlcd_data["sample_ids"])
+        set(nlcd_data["sample_ids"])  & 
+        set(comb_data["sample_ids"])
     )
 
     def _align_loader(base_loader, fips):
@@ -363,6 +504,10 @@ def create_oof_datasets():
         "RandomForest": make_rf_classifier()
     }
 
+    comb_model = {
+        "RandomForest": make_rf_classifier()
+    }
+
     config = CVConfig(
         n_splits=5, 
         n_repeats=REPEATS, 
@@ -370,65 +515,67 @@ def create_oof_datasets():
         random_state=0 
     )
 
-    viirs_cv = CrossValidator(
-        filepath=viirs, 
-        loader=loader, 
-        task=CLASSIFICATION, 
-        scale_y=False
+    def _run(fp, model, out, splits): 
+        cv = CrossValidator(
+            filepath=fp, 
+            loader=loader, 
+            task=CLASSIFICATION,
+            scale_y=False
+        )
+
+        cv.run(
+            models=model,
+            config=config,
+            oof=True, 
+            splits=splits if splits is not None else None
+        )
+        
+        cv.save_oof(out)
+        return splits 
+
+    splits = _run(
+        viirs, 
+        viirs_model, 
+        project_path("data", "stacking", "viirs_2023_oof.mat"),
+        None
     )
 
-    tiger_cv = CrossValidator(
-        filepath=tiger, 
-        loader=loader, 
-        task=CLASSIFICATION, 
-        scale_y=False 
+    _run(
+        tiger, 
+        tiger_model, 
+        project_path("data", "stacking", "tiger_2023_oof.mat"),
+        splits
     )
 
-    nlcd_cv = CrossValidator(
-        filepath=nlcd, 
-        loader=loader, 
-        task=CLASSIFICATION, 
-        scale_y=False 
+    _run(
+        nlcd, 
+        nlcd_model, 
+        project_path("data", "stacking", "nlcd_2023_oof.mat"),
+        splits
     )
 
-    viirs_cv.run(
-        models=viirs_model, 
-        config=config,
-        oof=True 
+    _run(
+        comb, 
+        comb_model, 
+        project_path("data", "stacking", "comb_2023_oof.mat"),
+        splits
     )
-    splits = viirs_cv.splits_ 
-
-    tiger_cv.run(
-        models=tiger_model, 
-        config=config, 
-        oof=True, 
-        splits=splits
-    )
-
-    nlcd_cv.run(
-        models=nlcd_model,
-        config=config,
-        oof=True,
-        splits=splits
-    )
-
-    viirs_cv.save_oof(project_path("data", "stacking", "viirs_2023_oof.mat"))
-    tiger_cv.save_oof(project_path("data", "stacking", "tiger_2023_oof.mat"))
-    nlcd_cv.save_oof(project_path("data", "stacking", "nlcd_2023_oof.mat"))
 
 
 def run_stacking(): 
 
     print("CLASSIFICATION: Stacking Classifier from Layer A Classifier's Probabilities")
     
-    viirsstack = project_path("data", "stacking", "viirs_2023_oof.mat") 
-    tigerstack = project_path("data", "stacking", "tiger_2023_oof.mat")
-    nlcdstack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+    viirs_stack = project_path("data", "stacking", "viirs_2023_oof.mat") 
+    tiger_stack = project_path("data", "stacking", "tiger_2023_oof.mat")
+    nlcd_stack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+    comb_stack  = project_path("data", "stacking", "comb_2023_oof.mat")
 
     files = [
-        viirsstack, 
-        tigerstack, 
-        nlcdstack
+        viirs_stack, 
+        tiger_stack, 
+        nlcd_stack,
+        comb_stack 
     ]
 
     def stacking_loader(fp: str):
@@ -437,7 +584,6 @@ def run_stacking():
 
     models = {
         "Logistic": make_logistic(), 
-        "XGBoost": make_xgb_classifier(), 
     }
 
     config = CVConfig(
@@ -448,7 +594,7 @@ def run_stacking():
     )
 
     cv = CrossValidator(
-        filepath=viirsstack, 
+        filepath=viirs_stack, 
         loader=stacking_loader, 
         task=CLASSIFICATION, 
         scale_y=False
@@ -468,34 +614,43 @@ def run_stacking():
 def run_disagreement():
     print("DISAGREEMENT: Classification of rows as conflicting vs. agreeing predictions")
 
-    viirs = project_path("data", "datasets", "viirs_nchs_2023.mat")
-    tiger = project_path("data", "datasets", "tiger_nchs_2023.mat")
-    nlcd  = project_path("data", "datasets", "nlcd_nchs_2023.mat")
+    viirs = project_path("data", "datasets", "viirs_2023_remainder.mat")
+    tiger = project_path("data", "datasets", "tiger_2023_remainder.mat")
+    nlcd  = project_path("data", "datasets", "nlcd_2023_remainder.mat")
+    comb  = project_path("data", "datasets", "pairwise_pca_reduced.mat")
 
-    viirsstack = project_path("data", "stacking", "viirs_2023_oof.mat") 
-    tigerstack = project_path("data", "stacking", "tiger_2023_oof.mat")
-    nlcdstack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+    viirs_stack = project_path("data", "stacking", "viirs_2023_oof.mat") 
+    tiger_stack = project_path("data", "stacking", "tiger_2023_oof.mat")
+    nlcd_stack  = project_path("data", "stacking", "nlcd_2023_oof.mat")
+    comb_stack  = project_path("data", "stacking", "comb_2023_oof.mat")
 
     specs: list[DisagreementSpec] = [
         {
             "name": "viirs", 
             "raw_path": viirs, 
             "raw_loader": load_viirs_nchs, 
-            "oof_path": viirsstack, 
+            "oof_path": viirs_stack, 
             "oof_loader": load_oof_predictions 
         }, 
         {
             "name": "tiger",
             "raw_path": tiger, 
             "raw_loader": load_viirs_nchs, 
-            "oof_path": tigerstack,
+            "oof_path": tiger_stack,
             "oof_loader": load_oof_predictions 
         },
         {
             "name": "nlcd",
             "raw_path": nlcd, 
             "raw_loader": load_viirs_nchs, 
-            "oof_path": nlcdstack,
+            "oof_path": nlcd_stack,
+            "oof_loader": load_oof_predictions 
+        },
+        {
+            "name": "comb",
+            "raw_path": comb, 
+            "raw_loader": load_viirs_nchs, 
+            "oof_path": comb_stack,
             "oof_loader": load_oof_predictions 
         }
     ]
@@ -812,6 +967,7 @@ def main():
         "tiger_smushed", 
         "nlcd",
         "nlcd_smushed", 
+        "vif", 
         "oof", 
         "stacking", 
         "disagree", 
@@ -829,6 +985,7 @@ def main():
         "tiger_smushed": run_tiger_nchs_smushed, 
         "nlcd": run_nlcd_nchs_full,
         "nlcd_smushed": run_nlcd_nchs_smushed, 
+        "vif": run_vif_all, 
         "oof": create_oof_datasets,
         "stacking": run_stacking, 
         "disagree": run_disagreement,

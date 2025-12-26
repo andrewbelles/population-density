@@ -9,6 +9,7 @@ pkgs.mkShell {
     gdal 
     proj 
     geos 
+    cloc 
 
     # Python packages from nixpkgs
     python312Packages.numpy

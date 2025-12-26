@@ -7,6 +7,7 @@
 # 
 
 
+from dataclasses import dataclass
 import numpy as np 
 import pandas as pd 
 
@@ -379,108 +380,93 @@ def load_stacking(filepaths: Sequence[str]) -> DatasetDict:
 # Unsupervised Loader Interface 
 # ---------------------------------------------------------
 
-
-class UnsupervisedDatasetDict(TypedDict): 
+@dataclass
+class FeatureMatrix: 
     X: NDArray[np.float64] 
     coords: NDArray[np.float64] 
     feature_names: NDArray[np.str_]
-    coord_names: NDArray[np.str_]
     sample_ids: NDArray[np.str_]
-    groups: dict[str, slice]
 
-UnsupervisedLoader = Callable[[str], UnsupervisedDatasetDict]
+    def subset(self, cols: list[int]) -> "FeatureMatrix": 
+        return FeatureMatrix(
+            X=self.X[:, cols], 
+            coords=self.coords,
+            feature_names=self.feature_names[cols], 
+            sample_ids=self.sample_ids, 
+        )
 
-def load_climate_and_geospatial_unsupervised(
-    filepath: str, 
-    *, 
-    groups: Sequence[str] = ("degree_days", "palmer_indices"), 
-    include_coords: bool = True 
-) -> UnsupervisedDatasetDict: 
+UnsupervisedLoader = Callable[[str], FeatureMatrix]
 
-    mat = loadmat(filepath)
+def make_pair_loader(
+    data: FeatureMatrix,
+    target_idx: int, 
+    feature_idx: int 
+) -> Callable[[str], dict]: 
+    def _loader(_filepath: str): 
+        return {
+            "features": data.X[:, [feature_idx]], 
+            "labels": data.X[:, target_idx], 
+            "coords": data.coords, 
+            "feature_names": np.array([data.feature_names[feature_idx]]),
+            "sample_idx": data.sample_ids
+        }
+    return _loader 
 
-    if "labels" not in mat: 
-        raise ValueError(f"{filepath} missing 'labels' (expected coordinates)")
+def load_tiger_nlcd_viirs_feature_matrix(filepaths: Sequence[str]): 
+    if len(filepaths) != 3: 
+        raise ValueError("filepaths must be for viirs, nlcd, and tiger datasets")
 
-    coords = np.asarray(mat["labels"], dtype=np.float64)
-    if coords.ndim != 2 or coords.shape[1] != 2: 
-        raise ValueError(f"expected shape (n,2), got {coords.shape}")
+    PREFIXES = ("viirs", "nlcd", "tiger")
 
-    if "fips_codes" not in mat: 
-        raise ValueError(f"{filepath} missing 'fips_codes'")
+    feats: list[NDArray] = []
+    names_list: list[NDArray[np.str_]] = []
+    fips_list: list[NDArray[np.str_]]  = []
 
-    sample_ids = _mat_str_vector(mat["fips_codes"]).astype("U5", copy=False) 
+    for path, prefix in zip(filepaths, PREFIXES): 
+        mat = loadmat(path)
+
+        if "features" not in mat: 
+            raise ValueError(f"{path} missing 'features'")
+        X = np.asarray(mat["features"], dtype=np.float64)
+        if X.ndim == 1: 
+            X = X.reshape(-1, 1) 
+
+        if "fips_codes" not in mat: 
+            raise ValueError(f"{path} missing 'fips_codes'")
+        fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+        
+        if "feature_names" in mat: 
+            names = _mat_str_vector(mat["feature_names"]).astype("U64")
+            names = np.array([n.strip() for n in names], dtype="U64")
+            # Coerce instead of failing 
+            if names.shape[0] != X.shape[1]: 
+                names = np.array([f"{prefix}_{i}" for i in range(X.shape[1])], dtype="U64")
+        else: 
+            names = np.array([f"{prefix}_{i}" for i in range(X.shape[1])], dtype="U64")
+
+        feats.append(X)
+        names_list.append(names)
+        fips_list.append(fips)
+
+    idx_maps = [{f: i for i, f in enumerate(fips)} for fips in fips_list]
+    common   = [f for f in fips_list[0] if all(f in m for m in idx_maps[1:])]
+    if not common: 
+        raise ValueError("no common FIPS codes across datasets")
+
+    idx_lists = [[m[f] for f in common] for m in idx_maps]
+    feats     = [X[idx] for X, idx in zip(feats, idx_lists)]
     
-    if not groups: 
-        raise ValueError("groups cannot be empty")
-    if len(set(groups)) != len(groups): 
-        raise ValueError(f"groups contains duplicates: {groups}")
+    X_all = np.hstack(feats)
+    feature_names = np.concatenate(names_list)
+    sample_ids = np.array(common, dtype="U5")
+    coords = np.zeros((X_all.shape[0], 2), dtype=np.float64)
 
-    resolved: list[str] = []
-    for g in groups: 
-        if g == "all": 
-            resolved.extend(list(_CLIMATE_GROUPS))
-        else: 
-            resolved.append(g)
-    groups = tuple(resolved)
-
-    X_parts: list[NDArray[np.float64]] = []
-    name_parts: list[NDArray[np.str_]] = []
-    group_slices: dict[str, slice] = {}
-    column_offset: int = 0 # index denoting last appended column idx 
-
-    for g in groups: 
-
-        key  = f"features_{g}" 
-        name = f"feature_names_{g}"
-
-        if key not in mat: 
-            raise ValueError(f"{filepath} missing '{key}'. available: {_CLIMATE_GROUPS}")
-
-        Xg = np.asarray(mat[key], dtype=np.float64) 
-        if Xg.ndim != 2: 
-            raise ValueError(f"{key} must be 2d, got {Xg.ndim}d with shape {Xg.shape}")
-        if Xg.shape[0] != coords.shape[0]:
-            raise ValueError(f"{key} rows (Xg.shape[0]) != coords rows ({coords.shape[0]})")
-
-        if name in mat: 
-            names_g = _mat_str_vector(mat[name]).astype("U64", copy=False)
-        elif "feature_names" in mat: 
-            all_names = _mat_str_vector(mat["feature_names"]).astype("U64", copy=False)
-            if all_names.shape[0] == Xg.shape[1]:
-                names_g = all_names
-            elif all_names.shape[0] >= column_offset + Xg.shape[1]:
-                names_g = all_names[column_offset : column_offset + Xg.shape[1]]
-            else:
-                names_g = np.asarray([f"{g}_{i}" for i in range(Xg.shape[1])], dtype="U64")
-        else: 
-            names_g = np.asarray([f"{g}_{i}" for i in range(Xg.shape[1])], dtype="U64")
-
-        if names_g.shape[0] != Xg.shape[1]: 
-            raise ValueError(f"{name} length ({names_g.shape[0]}) != {key} cols ({Xg.shape[1]})")
-
-        X_parts.append(Xg) 
-        name_parts.append(names_g)
-
-        group_slices[str(g)] = slice(column_offset, column_offset + Xg.shape[1])
-        column_offset += Xg.shape[1]
-
-    X = np.hstack(X_parts).astype(np.float64, copy=False)
-    feature_names = np.concatenate(name_parts).astype("U64", copy=False)
-
-    if include_coords:
-        X = np.hstack([X, coords]).astype(np.float64, copy=False)
-        group_slices["coords"] = slice(column_offset, column_offset + 2)
-        feature_names = np.concatenate([feature_names, np.asarray(["lat", "lon"], dtype="U64")])
-
-    return {
-        "X": X, 
-        "feature_names": feature_names, 
-        "sample_ids": sample_ids, 
-        "groups": group_slices, 
-        "coords": np.empty((0,2), dtype=np.float64), 
-        "coord_names": np.empty((0,), dtype="U1")
-    }
+    return FeatureMatrix(
+        X=X_all, 
+        coords=coords,
+        feature_names=feature_names, 
+        sample_ids=sample_ids
+    )
 
 # --------------------------------------------------------- 
 # OOF, Probability Datasets 

@@ -4,6 +4,9 @@
 # 
 # Testbench/Environment for generating specific datasets 
 # 
+# NOTE: ALL OF THESE TESTS ARE DEPRECATED/OUT OF DATE, 
+# NOT MOVING TO DEPRECATED BRANCH BECAUSE OF PLANS TO COME 
+# BACK AND BETTER INTEGRATE TESTBENCH WITH MODULES  
 # 
 
 import argparse 
@@ -15,9 +18,7 @@ from sklearn.metrics import pairwise_distances
 from support.helpers import project_path
 
 from preprocessing.loaders import (
-    load_climate_and_geospatial_unsupervised, 
-    load_climate_population, 
-    UnsupervisedDatasetDict, 
+    load_climate_population,  
 )
 
 from preprocessing.encodings import Encoder 

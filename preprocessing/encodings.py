@@ -15,8 +15,7 @@ from support.helpers import (
 )
 
 from preprocessing.loaders import (
-    UnsupervisedDatasetDict, 
-    load_climate_and_geospatial_unsupervised, 
+    FeatureMatrix, 
 )
 
 from dataclasses import dataclass 
@@ -46,37 +45,33 @@ class Encoder:
     def __init__(
         self, 
         *, 
-        dataset: UnsupervisedDatasetDict,
+        dataset: FeatureMatrix,
         standardize: bool = True, 
         with_mean: bool = True, 
         with_std: bool = True, 
     ): 
         self.dataset = dataset 
 
-        X = np.asarray(dataset["X"], dtype=np.float64)
+        X = np.asarray(dataset.X, dtype=np.float64)
         if X.ndim != 2: 
             raise ValueError(f"dataset['X'] must be 2D, got shape {X.shape}")
 
         if not np.isfinite(X).all():
             raise ValueError("dataset['X'] must be complete (without NaN/Inf)")
 
-        feature_names = np.asarray(dataset["feature_names"])
+        feature_names = np.asarray(dataset.feature_names)
         if feature_names.ndim != 1 or feature_names.shape[0] != X.shape[1]:
             raise ValueError(f"feature_names must be (n_features,)")
 
         self.X = X 
         self.feature_names = feature_names.astype("U64", copy=False)
 
-        self.coords = np.asarray(dataset.get("coords", np.empty((0,2))), dtype=np.float64)
-        self.coord_names = np.asarray(dataset.get("coord_names", np.empty((0,))), dtype="U64")
-        self.sample_ids = np.asarray(dataset.get("sample_ids", np.empty((0,))),
-                                     dtype="U64").reshape(-1)
-
+        self.coords = np.asarray(dataset.coords, dtype=np.float64)
+        self.sample_ids = np.asarray(dataset.sample_ids, dtype="U64").reshape(-1)
 
         if self.sample_ids.shape[0] not in (0, self.n_samples): 
             raise ValueError(f"sample_ids length ne n_samples")
 
-        self.groups = dict(dataset.get("groups", {}))
         self.standardize = bool(standardize)
         if self.standardize: 
             self._scaler = StandardScaler(with_mean=with_mean, with_std=with_std)
@@ -93,48 +88,6 @@ class Encoder:
     @property 
     def n_features(self) -> int: 
         return int(self.X.shape[1])
-
-    @property 
-    def group_names(self) -> list[str]: 
-        return sorted(self.groups.keys())
-
-    def view(self, groups: str | Sequence[str] | None = None) -> View: 
-
-        '''
-        Returns a representation of dataset on the specified group labels. 
-        
-        If groups is None then the View returned is the full data matrix 
-
-        Caller Provides: 
-            groups (as union) defining which groups to take for view. 
-
-        We return: 
-            View dataclass as a subset of full data matrix 
-        '''
-        if groups is None: 
-            return View(X=self.X, feature_names=self.feature_names, groups=dict(self.groups))
-
-        names   = _as_tuple_str(groups)
-        missing = [g for g in names if g not in self.groups]
-        if missing: 
-            raise KeyError(f"unknown groups: {missing} not in {self.group_names}")
-
-        slices = [self.groups[g] for g in names]
-        if any(s.step not in (None,1) for s in slices): 
-            raise ValueError("group slices must be contiguous with step=1 or None")
-
-        cols = np.concatenate([np.arange(s.start or 0, s.stop, dtype=int) for s in slices])
-        Xv = self.X[:, cols]
-        Nv = self.feature_names[cols]
-
-        out_groups: dict[str, slice] = {}
-        offset = 0 
-        for g, s in zip(names, slices): 
-            width = int(s.stop - (s.start or 0)) 
-            out_groups[g] = slice(offset, offset + width)
-            offset += width 
-
-        return View(X=Xv ,feature_names=Nv, groups=out_groups)
 
     def fit_pca(
             self, 
@@ -574,7 +527,6 @@ class Encoder:
 
         savemat(out_path, data)
         return data
-        
 
     # ------- Static Methods 
     
@@ -717,99 +669,3 @@ class Encoder:
         k = min(k, self.scores_.shape[1])
 
         return self.scores_[:, :k].astype(np.float64, copy=False), k 
-
-
-def main():
-    
-    '''
-    PCA Analysis on Climate + Coordinate View 
-
-    '''
-
-    dataset = load_climate_and_geospatial_unsupervised(
-        filepath=project_path("data", "datasets", "climate_geospatial.mat"),
-        include_coords=False,
-        groups=("all",)
-    )
-
-    encoder  = Encoder(dataset=dataset, standardize=True)
-    
-    Xp = encoder._X_for_pca()
-    d = pairwise_distances(Xp, metric="euclidean")
-    med = np.median(d[d > 0])
-    gamma = 1.0 / (2.0 * med * med)
-
-    encoder.fit_pca(
-        pca_class=PCA, 
-    )
-
-    image_dir = project_path("analysis", "images")
-
-    # ------- Plots for Analysis from fit PCA 
-
-    fig, ax = plt.subplots(figsize=(10,7))
-    encoder.plot_eigenvalue_decay(ax=ax, logy=True)
-    fig.savefig(
-        project_path(image_dir, "eigen_decay_logy.png"), 
-        dpi=200, 
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(10,7))
-    encoder.plot_eigenvalue_decay(ax=ax, logy=False)
-    fig.savefig(
-        project_path(image_dir, "eigen_decay.png"), 
-        dpi=200, 
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-    
-    fig, ax = plt.subplots(figsize=(10,7))
-    encoder.plot_variance_analysis(ax=ax, threshold=0.95) 
-    fig.savefig(
-        project_path(image_dir, "variance.png"), 
-        dpi=200, 
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(10,7))
-    encoder.plot_broken_stick(ax=ax)
-    plt.savefig(
-        project_path(image_dir, "broken_stick.png"), 
-        dpi=200, 
-        bbox_inches="tight"
-    ) 
-    plt.close(fig)
-
-    encoder.fit_pca(
-        pca_class=KernelPCA,
-        kernel="rbf",
-        gamma=gamma, 
-        eigen_solver="auto", 
-        remove_zero_eig=True
-    )
-
-    fig, ax = plt.subplots(figsize=(10,7))
-    encoder.plot_kpca_lambda(ax=ax, logy=True)
-    fig.savefig(
-        project_path(image_dir, "kpca_lambda_decay.png"), 
-        dpi=200, 
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-
-
-    fig, ax = plt.subplots(figsize=(10,7))
-    encoder.plot_kpca_cumulative(ax=ax, threshold=0.95) 
-    fig.savefig(
-        project_path(image_dir, "kpca_variance_proxy.png"), 
-        dpi=200, 
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-
-
-if __name__ == "__main__":
-    main() 

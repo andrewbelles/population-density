@@ -141,6 +141,7 @@ class CVConfig:
     stratify: bool = False  # only meaningful for classification  
     shuffle: bool = True 
     random_state: int = 0
+    verbose: bool = True 
 
     def get_splitter(self, task: TaskSpec) -> BaseCrossValidator: 
 
@@ -318,7 +319,8 @@ class CrossValidator:
             oof_sums, oof_counts, oof_classes = self._init_oof(models, y_for_split)
 
         for model_name, make_model in models.items(): 
-            print(f"> {model_name} now folding...")
+            if config.verbose: 
+                print(f"> {model_name} now folding...")
             for fold_i, (train_idx, test_idx) in enumerate(splits_iter): 
                 X_train, X_test = self.X[train_idx], self.X[test_idx]
                 y_train, y_test = self.y[train_idx], self.y[test_idx]
@@ -657,3 +659,43 @@ class CrossValidator:
     @property
     def n_samples(self) -> int: 
         return self.X.shape[0]
+
+# ---------------------------------------------------------
+# Convenience Functions 
+# ---------------------------------------------------------
+
+def r2_cv_from_array(
+    X: NDArray, 
+    y: NDArray, 
+    coords: NDArray,
+    model_factory: Callable[[], BaseEstimator], 
+    config: CVConfig
+) -> float: 
+
+    '''
+    Keeps validator in memory allowing for quick pairwise regression of feature sets passed 
+    externally. 
+
+    Caller Provides: 
+        X as a feature set against y to regress on, 
+        coordinates (most likely not used)
+        model_factory to generate model per fold under the contract provided by the CrossValidator 
+        config for cv 
+    
+    We Return: 
+        r2 aggregated as mean over all folds executed by the cv 
+    '''
+
+    cv = CrossValidator(
+        filepath="__in_memory__", 
+        loader=lambda _: {
+            "features": X, 
+            "labels": y,
+            "coords": coords, 
+            "feature_names": np.array([]),
+            "sample_ids": np.array([])
+            },
+        task=REGRESSION 
+    )
+    results = cv.run(models={"vif": model_factory}, config=config)
+    return float(np.nanmean(results["r2"]))
