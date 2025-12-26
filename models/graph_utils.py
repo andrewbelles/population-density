@@ -9,6 +9,8 @@
 
 
 import numpy as np 
+import geopandas as gpd 
+import pandas as pd 
 import torch 
 
 from torch_geometric.data import Data 
@@ -17,6 +19,14 @@ from numpy.typing import NDArray
 
 import support.helpers as h 
 import support.graph_cpp as g 
+
+from libpysal.weights import Queen
+
+from scipy import sparse 
+
+from preprocessing.loaders import (
+    load_oof_predictions
+)
 
 def build_knn_graph_from_coords(
     coords: NDArray[np.float64], 
@@ -134,3 +144,122 @@ def induced_subgraph(
             out.y = data.y 
 
     return out 
+
+
+def build_queen_adjacency(shapefile_path: str, fips_order: list[str]): 
+    '''
+    Builds A CSR adjacency list using Queen Contiguity from TIGER shapefile and 
+    some imposed ordering on FIPS 
+    '''
+
+    fips_order = [str(f).zfill(5) for f in fips_order]
+    if len(set(fips_order)) != len(fips_order): 
+        raise ValueError("fips_order contains duplicates")
+
+    gdf = gpd.read_file(shapefile_path)
+    if "GEOID" not in gdf.columns: 
+        raise ValueError("shapefile missing GEOD columns")
+
+    gdf["FIPS"] = gdf["GEOID"].astype(str).str.zfill(5)
+    if gdf["FIPS"].duplicated().any():
+        dup = gdf[gdf["FIPS"].duplicated()]["FIPS"].tolist() 
+        raise ValueError(f"duplicate FIPS in shapefile. head -n 10: {dup[:10]}")
+
+    fips_set = set(fips_order)
+    gdf = gdf[gdf["FIPS"].isin(fips_set)].copy() 
+
+    missing = [f for f in fips_order if f not in set(gdf["FIPS"])]
+    if missing: 
+        raise ValueError(f"missing {len(missing)} FIPS in shapefile. head -n 10: {missing[:10]}")
+    
+    weights = Queen.from_dataframe(gdf, ids=gdf["FIPS"].tolist())
+    adj     = weights.sparse.tocsr()
+
+    id_order  = [str(f).zfill(5) for f in weights.id_order]
+    idx_map   = {f: i for i, f in enumerate(id_order)}
+    order_idx = np.asarray([idx_map[f] for f in fips_order], dtype=np.int64)
+
+    adj = adj[order_idx][:, order_idx]
+    return sparse.csr_matrix(adj, dtype=np.float64)
+
+
+def normalize_adjacency(
+    adj, 
+    *, 
+    self_loops: bool = True, 
+    symmetrize: bool = True, 
+    binarize: bool = True
+): 
+    if adj.shape[0] != adj.shape[1]: 
+        raise ValueError(f"adj must be square, got {adj.shape}")
+
+    A = adj.tocsr().astype(np.float64)
+
+    if symmetrize: 
+        A = A.maximum(A.T) 
+
+    if binarize: 
+        A.data[:] = 1.0 
+
+    if self_loops: 
+        A = A + sparse.eye(A.shape[0], format="csr")
+
+    A.eliminate_zeros() 
+
+    deg  = np.asarray(A.sum(axis=1)).ravel() 
+    mask = deg > 0
+    C    = np.zeros_like(deg)
+    C[mask] = 1.0 / np.sqrt(deg[mask])
+
+    D_inv_sqrt = sparse.diags(C)
+    S = D_inv_sqrt @ A @ D_inv_sqrt
+    return S.tocsr() 
+
+def compute_probability_lag_matrix(
+    proba_path: str, 
+    shapefile: str | None = None, 
+    *, 
+    model_name: str | None = None, 
+    agg: str = "mean"
+): 
+    '''
+    Computes Probability Lag Matrix from Classifier Probabilities and 
+    County adjacency Matrix. 
+
+    If multiple models exist in oof probabilities file then an 
+    optional model name can be passed 
+    
+    Method of aggregating Probabilities across multiple folds can be specified
+
+    '''
+
+    if shapefile is None: 
+        shapefile = h.project_path("data", "geography", "county_shapefile", 
+                                   "tl_2020_us_county.shp")
+
+    oof   = load_oof_predictions(proba_path)
+    probs = np.asarray(oof["probs"], dtype=np.float64) # shape: (samples, models, classes)
+    fips  = np.asarray(oof["fips_codes"]).reshape(-1)
+
+    if probs.ndim != 3: 
+        raise ValueError(f"expected probs shape (samples, models, classes), got {probs.shape}")
+
+    if model_name is not None: 
+        names = np.asarray(oof["model_names"]).reshape(-1)
+        match = np.where(names == model_name)[0]
+        if match.size == 0: 
+            raise ValueError(f"model_name '{model_name}' not found in {names}")
+        P = probs[:, int(match[0]), :]
+    else: 
+        if probs.shape[1] == 1: 
+            P = probs[:, 0, :]
+        elif agg == "mean":
+            P = probs.mean(axis=1)
+        else: 
+            raise ValueError("multiple models present, set model_name or agg='mean'")
+
+    adj = build_queen_adjacency(shapefile, fips_order=list(fips))
+    W   = normalize_adjacency(adj)
+
+    P_lag = W @ P 
+    return P, P_lag, W, fips

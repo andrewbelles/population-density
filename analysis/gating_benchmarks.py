@@ -7,6 +7,7 @@
 # 
 
 import argparse, os 
+import itertools 
 
 from matplotlib.colors import BoundaryNorm
 import numpy as np
@@ -41,6 +42,22 @@ from preprocessing.disagreement import (
     DisagreementSpec,
     build_disagreement_dataset,
     load_pass_through_stacking
+)
+
+from models.graph_utils import (
+    compute_probability_lag_matrix
+)
+
+from models.post_processing import (
+    CorrectAndSmooth,
+    make_train_mask,
+    normalized_proba
+)
+
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    roc_auc_score
 )
 
 REPEATS = 10
@@ -605,6 +622,65 @@ def run_passthrough_stacking():
     return summary, results 
 
 
+def run_cs_postprocess(): 
+
+    print("CLASSIFICATION: Urban-Rural classification using Correct and Smooth "
+          "from Stacking Classifier's Output")
+
+    stacking_oof = project_path("data", "stacking", "stacking_passthrough_oof.mat")
+    shapefile    = project_path("data", "geography", "county_shapefile", "tl_2020_us_county.shp")
+
+    P, _, W, _ = compute_probability_lag_matrix(stacking_oof, shapefile)
+
+    oof          = load_oof_predictions(stacking_oof)
+    y_train      = np.asarray(oof["labels"]).reshape(-1)
+    class_labels = np.asarray(oof["class_labels"]).reshape(-1) 
+
+    train_mask   = make_train_mask(y_train)
+
+    def _run(correction_alpha, correction_iter, smoothing_alpha, smooth_iter):
+        cs = CorrectAndSmooth(
+            class_labels=class_labels,
+            correction_alpha=correction_alpha,
+            correction_max_iter=correction_iter,
+            smoothing_alpha=smoothing_alpha,
+            smoothing_max_iter=smooth_iter
+        )
+
+        P_cs = cs.fit(
+            P,
+            y_train,
+            W,
+            train_mask
+        )
+
+        test_mask = ~train_mask 
+        y_true    = y_train[test_mask]
+
+        P_cs_norm = normalized_proba(P_cs, test_mask)
+        cs_idx    = np.argmax(P_cs_norm, axis=1)
+        cs_pred   = class_labels[cs_idx] 
+
+        return {
+            "acc": accuracy_score(y_true, cs_pred),  
+            "f1": f1_score(y_true, cs_pred, average="macro"),
+            "roc": roc_auc_score(y_true, P_cs_norm, multi_class="ovr", average="macro"),
+            "params": [
+                correction_alpha,
+                correction_iter,
+                smoothing_alpha,
+                smooth_iter
+            ]
+        } 
+
+    res = _run(0.0, 1, 0.05, 5)
+
+    print("Results:")
+    print(f"> acc: {res['acc']}")
+    print(f">  f1: {res['f1']}")
+    print(f"> roc: {res['roc']}")
+
+
 def optimize_svm_viirs(): 
     print("OPTIMIZATION: SVM For VIIRS multi-classification for NCHS Urban-Rural Labels (2023)")
 
@@ -678,7 +754,10 @@ def run_gating_visualization():
         ax.axis("off")
 
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm._A = []
+        if hasattr(sm, "_A"):
+            setattr(sm, "_A", []) 
+        else: 
+            raise AttributeError("expected _A on ScalarMappable")
         cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.02, ticks=ticks)
         cbar.ax.set_yticklabels([str(t) for t in ticks])
 
@@ -739,6 +818,7 @@ def main():
         "stacking_passthrough", 
         "optimize_svm", 
         "visualize_gating",
+        "full",
         "all"
     ] 
 
@@ -755,6 +835,7 @@ def main():
         "stacking_passthrough": run_passthrough_stacking,
         "optimize_svm": optimize_svm_viirs,  
         "visualize_gating": run_gating_visualization, 
+        "full": run_cs_postprocess,
         "all": run_all
     }
 

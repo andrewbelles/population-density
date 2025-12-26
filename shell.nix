@@ -24,6 +24,7 @@ pkgs.mkShell {
     python312Packages.pybind11
     python312Packages.torch-geometric
     python312Packages.fiona
+    python312Packages.libpysal
 
     # PyTorch with CUDA
     python312Packages.torch
