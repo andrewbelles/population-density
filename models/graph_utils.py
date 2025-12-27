@@ -183,6 +183,13 @@ def build_queen_adjacency(shapefile_path: str, fips_order: list[str]):
     return sparse.csr_matrix(adj, dtype=np.float64)
 
 
+def build_travel_time_adjacency(coords):
+    graph = build_knn_graph_from_coords(coords, k=30)
+    edge_index, dist_km = graph.to_coo_numpy()
+
+
+
+
 def normalize_adjacency(
     adj, 
     *, 

@@ -193,6 +193,7 @@ class CorrectAndSmooth:
         Y = self._prepare_targets(y_train, P, train_mask)
 
         E = self._compute_residuals(P, Y, train_mask)
+        
         E_prop = self._propagate(
             E,
             W,

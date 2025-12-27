@@ -216,7 +216,7 @@ class PairwiseReducer:
                 out_names.append(f"pca_{pair_names[0]}__{pair_names[1]}")
 
             if self.verbose:
-                print(f"[{k}/{len(pair_idx)}] {pair_names[0]} + {pair_names[1]}")
+                print(f"[{k}/{len(pair_idx)}] {pair_names[0]} + {pair_names[1]} -> {out_names[-1]}")
 
         X_new     = np.hstack(out_cols).astype(np.float64, copy=False)
         names_new = np.asarray(out_names, dtype="U128")

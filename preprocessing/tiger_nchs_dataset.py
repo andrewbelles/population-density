@@ -257,6 +257,8 @@ class TigerProcessorMulti:
             
             total_int = deg3 + deg4
 
+            ratio_4way = deg4 / total_int if total_int > 0 else 0.0 
+            
             ratio_3way = deg3 / total_int if total_int > 0 else 0.0 
             
             # Dead End Density (Dead Ends / km2)
@@ -285,6 +287,7 @@ class TigerProcessorMulti:
                 "label": self.label_map[fips],
                 "tiger_density_hwy": dens_hwy,
                 "tiger_density_local": dens_local,
+                "tiger_ratio_4way": ratio_4way, 
                 "tiger_ratio_3way": ratio_3way, 
                 "tiger_meshedness": meshedness, 
                 "tiger_avg_len_local": avg_len_local,
@@ -298,6 +301,7 @@ class TigerProcessorMulti:
             feature_cols = [
                 "tiger_density_hwy", 
                 "tiger_density_local", 
+                "tiger_ratio_4way", 
                 "tiger_ratio_3way", 
                 "tiger_avg_len_local", 
                 "tiger_avg_len_hwy",
