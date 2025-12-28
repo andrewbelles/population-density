@@ -130,7 +130,7 @@ CLASSIFICATION = TaskSpec("classification")
 # Cross-Validator Configuration 
 # ---------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass 
 class CVConfig: 
 
     '''Configuration for cross-validation'''
@@ -679,7 +679,7 @@ def r2_cv_from_array(
     Caller Provides: 
         X as a feature set against y to regress on, 
         coordinates (most likely not used)
-        model_factory to generate model per fold under the contract provided by the CrossValidator 
+        model_factory to generate model per fold under the CrossValidator's contract 
         config for cv 
     
     We Return: 
@@ -697,5 +697,6 @@ def r2_cv_from_array(
             },
         task=REGRESSION 
     )
+
     results = cv.run(models={"vif": model_factory}, config=config)
     return float(np.nanmean(results["r2"]))

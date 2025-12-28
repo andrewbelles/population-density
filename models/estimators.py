@@ -504,7 +504,7 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         self.random_state = random_state 
         self.kwargs       = kwargs
 
-    def fit(self, X, y): 
+    def fit(self, X, y, coords=None): 
         self.model_ = SVC(
             C=self.C, 
             kernel=self.kernel, 
@@ -518,10 +518,10 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         self.classes_ = self.model_.classes_ 
         return self 
 
-    def predict(self, X):
+    def predict(self, X, coords=None):
         return self.model_.predict(X)
 
-    def predict_proba(self, X):
+    def predict_proba(self, X, coords=None):
         if not self.probability: 
             raise AttributeError("SVMClassifier was instantiated with probability=False")
         return self.model_.predict_proba(X)

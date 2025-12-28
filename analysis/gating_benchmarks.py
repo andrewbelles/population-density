@@ -50,7 +50,9 @@ from preprocessing.disagreement import (
 )
 
 from models.graph_utils import (
-    compute_probability_lag_matrix
+    compute_probability_lag_matrix,
+    make_queen_adjacency_factory,
+    make_mobility_adjacency_factory
 )
 
 from models.post_processing import (
@@ -457,12 +459,19 @@ def run_modelcheck_all():
     viirs_path = project_path("data", "datasets", "viirs_nchs_2023.mat")
     tiger_path = project_path("data", "datasets", "tiger_nchs_2023.mat")
     nlcd_path  = project_path("data", "datasets", "nlcd_nchs_2023.mat")
-    comb_path  = project_path("data", "datasets", "pairwise_pca_reduced.mat")
+    # comb_path  = project_path("data", "datasets", "pairwise_pca_reduced.mat")
 
     models = {
         "Logistic": make_logistic(), 
         "SVM": make_svm_classifier(), 
-        "RandomForest": make_rf_classifier(), 
+        "RandomForest": make_xgb_classifier(
+            n_estimators=983,
+            max_depth=20,
+            min_samples_split=20, 
+            min_samples_leaf=1, 
+            max_features=None,
+            criterion="log_loss"
+        ),
         "XGBoost": make_xgb_classifier()
     }
 
@@ -470,7 +479,7 @@ def run_modelcheck_all():
         ("viirs", viirs_path), 
         ("tiger", tiger_path), 
         ("nlcd", nlcd_path), 
-        ("combination", comb_path)
+        # ("combination", comb_path)
     ]
 
     loader = lambda fp: load_viirs_nchs(fp)
@@ -541,7 +550,14 @@ def create_oof_datasets():
     loader = _align_loader(load_viirs_nchs, common_fips)
 
     viirs_model = {
-        "XGBoost": make_xgb_classifier()
+        "RandomForest": make_xgb_classifier(
+            n_estimators=983,
+            max_depth=20,
+            min_samples_split=20, 
+            min_samples_leaf=1, 
+            max_features=None,
+            criterion="log_loss"
+        )
     }
 
     tiger_model = {
@@ -820,56 +836,63 @@ def run_cs_postprocess():
 
     stacking_oof = project_path("data", "stacking", "stacking_passthrough_oof.mat")
     shapefile    = project_path("data", "geography", "county_shapefile", "tl_2020_us_county.shp")
+    mobility_mat = project_path("data", "datasets", "travel_proxy.mat")
 
-    P, _, W, _ = compute_probability_lag_matrix(stacking_oof, shapefile)
+    matrix_types = {
+        "Baseline (Queen)": make_queen_adjacency_factory(shapefile), 
+        "Mobility": make_mobility_adjacency_factory(
+            mobility_path=mobility_mat, 
+            probs_path=stacking_oof 
+        )
+    }
 
     oof          = load_oof_predictions(stacking_oof)
     y_train      = np.asarray(oof["labels"]).reshape(-1)
     class_labels = np.asarray(oof["class_labels"]).reshape(-1) 
-
     train_mask   = make_train_mask(y_train)
+    test_mask    = ~train_mask 
+    y_true       = y_train[test_mask]
 
-    def _run(correction_alpha, correction_iter, smoothing_alpha, smooth_iter):
+    results = []
+
+    for name, factory in matrix_types.items(): 
+        print(f"> {name}...")
+
+        P, _, W, _ = compute_probability_lag_matrix(
+            proba_path=stacking_oof, 
+            adj_factory=factory 
+        )
+
         cs = CorrectAndSmooth(
-            class_labels=class_labels,
-            correction_alpha=correction_alpha,
-            correction_max_iter=correction_iter,
-            smoothing_alpha=smoothing_alpha,
-            smoothing_max_iter=smooth_iter
+            class_labels=class_labels, 
+            correction_alpha=0.01, 
+            correction_max_iter=5, 
+            smoothing_alpha=0.01,
+            smoothing_max_iter=5
         )
 
-        P_cs = cs.fit(
-            P,
-            y_train,
-            W,
-            train_mask
-        )
-
-        test_mask = ~train_mask 
-        y_true    = y_train[test_mask]
+        P_cs = cs.fit(P, y_train, W, train_mask)
 
         P_cs_norm = normalized_proba(P_cs, test_mask)
         cs_idx    = np.argmax(P_cs_norm, axis=1)
-        cs_pred   = class_labels[cs_idx] 
+        cs_pred   = class_labels[cs_idx]
 
-        return {
-            "acc": accuracy_score(y_true, cs_pred),  
-            "f1": f1_score(y_true, cs_pred, average="macro"),
-            "roc": roc_auc_score(y_true, P_cs_norm, multi_class="ovr", average="macro"),
-            "params": [
-                correction_alpha,
-                correction_iter,
-                smoothing_alpha,
-                smooth_iter
-            ]
-        } 
+        acc = accuracy_score(y_true, cs_pred)
+        f1  = f1_score(y_true, cs_pred, average="macro")
+        roc = roc_auc_score(y_true, P_cs_norm, multi_class="ovr", average="macro")
 
-    res = _run(0.0, 10, 0.2, 10)
+        print(f"    > acc: {acc:.4f}")
+        print(f"    >  f1: {f1:.4f}")
+        print(f"    > roc: {roc:.4f}")
 
-    print("Results:")
-    print(f"> acc: {res['acc']}")
-    print(f">  f1: {res['f1']}")
-    print(f"> roc: {res['roc']}")
+        results.append({
+            "Method": name, 
+            "Accuracy": acc, 
+            "F1": f1, 
+            "ROC": roc
+        })
+
+    df = pd.DataFrame(results).set_index("Method")
 
 
 def optimize_svm_viirs(): 
@@ -1011,7 +1034,7 @@ def main():
         "stacking_passthrough", 
         "optimize_svm", 
         "visualize_gating",
-        "full",
+        "cs",
         "all"
     ] 
 
@@ -1030,7 +1053,7 @@ def main():
         "stacking_passthrough": run_passthrough_stacking,
         "optimize_svm": optimize_svm_viirs,  
         "visualize_gating": run_gating_visualization, 
-        "full": run_cs_postprocess,
+        "cs": run_cs_postprocess,
         "all": run_all
     }
 

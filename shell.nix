@@ -26,6 +26,7 @@ pkgs.mkShell {
     python312Packages.torch-geometric
     python312Packages.fiona
     python312Packages.libpysal
+    python312Packages.optuna
 
     # PyTorch with CUDA
     python312Packages.torch
@@ -68,7 +69,7 @@ pkgs.mkShell {
     pip install --upgrade pip
     
     # Only install packages not available in nixpkgs
-    pip install rasterstats pyrosm osmnx  
+    pip install rasterstats pyrosm osmnx nevergrad  
     
     echo "[NIX-SHELL] Installing CUDA XGBoost"
     pip install --upgrade pip

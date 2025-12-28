@@ -8,6 +8,7 @@
 # 
 
 
+from typing import Callable
 import numpy as np 
 import geopandas as gpd 
 import pandas as pd 
@@ -23,10 +24,14 @@ import support.graph_cpp as g
 from libpysal.weights import Queen
 
 from scipy import sparse 
+from scipy.io import loadmat
 
 from preprocessing.loaders import (
     load_oof_predictions
 )
+
+from support.helpers import _mat_str_vector
+
 
 def build_knn_graph_from_coords(
     coords: NDArray[np.float64], 
@@ -183,13 +188,6 @@ def build_queen_adjacency(shapefile_path: str, fips_order: list[str]):
     return sparse.csr_matrix(adj, dtype=np.float64)
 
 
-def build_travel_time_adjacency(coords):
-    graph = build_knn_graph_from_coords(coords, k=30)
-    edge_index, dist_km = graph.to_coo_numpy()
-
-
-
-
 def normalize_adjacency(
     adj, 
     *, 
@@ -222,9 +220,40 @@ def normalize_adjacency(
     S = D_inv_sqrt @ A @ D_inv_sqrt
     return S.tocsr() 
 
+AdjacencyFactory = Callable[[list[str]], sparse.csr_matrix]
+
+def make_queen_adjacency_factory(shapefile_path: str | None = None) -> AdjacencyFactory: 
+    if shapefile_path is None: 
+        shapefile_path = h.project_path("data", "geography", "county_shapefile",
+                                        "tl_2020_us_county.shp")
+
+    def _factory(fips_order: list[str]) -> sparse.csr_matrix: 
+        return build_queen_adjacency(shapefile_path, fips_order)
+
+    return _factory
+
+
+def make_mobility_adjacency_factory(mobility_path: str, probs_path: str) -> AdjacencyFactory:
+
+    adj_parent, fips_parent = compute_adaptive_graph(mobility_path, probs_path)
+
+    def _factory(fips_order: list[str]) -> sparse.csr_matrix: 
+        src_map = {f: i for i, f in enumerate(fips_parent)} 
+        indices = []
+        for f in fips_order: 
+            if f not in src_map: 
+                raise ValueError(f"target FIPS {f} not found in mobility graph")
+            indices.append(src_map[f])
+
+        indices = np.array(indices, dtype=np.int64)
+
+        return adj_parent[indices][:, indices]
+    return _factory 
+
+
 def compute_probability_lag_matrix(
     proba_path: str, 
-    shapefile: str | None = None, 
+        adj_factory: AdjacencyFactory, 
     *, 
     model_name: str | None = None, 
     agg: str = "mean"
@@ -239,10 +268,6 @@ def compute_probability_lag_matrix(
     Method of aggregating Probabilities across multiple folds can be specified
 
     '''
-
-    if shapefile is None: 
-        shapefile = h.project_path("data", "geography", "county_shapefile", 
-                                   "tl_2020_us_county.shp")
 
     oof   = load_oof_predictions(proba_path)
     probs = np.asarray(oof["probs"], dtype=np.float64) # shape: (samples, models, classes)
@@ -265,8 +290,63 @@ def compute_probability_lag_matrix(
         else: 
             raise ValueError("multiple models present, set model_name or agg='mean'")
 
-    adj = build_queen_adjacency(shapefile, fips_order=list(fips))
+    adj = adj_factory(list(fips))
     W   = normalize_adjacency(adj)
 
     P_lag = W @ P 
     return P, P_lag, W, fips
+
+def compute_adaptive_graph(mobility_matrix_path: str, probs_path: str):
+    mat = loadmat(mobility_matrix_path)
+
+    if "fips_codes" not in mat: 
+        raise ValueError(f"{mobility_matrix_path} missing fips_codes")
+
+    fips_mob   = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    edge_index = mat["edge_index"].astype(int)
+    edge_attr  = mat["edge_weight_affinity"].flatten() 
+    n_nodes    = mat["coords"].shape[0]
+
+    prob_mat   = loadmat(probs_path)
+    if "fips_codes" not in prob_mat: 
+        raise ValueError(f"{probs_path} missing fips_codes")
+    fips_prob  = _mat_str_vector(prob_mat["fips_codes"]).astype("U5")
+
+    P = prob_mat["probs"]
+    if P.ndim == 3: 
+        P = P.mean(axis=1)
+
+    prob_map   = {f: i for i, f in enumerate(fips_prob)}
+    P_aligned  = np.zeros((n_nodes, P.shape[1]), dtype=np.float64)
+    valid_mask = np.zeros(n_nodes, dtype=bool)
+    for i, f in enumerate(fips_mob): 
+        if f in prob_map: 
+            P_aligned[i]  = P[prob_map[f]]
+            valid_mask[i] = True 
+
+    row, col   = edge_index[0], edge_index[1]
+    edge_mask  = valid_mask[row] & valid_mask[col]
+    row = row[edge_mask]
+    col = col[edge_mask]
+    edge_attr = edge_attr[edge_mask]
+
+    p_src = P_aligned[row]
+    p_dst = P_aligned[col]
+    
+    diff     = p_src - p_dst 
+    dist_sq  = np.sum(diff**2, axis=1)
+    dists    = np.sqrt(dist_sq) 
+    sigma    = np.median(dists[dists > 0])
+    if sigma < 1e-6: 
+        sigma = 1.0 
+    gamma    = 1.0 / (2.0 * sigma**2)
+    sim_pred = np.exp(-gamma * dist_sq) 
+
+    new_weights = edge_attr * sim_pred 
+
+    adj_refined = sparse.csr_matrix(
+        (new_weights, (row, col)), 
+        shape=(n_nodes, n_nodes)
+    )
+
+    return adj_refined, fips_mob 
