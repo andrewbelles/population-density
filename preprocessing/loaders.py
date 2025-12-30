@@ -376,6 +376,23 @@ def load_stacking(filepaths: Sequence[str]) -> DatasetDict:
         "sample_ids": fips}
 
 
+def load_coords_from_mobility(filepath: str) -> DatasetDict: 
+    mat = loadmat(filepath)
+    if "fips_codes" not in mat or "coords" not in mat: 
+        raise ValueError(f"{filepath} missing 'fips_codes'/'coords'")
+
+    fips   = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    coords = np.asarray(mat["coords"], dtype=np.float64)
+    if coords.ndim == 2 and coords.shape == (2, coords.shape[0]): 
+        coords = coords.T 
+    return {
+        "features": coords, 
+        "labels": np.zeros(coords.shape[0], dtype=np.int64), 
+        "coords": coords, 
+        "feature_names": np.array(["lat", "lon"], dtype="U"), 
+        "sample_ids": fips
+    }
+
 # ---------------------------------------------------------
 # Unsupervised Loader Interface 
 # ---------------------------------------------------------
@@ -591,3 +608,118 @@ def load_oof_errors(
         "Predicted_Class": y_pred,
         "Class_Distance": y_true - y_pred
     })
+
+# --------------------------------------------------------- 
+# Datasets that work specifically with Metric Learners 
+# --------------------------------------------------------- 
+
+class ConcatSpec(TypedDict): 
+    name: str 
+    path: str 
+    loader: Callable[[str], DatasetDict]
+
+def _align_on_fips(fips_order, fips_vec): 
+    idx_map = {f: i for i, f in enumerate(fips_vec)}
+    return np.array([idx_map[f] for f in fips_order], dtype=int) 
+
+def _oof_feature_names(model_names, class_labels, n_classes): 
+    if class_labels.size: 
+        labels = [int(c) for c in class_labels]
+    else: 
+        labels = list(range(n_classes))
+    names = []
+    for m in model_names: 
+        for c in labels: 
+            names.append(f"{m}__p{c}")
+    return np.array(names, dtype="U64")
+
+def make_oof_dataset_loader(
+    *,
+    model_name: str | None = None 
+) -> DatasetLoader: 
+
+    def _loader(path: str) -> DatasetDict: 
+        oof   = load_oof_predictions(path)
+        probs = np.asarray(oof["probs"], dtype=np.float64)
+        model_names  = oof["model_names"].tolist()
+        class_labels = np.asarray(oof["class_labels"]).reshape(-1)
+        labels       = np.asarray(oof["labels"]).reshape(-1)
+
+        if probs.ndim == 3: 
+            if model_name is not None: 
+                if model_name not in model_names: 
+                    raise ValueError(f"oof model '{model_name}' not in {model_names}")
+                m_idx = model_names.index(model_name)
+                probs = probs[:, m_idx, :]
+                feature_names = _oof_feature_names([model_name], class_labels, probs.shape[1])
+            else: 
+                feature_names = _oof_feature_names(model_names, class_labels, probs.shape[2])
+                probs = probs.reshape(probs.shape[0], -1)
+        else: 
+            feature_names = _oof_feature_names(model_names, class_labels, probs.shape[1])
+        
+        return {
+            "features": probs, 
+            "labels": labels, 
+            "coords": np.zeros((probs.shape[0], 2), dtype=np.float64),
+            "feature_names": feature_names, 
+            "sample_ids": np.asarray(oof["fips_codes"]).astype("U5")
+        }
+    return _loader 
+
+def load_concat_datasets(
+    specs: Sequence[ConcatSpec], 
+    *,
+    labels_path: str, 
+    labels_loader: Callable[[str], DatasetDict], 
+) -> DatasetDict: 
+    if not specs: 
+        raise ValueError("specs must not be empty")
+
+
+    label_data = labels_loader(labels_path) 
+    label_ids  = list(label_data["sample_ids"])
+    y = np.asarray(label_data["labels"])
+    if y.ndim == 2 and y.shape[1] == 1: 
+        y = y.reshape(-1)
+
+    data    = {s["name"]: s["loader"](s["path"]) for s in specs}
+    id_sets = [set(d["sample_ids"]) for d in data.values()]
+    common  = [f for f in label_ids if all(f in s for s in id_sets)]
+    if not common: 
+        raise ValueError("no common sample_ids across specs")
+
+    idx_label  = _align_on_fips(common, label_data["sample_ids"])
+    y = y[idx_label]
+    
+    coords = np.zeros((len(common), 2), dtype=np.float64)
+
+    X_blocks    = []
+    name_blocks = []
+    for s in specs: 
+        d   = data[s["name"]]
+        idx = _align_on_fips(common, d["sample_ids"])
+        X   = np.asarray(d["features"])[idx]
+
+        names = d.get("feature_names")
+        if names is None or len(names) != X.shape[1]: 
+            names = np.array([f"f{i}" for i in range(X.shape[1])], dtype="U64")
+        else: 
+            names = np.asarray(names)
+
+        if s.get("prefix", True): 
+            names = np.array([f"{s['name']}__{n}" for n in names], dtype="U64")
+
+        X_blocks.append(X)
+        name_blocks.append(names)
+
+    X_all = np.hstack(X_blocks) if len(X_blocks) > 1 else X_blocks[0]
+    feature_names = np.concatenate(name_blocks) if len(name_blocks) > 1 else name_blocks[0]
+
+    return {
+        "features": X_all, 
+        "labels": y, 
+        "coords": coords, 
+        "feature_names": feature_names, 
+        "sample_ids": np.array(common, dtype="U5")
+    }

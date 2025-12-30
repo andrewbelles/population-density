@@ -1,0 +1,109 @@
+models:
+  VIIRS/Logistic:
+    C: 82.59876692784395
+    class_weight: balanced
+  VIIRS/RandomForest:
+    n_estimators: 843
+    max_depth: 14
+    min_samples_split: 50
+    min_samples_leaf: 23
+    max_features: sqrt
+    criterion: log_loss
+  VIIRS/XGBoost:
+    n_estimators: 988
+    learning_rate: 0.01693284409401247
+    max_depth: 4
+    subsample: 0.7197367576199291
+    colsample_bytree: 0.6891824051457265
+    min_child_weight: 5
+    reg_alpha: 4.145803243197841
+    reg_lambda: 0.2801693803763475
+    gamma: 0.11914979083297958
+  VIIRS/SVM:
+    kernel: poly
+    C: 968.3436192190226
+    degree: 3
+    gamma_poly: scale
+    coef0: 3.2274389635804623
+    shrinking: true
+  TIGER/Logistic:
+    C: 69.14305214361649
+    class_weight: null
+  TIGER/RandomForest:
+    n_estimators: 893
+    max_depth: 13
+    min_samples_split: 21
+    min_samples_leaf: 20
+    max_features: log2
+    criterion: entropy
+  TIGER/XGBoost:
+    n_estimators: 811
+    learning_rate: 0.003619208138721892
+    max_depth: 6
+    subsample: 0.5262574706048894
+    colsample_bytree: 0.8898517225734274
+    min_child_weight: 9
+    reg_alpha: 0.575101099326617
+    reg_lambda: 0.46176274307506754
+    gamma: 0.10058689520612597
+  NLCD/Logistic:
+    C: 96.24199993137633
+    class_weight: null
+  NLCD/RandomForest:
+    n_estimators: 980
+    max_depth: 11
+    min_samples_split: 47
+    min_samples_leaf: 23
+    max_features: sqrt
+    criterion: log_loss
+  NLCD/XGBoost:
+    n_estimators: 970
+    learning_rate: 0.008515830036235846
+    max_depth: 5
+    subsample: 0.5228311935337193
+    colsample_bytree: 0.7140379599333375
+    min_child_weight: 16
+    reg_alpha: 4.386768729896446
+    reg_lambda: 0.1382314880653961
+    gamma: 0.728980358837796
+  Stacking/Logistic:
+    C: 4.665954567021848
+    class_weight: balanced
+  Stacking/RandomForest:
+    n_estimators: 611
+    max_depth: 10
+    min_samples_split: 41
+    min_samples_leaf: 26
+    max_features: sqrt
+    criterion: entropy
+  Stacking/XGBoost:
+    n_estimators: 963
+    learning_rate: 0.014444951874519506
+    max_depth: 3
+    subsample: 0.5633699898457212
+    colsample_bytree: 0.8069756896597624
+    min_child_weight: 14
+    reg_alpha: 0.2759621265901354
+    reg_lambda: 0.299209451530703
+    gamma: 0.17176429793843292
+  CorrectAndSmooth:
+    adjacency: queen
+    correction_alpha: 0.21536400227001457
+    smoothing_alpha: 0.001172123424572874
+    correction_max_iter: 8
+    smoothing_max_iter: 9
+    autoscale: false
+  StackingOOF/IDML:
+    n_neighbors_frac: 0.008235983181819426
+    n_components_frac: 0.4175294417016133
+    confidence_threshold: 0.9810372504193663
+    label_spreading_alpha: 0.5568125102682084
+    max_iter: 8
+    dataset: NLCD+COORDS
+  StackingOOF/IDML/CorrectAndSmooth:
+    adjacency: metric
+    correction_alpha: 0.08495323776901603
+    smoothing_alpha: 0.015257202065547764
+    correction_max_iter: 1
+    smoothing_max_iter: 3
+    autoscale: false

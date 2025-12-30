@@ -11,6 +11,7 @@
 import os, argparse 
 from pathlib import Path
 import numpy as np
+import optuna
 
 from analysis.cross_validation import (
     CrossValidator,
@@ -33,6 +34,11 @@ from preprocessing.loaders import (
     load_oof_predictions
 )
 
+from preprocessing.disagreement import (
+    load_pass_through_stacking,
+    DisagreementSpec
+)
+
 from support.helpers import project_path
 
 from models.post_processing import (
@@ -49,23 +55,83 @@ from models.graph_utils import (
 
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
-def _get_cached_params(cache: dict, key: str): 
-    models = cache.get("models", {})
-    if isinstance(models, dict): 
-        return models.get(key)
-    return None
+from testbench.test_utils import (
+    _metrics_from_summary,
+    _score_from_summary, 
+    _get_cached_params,
+    _normalize_params,
+    _best_score
+)
 
-def _normalize_params(model_type: str, params: dict) -> dict: 
-    if model_type != "SVM": 
-        return params 
-    cleaned = dict(params)
-    if "gamma" not in cleaned: 
-        for key in ("gamma_poly", "gamma_sigmoid", "gamma_rbf", "gamma_custom"):
-            if key in cleaned: 
-                cleaned["gamma"] = cleaned.pop(key)
-                break 
-    cleaned.pop("gamma_mode", None)
-    return cleaned 
+def evaluate_model(
+    filepath, 
+    loader_func, 
+    model_name, 
+    params, 
+    *, 
+    config, 
+    oof_path=None
+):
+    model = get_factory(model_name)(**params)
+    cv = CrossValidator(
+        filepath=filepath, 
+        loader=loader_func, 
+        task=CLASSIFICATION, 
+        scale_y=False
+    )
+    results = cv.run(
+        models={"model": model},
+        config=config,
+        oof=oof_path is not None
+    )
+    summary = cv.summarize(results)
+    if oof_path: 
+        cv.save_oof(oof_path)
+    return _metrics_from_summary(summary), _score_from_summary(summary)
+
+def evaluate_correct_and_smooth(
+    oof_path,
+    shapefile,
+    mobility_path, 
+    params, 
+    random_state=0
+): 
+    params = dict(params)
+    adjacency = params.pop("adjacency")
+
+    oof = load_oof_predictions(oof_path)
+    y_train = np.asarray(oof["labels"]).reshape(-1)
+    class_labels = np.asarray(oof["class_labels"]).reshape(-1)
+
+    train_mask = make_train_mask(
+        y_train,
+        train_size=0.3,
+        random_state=random_state, 
+        stratify=True
+    )
+    test_mask  = ~train_mask 
+
+    queen_factory    = make_queen_adjacency_factory(shapefile)
+    mobility_factory = make_mobility_adjacency_factory(mobility_path, oof_path)
+
+    P, _, W_queen, _ = compute_probability_lag_matrix(oof_path, queen_factory)
+    _, _, W_mob, _   = compute_probability_lag_matrix(oof_path, mobility_factory)
+    W = W_queen if adjacency == "queen" else W_mob 
+
+    cs = CorrectAndSmooth(class_labels=class_labels, **params)
+
+    P_cs = cs.fit(P, y_train, W, train_mask)
+    P_cs_norm = normalized_proba(P_cs, test_mask)
+
+    pred_idx    = np.argmax(P_cs_norm, axis=1)
+    pred_labels = class_labels[pred_idx]
+    y_true      = y_train[test_mask]
+
+    return {
+        "accuracy": accuracy_score(y_true, pred_labels), 
+        "f1_macro": f1_score(y_true, pred_labels, average="macro"), 
+        "roc_auc": roc_auc_score(y_true, P_cs_norm, multi_class="ovr", average="macro")
+    }
 
 # ---------------------------------------------------------
 # "Enum" into parameter space and model factory 
@@ -117,7 +183,9 @@ def optimize_correct_and_smooth(
     n_trials: int = 100,
     early_stopping_rounds=40,
     early_stopping_delta=1e-4,
-    random_state: int = 0
+    random_state: int = 0,
+    config_key: str = "CorrectAndSmooth", 
+    config_path: str | None = None
 ): 
     oof          = load_oof_predictions(oof_path)
     y_train      = np.asarray(oof["labels"]).reshape(-1)
@@ -165,6 +233,9 @@ def optimize_correct_and_smooth(
         early_stopping_rounds=early_stopping_rounds,
         early_stopping_delta=early_stopping_delta
     )
+
+    if config_path is not None: 
+        _save_model_config(config_path, config_key, best_params)
 
     return best_params, best_score 
 
@@ -306,9 +377,14 @@ def generate_oof(dataset_name, filepath, loader_func, winner, output_path):
 # Main Test Pipeline  
 # ---------------------------------------------------------
 
-def stacking(args):
+def stacking(config_path, args):
+    passthrough = [
+        "viirs_variance", 
+        "nlcd_urban_core",
+        "tiger_density_deadend",
+        "nlcd_edge_dens"
+    ]
 
-    config_path = project_path("tests", "model_config.yaml")
     cache = _load_yaml_config(Path(config_path)) if args.resume else {}
 
     datasets = {
@@ -345,29 +421,65 @@ def stacking(args):
 
     print("[Stacking] starting meta-learner optimization")
 
-    def stack_loader(_): 
-        return load_stacking(oof_files)
+    specs: list[DisagreementSpec] = [
+        {
+            "name": "viirs", 
+            "raw_path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
+            "raw_loader": load_viirs_nchs,
+            "oof_path": oof_files[0], 
+            "oof_loader": load_oof_predictions 
+        },
+        {
+            "name": "tiger", 
+            "raw_path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
+            "raw_loader": load_viirs_nchs,
+            "oof_path": oof_files[1],
+            "oof_loader": load_oof_predictions
+        },
+        {
+            "name": "nlcd",
+            "raw_path": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
+            "raw_loader": load_viirs_nchs,
+            "oof_path": oof_files[2],
+            "oof_loader": load_oof_predictions 
+        }
+    ]
 
-    dummy = oof_files[0]
+    if args.passthrough: 
+        stack_loader = lambda fp: load_pass_through_stacking(
+            specs, 
+            label_path=fp, 
+            label_loader=load_viirs_nchs,
+            passthrough_features=passthrough
+        )
+    else: 
+        stack_loader = lambda _: load_stacking(oof_files)
+
+    dummy  = oof_files[0]
+    prefix = "StackingPassthrough" if args.passthrough else "Stacking"
 
     stack_winner = optimize_dataset(
-        "Stacking",
+        prefix,
         dummy,
         stack_loader, 
-        n_trials=250
+        n_trials=250,
+        config_path=config_path
     )
 
-    final_output = project_path("data", "results", "final_stacked_predictions.mat")
+    if args.passthrough:
+        final_output = project_path("data", "results", "final_stacked_passthrough.mat")
+    else: 
+        final_output = project_path("data", "results", "final_stacked_predictions.mat")
     os.makedirs(os.path.dirname(final_output), exist_ok=True)
 
     generate_oof("Stacking", dummy, stack_loader, stack_winner, final_output)
-
     print(f"> stacking predictions saved to {final_output}")
 
 
-def correct_and_smooth(): 
+def correct_and_smooth(config_path): 
 
-    stacking_oof_path = project_path("data", "stacking", "stacking_passthrough_oof.mat")
+    stacking_oof_path = project_path("data", "results", 
+                                     "final_stacked_predictions.mat")
     shapefile = project_path("data", "geography", "county_shapefile", 
                              "tl_2020_us_county.shp")
     mobility_mat = project_path("data", "datasets", "travel_proxy.mat")
@@ -377,10 +489,148 @@ def correct_and_smooth():
         shapefile=shapefile,
         mobility_path=mobility_mat,
         n_trials=150,
-        random_state=0
+        random_state=0,
+        config_path=config_path
     )
 
     print(cs_params, cs_score)
+
+
+def report(config_path): 
+
+    config_path = project_path("testbench", "model_config.yaml")
+    cfg         = _load_yaml_config(Path(config_path))
+    models_cfg  = cfg.get("models", {})
+
+    datasets = {
+        "VIIRS": project_path("data", "datasets", "viirs_nchs_2023.mat"), 
+        "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"), 
+        "NLCD": project_path("data", "datasets", "nlcd_nchs_2023.mat")
+    }
+
+    rows = []
+    oof_files = []
+
+    config = CVConfig(
+        n_splits=5,
+        n_repeats=1,
+        stratify=True, 
+        random_state=0,
+        verbose=False
+    )
+
+    for name, path in datasets.items(): 
+        best = None
+        for model_name in ("Logistic", "RandomForest", "XGBoost"): 
+            key = f"{name}/{model_name}"
+            params = models_cfg.get(key)
+            if params is None: 
+                continue 
+
+            params = _normalize_params(model_name, params)
+            metrics, score = evaluate_model(
+                path, 
+                load_viirs_nchs, 
+                model_name, 
+                params,
+                config=config
+            )
+            score = _best_score(metrics)
+            if best is None or score > best[0]: 
+                best = (score, model_name, params, metrics)
+
+        if best is None: 
+            continue 
+
+        _, model_name, params, metrics = best 
+        oof_path = project_path("data", "stacking", f"{name.lower()}_optimized_oof.mat")
+        evaluate_model(
+            path, 
+            load_viirs_nchs, 
+            model_name, 
+            params, 
+            config=config, 
+            oof_path=oof_path
+        )
+        oof_files.append(oof_path)
+
+        rows.append({
+            "Stage": name, 
+            "Model": model_name, 
+            **metrics 
+        })
+
+    stack_loader = lambda _: load_stacking(oof_files) 
+    best_stack = None 
+
+    for model_name in ("Logistic", "RandomForest", "XGBoost"):
+        key = f"Stacking/{model_name}"
+        params = models_cfg.get(key)
+        if params is None: 
+            continue 
+
+        params = _normalize_params(model_name, params)
+        metrics, score = evaluate_model(
+            "virtual", 
+            stack_loader, 
+            model_name, 
+            params, 
+            config=config
+        )
+        if best_stack is None or score > best_stack[0]: 
+            best_stack = (score, model_name, params, metrics)
+
+    if best_stack is None: 
+        raise ValueError
+
+    _, model_name, params, metrics = best_stack 
+    stacking_oof = project_path("data", "stacking", "stacking_oof.mat")
+    evaluate_model(
+        oof_files[0], 
+        stack_loader,
+        model_name, 
+        params, 
+        config=config,
+        oof_path=stacking_oof
+    )
+    rows.append({
+        "Stage": "Stacking",
+        "Model": model_name,
+        **metrics
+    })
+
+    cs_params  = models_cfg.get("CorrectAndSmooth")
+    shapefile  = project_path("data", "geography", "county_shapefile",
+                             "tl_2020_us_county.shp")
+    mobility   = project_path("data", "datasets", "travel_proxy.mat")
+    cs_metrics = evaluate_correct_and_smooth(
+        stacking_oof, 
+        shapefile,
+        mobility,
+        cs_params,
+        random_state=0
+    ) 
+
+    rows.append({
+        "Stage": "CorrectAndSmooth",
+        "Model": cs_params.get("adjacency"),
+        **cs_metrics
+    })
+
+    headers = ["Stage", "Model", "accuracy", "f1_macro", "roc_auc"]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |"
+    ]
+    for r in rows: 
+        lines.append("| " + " | ".join([
+            str(r.get("Stage", "")),
+            str(r.get("Model", "")),
+            f"{r.get('accuracy', float('nan')):.4f}",
+            f"{r.get('f1_macro', float('nan')):.4f}",
+            f"{r.get('roc_auc', float('nan')):.4f}",
+        ]) + " |")
+    print("\n".join(lines))
 
 
 def main(): 
@@ -388,13 +638,24 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--stacking", action="store_true")
     parser.add_argument("--cs", action="store_true")
+    parser.add_argument("--report", action="store_true")
+    parser.add_argument("--suppress", action="store_true")
+    parser.add_argument("--passthrough", action="store_true")
     args = parser.parse_args()
 
+    config_path = project_path("testbench", "model_config.yaml")
+
+    if args.suppress: 
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
     if args.stacking: 
-        stacking(args)
+        stacking(config_path, args)
 
     if args.cs: 
-        correct_and_smooth()
+        correct_and_smooth(config_path)
+
+    if args.report: 
+        report(config_path)
 
 
 if __name__ == "__main__": 

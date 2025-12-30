@@ -16,6 +16,11 @@ import numpy as np
 from abc import ABC, abstractmethod 
 from typing import Any, Callable, Dict, Literal 
 
+from preprocessing.loaders import (
+    _align_on_fips,
+    load_oof_predictions
+)
+
 from analysis.cross_validation import (
     CrossValidator, 
     CVConfig,
@@ -24,8 +29,13 @@ from analysis.cross_validation import (
 )
 
 from models.post_processing import (
-    CorrectAndSmooth, 
+    CorrectAndSmooth,
+    make_train_mask, 
     normalized_proba 
+)
+
+from analysis.graph_metrics import (
+    MetricAnalyzer,
 )
 
 from sklearn.metrics import accuracy_score
@@ -213,8 +223,8 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
                 "adjacency", list(self.W_by_name.keys())),
             "correction_alpha": trial.suggest_float("correction_alpha", 0.0, 1.0), 
             "smoothing_alpha": trial.suggest_float("smoothing_alpha", 0.0, 1.0), 
-            "correction_max_iter": trial.suggest_int("correction_iter", 1, 15), 
-            "smoothing_max_iter": trial.suggest_int("smoothing_iter", 1, 15), 
+            "correction_max_iter": trial.suggest_int("correction_max_iter", 1, 25), 
+            "smoothing_max_iter": trial.suggest_int("smoothing_max_iter", 1, 25), 
             "autoscale": trial.suggest_categorical("autoscale", [True, False])
         }
 
@@ -234,6 +244,120 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
         pred_labels = self.class_labels[pred_idx]
 
         return accuracy_score(self.y_true, pred_labels)
+
+# ---------------------------------------------------------
+# Metric Learning Evaluator  
+# ---------------------------------------------------------
+
+class MetricCASEvaluator(OptunaEvaluator): 
+    '''
+    Targets downstream optimization of accuracy 
+    '''
+
+    def __init__(
+        self, 
+        filepath: str, 
+        # loader_func: Callable, 
+        base_factory_func: Callable,
+        param_space: Callable[[optuna.Trial], Dict[str, Any]],
+        *,
+        dataset_loaders: dict, 
+        proba_path: str, 
+        proba_model_name: str | None = None, 
+        random_state: int = 0, 
+        train_size: float = 0.3
+    ): 
+        self.filepath         = filepath 
+        self.factory          = base_factory_func 
+        self.param_space_fn   = param_space 
+        self.dataset_loaders  = dataset_loaders
+        self.proba_path       = proba_path 
+        self.proba_model_name = proba_model_name 
+        self.random_state     = random_state
+        self.train_size       = train_size 
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        params = self.param_space_fn(trial)
+        params["dataset"] = trial.suggest_categorical(
+            "dataset",
+            list(self.dataset_loaders.keys())
+        )
+        return params 
+
+    def evaluate(self, params: Dict[str, Any]) -> float:
+        dataset_key = params.pop("dataset", None)
+        loader      = self.dataset_loaders.get(dataset_key)
+        if loader is None: 
+            raise ValueError("no loader available for evaluator")
+
+        data = loader(self.filepath)
+        X    = data["features"]
+        y    = np.asarray(data["labels"]).reshape(-1)
+        fips = np.asarray(data["sample_ids"], dtype="U5")
+
+        max_components = max(1, min(128, X.shape[1]))
+        max_neighbors  = max(1, min(100, X.shape[0] - 1))
+
+        if "n_components_frac" in params: 
+            frac = params.pop("n_components_frac")
+            params["n_components"] = 1 + int(round(frac * (max_components - 1)))
+        if "n_neighbors_frac" in params: 
+            frac = params.pop("n_neighbors_frac")
+            params["n_neighbors"] = 1 + int(round(frac * (max_neighbors - 1)))
+
+        oof = load_oof_predictions(self.proba_path)
+        oof_fips = np.asarray(oof["fips_codes"]).astype("U5")
+        common = [f for f in fips if f in set(oof_fips)]
+        if not common: 
+            raise ValueError("no common fips between dataset and oof probs")
+
+        if len(common) != len(fips): 
+            idx = _align_on_fips(common, fips)
+            X = X[idx] 
+            y = y[idx]
+            fips = fips[idx]
+
+        P, class_labels = _load_probs_for_fips(
+            self.proba_path,
+            fips,
+            model_name=self.proba_model_name
+        )
+
+        train_mask = make_train_mask(
+            y,
+            train_size=self.train_size,
+            random_state=self.random_state,
+            stratify=True
+        )
+        test_mask  = ~train_mask
+
+        model = self.factory(**params)
+        model.fit(X, y, train_mask=train_mask)
+
+        adj = model.get_graph(X)
+
+
+        # Downstream target is to maximize correct and smooth accuracy
+        cs = CorrectAndSmoothEvaluator(
+            P=P,
+            W_by_name={"metric": adj}, 
+            y_train=y,
+            train_mask=train_mask,
+            test_mask=test_mask,
+            class_labels=class_labels
+        )
+
+        _, best_value = run_optimization(
+            name="CorrectAndSmooth_inner",
+            evaluator=cs, 
+            n_trials=100,
+            early_stopping_rounds=40,
+            early_stopping_delta=1e-4,
+            sampler_type="multivariate-tpe", 
+            random_state=self.random_state
+        )
+
+        return best_value 
   
 # ---------------------------------------------------------
 # Definitions of Parameter Space  
@@ -306,8 +430,18 @@ def define_logistic_space(trial):
         "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]), 
     }
 
+def define_idml_space(trial): 
+    return {
+        "n_neighbors_frac": trial.suggest_float("n_neighbors_frac", 0.0, 1.0), 
+        "n_components_frac": trial.suggest_float("n_components_frac", 0.0, 1.0),
+        "confidence_threshold": trial.suggest_float("confidence_threshold", 0.60, 0.99), 
+        "label_spreading_alpha": trial.suggest_float("label_spreading_alpha", 0.1, 0.9),
+        "max_iter": trial.suggest_int("max_iter", 1, 10), 
+        "n_jobs": -1 
+    }
+
 # ---------------------------------------------------------
-#  
+# Helper functions  
 # ---------------------------------------------------------
 
 def _load_yaml_config(path: Path) -> Dict[str, Any]: 
@@ -337,6 +471,42 @@ def _save_model_config(path: str, model_key: str, params: Dict[str, Any]):
     models[model_key] = params 
     data["models"] = models 
     _save_yaml_config(config_path, data)
+
+def _load_probs_for_fips(
+    proba_path: str, 
+    fips_order, 
+    model_name=None,
+    agg="mean"
+): 
+    oof  = load_oof_predictions(proba_path)
+    fips = np.asarray(oof["fips_codes"]).astype("U5")
+    idx  = _align_on_fips(fips_order, fips)
+
+    probs = np.asarray(oof["probs"], dtype=np.float64)
+    if probs.ndim != 3: 
+        raise ValueError(f"expected probs shape (n, m, c), got {probs.shape}")
+
+    if model_name is not None: 
+        names = np.asarray(oof["model_names"]).reshape(-1).tolist() 
+        if model_name not in names: 
+            raise ValueError(f"model_name '{model_name}' not in {names}")
+        m_idx = names.index(model_name)
+        P = probs[:, m_idx, :]
+    else: 
+        if probs.shape[1] == 1: 
+            P = probs[:, 0, :]
+        elif agg == "mean": 
+            P = probs.mean(axis=1)
+        else: 
+            raise ValueError("multiple models present, set model_name or agg='mean'")
+
+    P = P[idx]
+
+    class_labels = np.array(oof["class_labels"]).reshape(-1)
+    if class_labels.size == 0:
+        class_labels = np.arange(P.shape[1], dtype=np.float64)
+
+    return P, class_labels 
 
 # ---------------------------------------------------------
 # Nested Cross Validation 
