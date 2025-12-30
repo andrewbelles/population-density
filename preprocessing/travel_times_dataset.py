@@ -14,13 +14,8 @@ from preprocessing.loaders import (
     load_compact_dataset,
 )
 
-from models.graph_utils import (
-    build_knn_graph_from_coords
-)
-
 from scipy.io import savemat
-
-from support.helpers import project_path 
+from support.helpers import project_path, _haversine_dist 
 
 class TravelTime: 
 
@@ -28,9 +23,8 @@ class TravelTime:
         self,
         tiger_path: str, 
         geo_path: str, 
-        output_path: str, 
+        output_path: str,
     ): 
-        self.k = 50 
         self.tiger_path  = tiger_path 
         self.geo_path    = geo_path
         self.output_path = output_path 
@@ -83,29 +77,27 @@ class TravelTime:
         circuity = X[:, CIRCUITY]
         hwy_dens = X[:, DENS_HWY]
 
-        # For nan or 0 coerce into 1.0 implying roadways are a straight line 
-        circuity[np.isnan(circuity) | (circuity < 1.0)] = 1.0
+        n = C.shape[0]
+        dist_mat = _haversine_dist(C, C)
+        mask = ~np.eye(n, dtype=bool)
 
-        graph = build_knn_graph_from_coords(C, k=self.k, directed=False)
-        edge_index, dist_km = graph.to_coo_numpy() 
-        src, dst = edge_index[0], edge_index[1]
+        src, dst = np.where(mask)
+        dist_km = dist_mat[src, dst]
+        edge_index = np.vstack([src, dst]).astype(np.int64)
 
-        # Compute Cost from source to destination using the avg circuity b/t 
-        avg_circuity = 0.5 * (circuity[src] + circuity[dst]) 
-        proxy_cost   = dist_km * avg_circuity
+        avg_circuity = 0.5 * (circuity[src] + circuity[dst])
+        proxy_cost   = dist_km * avg_circuity 
 
-        # Increase cost by how dense highways are in this county 
         avg_hwy      = 0.5 * (hwy_dens[src] + hwy_dens[dst])
         speed_factor = 1.0 + np.log1p(avg_hwy)
-        proxy_cost   = proxy_cost / speed_factor 
+        proxy_cost    = proxy_cost / speed_factor 
 
-        sigma = np.median(proxy_cost) 
+        sigma = np.median(proxy_cost)
         if sigma == 0: 
             sigma = 1.0 
 
         affinity = np.exp(-(proxy_cost**2) / (2.0 * sigma**2))
-
-        return edge_index, proxy_cost, affinity, sigma 
+        return edge_index, proxy_cost, affinity, sigma
 
 
 def main(): 

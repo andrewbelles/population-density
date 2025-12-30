@@ -21,9 +21,16 @@ import fiona
 
 from support.helpers import project_path
 
+GLCM_WINDOW = 7 
+GLCM_STRIDE = 7 
+GLCM_LEVELS = 16 
+VREI_BINS   = 64 
+GLCM_MIN_VALID = 0.5
+
 class ViirsDataset: 
     STATS = ["min", "max", "mean"]
-    EXTRA = ["variance", "entropy", "skew", "kurtosis"]
+    EXTRA = ["variance", "vrei", "skew", "kurtosis"]
+
 
     def __init__(
         self, 
@@ -103,7 +110,8 @@ class ViirsDataset:
 
         custom_stats_map = {
             "variance": self._get_variance, 
-            "entropy": self._get_entropy, 
+            "entropy": self._get_vrei, 
+            "vrei": lambda x: self._get_vrei(x, bins=64)
             "skew": self._get_skew, 
             "kurtosis": self._get_kurtosis
         }
@@ -118,7 +126,8 @@ class ViirsDataset:
                     add_stats=custom_stats_map,
                     nodata=None,
                     all_touched=self.all_touched, 
-                    geojson_out=False 
+                    geojson_out=False,
+                    raster_out=True
                 )
 
                 all_stats_keys = self.STATS + self.EXTRA 
@@ -138,10 +147,25 @@ class ViirsDataset:
                     else: 
                         cv = 0.0 
 
+                    mini = s.get("mini_raster_array")
+                    if mini is None: 
+                        continue 
+
+                    arr = np.asarray(mini)
+                    valid_mask = ~mini.mask if hasattr(mini, "mask") else np.isfinite(arr)
+
+                    glcm_contrast, glcm_homogeneity = self._glcm_features(arr, valid_mask)
+                    grad_mag = self._gradient_mean(arr, valid_mask)
+
+                    base = {f"viirs_{k}": float(s[k]) for k in all_stats_keys}
+
                     rows.append({
                         "FIPS": fips, 
-                        **{f"viirs_{k}": float(s[k]) for k in all_stats_keys}, 
+                        **base, 
                         "viirs_cv": cv, 
+                        "viirs_glcm_contrast": glcm_contrast,
+                        "viirs_glcm_homogeneity": glcm_homogeneity,
+                        "viirs_grad_mag": grad_mag,
                         "label": self.label_map[fips]
                     })
 
@@ -200,12 +224,12 @@ class ViirsDataset:
         return np.var(x)
 
     @staticmethod 
-    def _get_entropy(x): 
+    def _get_vrei(x, bins=100): 
         valid = x.compressed() if hasattr(x, "compressed") else x
         if valid.size == 0: 
             return 0.0 
 
-        counts, _ = np.histogram(valid, bins=100, density=False)
+        counts, _ = np.histogram(valid, bins=bins, density=False)
         return entropy(counts)
 
     @staticmethod 
@@ -217,6 +241,79 @@ class ViirsDataset:
     def _get_kurtosis(x):
         valid = x.compressed() if hasattr(x, "compressed") else x 
         return kurtosis(valid) if valid.size > 0 else 0.0
+
+    def _quantize(self, data, valid_mask, levels): 
+        valid = data[valid_mask]
+        if valid.size == 0:
+            return None 
+
+        vmin = float(valid.min())
+        vmax = float(valid.max())
+
+        if vmax <= vmin: 
+            q = np.zeros_like(data, dtype=np.int32)
+            q[~valid_mask] = -1 
+            return q 
+        
+        scaled = (data - vmin) / (vmax - vmin)
+        q = np.floor(scaled * (levels - 1)).astype(np.int32)
+        q[~valid_mask] = -1 
+        return q 
+
+    def _glcm_features(self, data, valid_mask): 
+        q = self._quantize(data, valid_mask, GLCM_LEVELS)
+        if q is None: 
+            return 0.0, 0.0 
+    
+        h, w = q.shape 
+        if h < GLCM_WINDOW or w < GLCM_WINDOW: 
+            return 0.0, 0.0 
+
+        levels = GLCM_LEVELS 
+        i_idx, j_idx = np.ogrid[0:levels, 0:levels]
+
+        contrast_vals    = []
+        homogeneity_vals = []
+        for y in range(0, h - GLCM_WINDOW + 1, GLCM_STRIDE): 
+            for x in range(0, w - GLCM_WINDOW + 1, GLCM_STRIDE): 
+                window = q[y:y + GLCM_WINDOW, x:x + GLCM_WINDOW]
+                if np.mean(window >= 0) < GLCM_MIN_VALID: 
+                    continue 
+                left  = window[:, :-1]
+                right = window[:, 1:]
+                mask  = (left >= 0) & (right >= 0)
+                if not np.any(mask): 
+                    continue 
+
+                l = left[mask].ravel() 
+                r = right[mask].ravel() 
+                glcm = np.zeros((levels, levels), dtype=np.float64)
+                np.add.at(glcm, (l, r), 1.0)
+                np.add.at(glcm, (r, l), 1.0)
+                total = glcm.sum() 
+                if total <= 0: 
+                    continue 
+
+                p = glcm / total 
+                contrast    = np.sum((i_idx - j_idx)**2 * p)
+                homogeneity = np.sum(p / (1.0 + np.abs(i_idx - j_idx)))
+                contrast_vals.append(float(contrast))
+                homogeneity_vals.append(float(homogeneity))
+
+        if not contrast_vals: 
+            return 0.0, 0.0 
+        return float(np.mean(contrast_vals)), float(np.mean(homogeneity_vals))
+
+    def _gradient_mean(self, data, valid_mask): 
+        valid = data[valid_mask]
+        if valid.size == 0:
+            return 0.0 
+        fill = float(np.mean(valid))
+        filled = data.astype(np.float64, copy=True)
+        filled[~valid_mask] = fill 
+        gy, gx = np.gradient(filled)
+        grad = np.hypot(gx, gy)
+        return float(np.mean(grad[valid_mask]))
 
     @staticmethod
     def _coarse_label(code: int) -> int: 
