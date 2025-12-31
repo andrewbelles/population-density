@@ -8,17 +8,36 @@ Run from the repo root inside `nix-shell` (sets `PROJECT_ROOT`, installs deps, c
 
 ## Datasets
 
-### VIIRS Nighttime Lights
-`viirs_nchs_dataset.py` to `data/viirs_nchs.mat`
-- GLCM texture features, radiance entropy (VREI), gradients.
+### `viirs_nchs_dataset.py` to `data/datasets/viirs_nchs_2023.mat`
 
-### TIGER Road Network
-`tiger_nchs_dataset.py` to `data/tiger_nchs.mat`
-- Road topology metrics, orientation entropy, centrality summaries.
+Nighttime lights with NCHS labels. Feature set includes:
+- Radiance summary stats: min, max, mean, variance, skew, kurtosis.
+- VREI (radiance entropy over binned intensities).
+- Coefficient of variation (std / mean).
+- GLCM texture: contrast and homogeneity.
+- Gradient magnitude (local radiance boundaries).
 
-### NLCD Land Cover
-`nlcd_nchs_dataset.py` to `data/nlcd_nchs.mat`
-- Landscape configuration metrics (AI, contagion, edge density, LPI).
+### `tiger_nchs_dataset.py` to `--out <path>`
+
+Road network topology with NCHS labels. Feature set includes:
+- Road density (highway/local) and average segment length (highway/local).
+- Intersection structure: 4‑way ratio, 3‑way ratio, dead‑end density.
+- Circuity (local length / straight‑line length).
+- Meshedness coefficient (graph connectivity).
+- Approximate betweenness (mean, max), straightness centrality (mean).
+- Orientation entropy (bearing diversity).
+- Integration at radius 3 (space syntax).
+
+### `nlcd_nchs_dataset.py` to `data/datasets/nlcd_nchs_2023.mat`
+
+Land cover configuration with NCHS labels. Feature set includes:
+- Class proportions: developed (open/low/med/high), agriculture (pasture/crops), nature.
+- Lawn index (open / developed) and urban core (med+high / developed).
+- Edge density and Shannon diversity.
+- Aggregation index for developed classes (open/low/med/high).
+- Contagion (landscape clumping).
+- Edge density for developed open and nature.
+- Largest patch index for developed high.
 
 ### Mobility / Travel Time
 `travel_times_dataset.py` to `data/travel_times.mat`
