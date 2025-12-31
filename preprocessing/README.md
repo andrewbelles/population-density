@@ -1,35 +1,33 @@
 # Preprocessing
 
-This directory contains dataset compilation scripts. These scripts read raw inputs under `data/` and write `.mat` datasets (also under `data/`).
+Dataset compilation scripts. These read raw inputs under `data/` and write `.mat` datasets.
 
 ## Requirements
 
-- Run in the project root, inside `nix-shell` (sets `PROJECT_ROOT`, creates `.venv`, installs Python deps, and creates `data/` subdirectories).
-- Raw data should be present under `data/` (see `scripts/README.md`).
+Run from the repo root inside `nix-shell` (sets `PROJECT_ROOT`, installs deps, creates `data/`).
 
 ## Datasets
 
-### `climate_population_dataset.py` → `data/climate_population.mat`
+### VIIRS Nighttime Lights
+`viirs_nchs_dataset.py` to `data/viirs_nchs.mat`
+- GLCM texture features, radiance entropy (VREI), gradients.
 
-Builds a per-decade dataset of county-level climate features against population density labels.
+### TIGER Road Network
+`tiger_nchs_dataset.py` to `data/tiger_nchs.mat`
+- Road topology metrics, orientation entropy, centrality summaries.
 
-- Climate features: NOAA NClimDiv county products (monthly), aggregated by county and aligned on a canonical FIPS ordering shared across decades.
-- Labels: population density for the target decades.
-- Also exports: `data/climate_counties.tsv` (county metadata used by the geospatial backend).
+### NLCD Land Cover
+`nlcd_nchs_dataset.py` to `data/nlcd_nchs.mat`
+- Landscape configuration metrics (AI, contagion, edge density, LPI).
 
-Run:
-```bash
-python preprocessing/climate_population_dataset.py
-```
+### Mobility / Travel Time
+`travel_times_dataset.py` to `data/travel_times.mat`
+- Distance / mobility adjacency sources.
 
-### `climate_geospatial_dataset.py` → `data/climate_geospatial.mat`
+### SAIPE / Climate Baselines
+`saippe_population_dataset.py`, `climate_*_dataset.py` provide baseline datasets.
 
-Builds a long-run dataset of county-level climate features against `(lat, lon)` labels.
+## Loaders
 
-This is used for experiments like coordinate→climate regression, residual workflows, and climate-aware geospatial encodings.
-
-Run:
-```bash
-python preprocessing/climate_geospatial_dataset.py
-```
-
+`preprocessing/loaders.py` defines dataset loaders used by CV and testbench.
+`preprocessing/disagreement.py` includes passthrough loaders for stacking.

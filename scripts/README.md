@@ -1,45 +1,24 @@
 # Scripts
 
-This directory contains the data fetch/validation/parsing scripts used to build the datasets in `data/`.
+Data fetch and parsing helpers.
 
 ## Requirements
 
-- `bash`, `curl`, `awk`, `sed`, `grep`
-- Recommended: run inside `nix-shell` from the project root (`shell.nix` installs the Python environment; these scripts still rely on system CLI tools).
+`bash`, `curl`, `awk`, `sed`, `grep`
 
-## Usage
-
-### Fetch NClimDiv county products (raw)
-
-Downloads NOAA NClimDiv county-level files for:
-- Palmer indices: `pdsi`, `pmdi`, `phdi`, `zndx`
-- Degree days: `hddc`, `cddc`
+## Example Usage: (Climate, NClimDiv)
 
 ```bash
 ./scripts/fetch_nclimdiv_county.sh
 ./scripts/validate_nclimdiv.sh
-```
-
-Outputs to `data/climate/nclimdiv_county/raw/`.
-
-### Parse NClimDiv county products (raw → CSV)
-
-Converts fixed-width NOAA files to CSV with monthly columns:
-`fips,year,jan,...,dec`
-
-```bash
 ./scripts/parse_nclimdiv_county.sh 1990 2020
 ```
 
-Outputs to `data/climate/nclimdiv_county/parsed/`.
+Outputs to `data/climate/nclimdiv_county/`.
 
-### Legacy (gridded daily) fetch
+## Additional Sources
 
-```bash
-./scripts/fetch_climdiv.sh
-./scripts/fetch_census.sh
-./scripts/fetch_geography.sh
-```
-
-`./scripts/fetch_all.sh` calls the legacy fetch scripts.
-
+- `fetch_saipe.sh`: SAIPE population data.
+- `fetch_bea_cainc.sh`: BEA income data.
+- `fetch_usda_edu.sh`: USDA education data.
+- `parse_ur_classification.sh`: urban/rural labels.

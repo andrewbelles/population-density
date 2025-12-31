@@ -1,14 +1,15 @@
 # Analysis
 
-This directory contains evaluation and diagnostic harnesses.
+Evaluation harnesses, Optuna optimization, and graph diagnostics.
 
-## Cross-Validation
+## Cross‑Validation
 
-`analysis/cross_validation.py` runs repeated cross-validation over one of the datasets and one or more models.
+`analysis/cross_validation.py` runs repeated CV over a dataset and models.
 
 Key properties:
-- Scaling is fit on the training split only (per fold) to avoid transductive leakage.
-- Supports both `kfold` and repeated random splits (via `CVConfig`).
+- Fold‑safe scaling (fit on train only).
+- `kfold` or repeated random splits (`CVConfig`).
+- Supports classification and regression tasks.
 
 Example:
 ```bash
@@ -16,31 +17,35 @@ python analysis/cross_validation.py --decade 2020 --folds 5 --repeats 20 --model
 ```
 
 Outputs:
+
 - `data/models/raw/cv_results_*.csv`
 - `data/models/raw/cv_summary_*.csv`
 
-## Feature Ablation
+## Hyperparameter Optimization
 
-`analysis/climate_analysis.py` runs group-based ablations for the climate geospatial dataset.
+`analysis/hyperparameter.py` provides Optuna wrappers with:
 
-Example:
-```bash
-python analysis/climate_analysis.py --target lat --folds 5 --repeats 10
-```
+- Standard evaluator (single model).
+- Nested CV helper (run_nested_cv).
+- Early stopping by stagnation.
 
-Outputs:
-- `data/models/raw/feature_ablation_results.csv`
-- `analysis/images/<target>/ablation_*.png`
+## Graph Metrics
 
-## Residual Workflow
+`analysis/graph_metrics.py` computes adjacency diagnostics:
 
-`analysis/residual_analysis.py`:
-1) Fits a coordinate→climate model (multi-output) with collection enabled.
-2) Exports a residual dataset (`.mat`).
-3) Re-runs CV on the residual-augmented feature space.
+- Degree stats, largest component ratio.
+- Homophily / confidence edge difference.
+- Train‑neighbor coverage.
 
-Example:
-```bash
-python analysis/residual_analysis.py --folds 5 --repeats 20
-```
+For quantifying and understanding Correct‑and‑Smooth behavior.
 
+## Benchmarks
+
+Specialized benchmarks and diagnostics:
+
+- `climate_benchmarks.py`
+- `saipe_benchmarks.py`
+- `gating_benchmarks.py`
+- `optimizer.py`
+
+Although `testbench/` includes more comprehensive tests and in the future will be where all benchmakrs. 
