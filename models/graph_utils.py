@@ -151,6 +151,23 @@ def induced_subgraph(
     return out 
 
 
+def topk_by_column(adj: sparse.csr_matrix, k: int) -> sparse.csr_matrix: 
+    if k < 1: 
+        raise ValueError("k must be >= 1")
+    A = adj.tocsc()
+    for j in range(A.shape[1]): 
+        start, end = A.indptr[j], A.indptr[j + 1]
+        if end - start <= k: 
+            continue 
+        data = A.data[start:end]
+        keep = np.argpartition(data, -k)[-k:]
+        mask = np.zeros_like(data, dtype=bool)
+        mask[keep] = True 
+        data[~mask] = 0.0 
+    A.eliminate_zeros()
+    return A.tocsr()
+
+
 def build_queen_adjacency(shapefile_path: str, fips_order: list[str]): 
     '''
     Builds A CSR adjacency list using Queen Contiguity from TIGER shapefile and 
@@ -233,9 +250,17 @@ def make_queen_adjacency_factory(shapefile_path: str | None = None) -> Adjacency
     return _factory
 
 
-def make_mobility_adjacency_factory(mobility_path: str, probs_path: str) -> AdjacencyFactory:
+def make_mobility_adjacency_factory(
+    mobility_path: str, 
+    probs_path: str, 
+    *, 
+    k_neighbors: int | None = None
+) -> AdjacencyFactory:
+    
+    if k_neighbors is None: 
+        k_neighbors = 19 
 
-    adj_parent, fips_parent = compute_adaptive_graph(mobility_path, probs_path)
+    adj_parent, fips_parent = compute_adaptive_graph(mobility_path, probs_path, k_neighbors=k_neighbors)
 
     def _factory(fips_order: list[str]) -> sparse.csr_matrix: 
         src_map = {f: i for i, f in enumerate(fips_parent)} 
@@ -253,7 +278,7 @@ def make_mobility_adjacency_factory(mobility_path: str, probs_path: str) -> Adja
 
 def compute_probability_lag_matrix(
     proba_path: str, 
-        adj_factory: AdjacencyFactory, 
+    adj_factory: AdjacencyFactory, 
     *, 
     model_name: str | None = None, 
     agg: str = "mean"
@@ -296,7 +321,12 @@ def compute_probability_lag_matrix(
     P_lag = W @ P 
     return P, P_lag, W, fips
 
-def compute_adaptive_graph(mobility_matrix_path: str, probs_path: str):
+def compute_adaptive_graph(
+    mobility_matrix_path: str, 
+    probs_path: str,
+    *,
+    k_neighbors: int
+):
     mat = loadmat(mobility_matrix_path)
 
     if "fips_codes" not in mat: 
@@ -348,5 +378,7 @@ def compute_adaptive_graph(mobility_matrix_path: str, probs_path: str):
         (new_weights, (row, col)), 
         shape=(n_nodes, n_nodes)
     )
+
+    adj_refined = topk_by_column(adj_refined, k_neighbors)
 
     return adj_refined, fips_mob 

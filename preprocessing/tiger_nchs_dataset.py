@@ -19,8 +19,11 @@ from multiprocessing import Pool, cpu_count
 from support.helpers import project_path
 
 # for graph statistics  
-import heapq
 from collections import deque 
+import networkit as nk
+import gc
+
+nk.setNumberOfThreads(1)
 
 # Global variables for workers
 WORKER_GDF = None
@@ -59,16 +62,7 @@ def process_batch(features_batch):
     """
     Computes local stats including Euclidean distance for Circuity.
     """
-    local_stats = {
-        "matched_fips": {
-            "len_hwy": 0.0, 
-            "cnt_hwy": 0, 
-            "len_local": 0.0, 
-            "cnt_local": 0, 
-            "nodes": {},
-            "segments": []
-        }
-    }
+    local_stats = {}
     
     for props, geom_obj in features_batch:
         mtfcc = props.get('MTFCC', '')
@@ -159,7 +153,84 @@ def process_batch(features_batch):
             
     return local_stats
 
-class TigerNHCS:
+def _row_from_stats(args): 
+    fips, data, label_map, area_map = args 
+    if fips not in label_map: 
+        return None 
+
+    area_km2 = max(area_map.get(fips, 0.0), 0.1)
+
+    # --- FEATURE 1-2: Densities ---
+    dens_hwy = (data["len_hwy"]/1000)/area_km2
+    dens_local = (data["len_local"]/1000)/area_km2
+    
+    # --- FEATURE 3-4: Avg Lengths ---
+    cnt_local = data.get("cnt_local", 0)
+    avg_len_local = (data["len_local"] / cnt_local) if cnt_local > 0 else 0.0
+    
+    cnt_hwy = data.get("cnt_hwy", 0)
+    avg_len_hwy = (data["len_hwy"] / cnt_hwy) if cnt_hwy > 0 else 0.0
+    
+    # --- FEATURE 5: 4-Way Ratio (Grid) ---
+    # --- FEATURE 6: Dead-End Density (Suburban) ---
+    deg1, deg3, deg4 = 0, 0, 0
+    for _, count in data["nodes"].items():
+        if count == 1: deg1 += 1
+        elif count == 3: deg3 += 1
+        elif count >= 4: deg4 += 1
+    
+    total_int = deg3 + deg4
+
+    ratio_4way = deg4 / total_int if total_int > 0 else 0.0 
+    
+    ratio_3way = deg3 / total_int if total_int > 0 else 0.0 
+    
+    # Dead End Density (Dead Ends / km2)
+    dens_deadend = deg1 / area_km2
+    
+    # Circuity (Shape) ---
+    # Ratio of Actual Length / Straight Line Length
+    # 1.0 = Straight, >1.2 = Winding
+    sum_euclid = data.get("euclid_local", 0)
+    if sum_euclid > 0:
+        circuity = data["len_local"] / sum_euclid
+    else:
+        circuity = 1.0 # Default to straight if no data
+    
+    # Meshedness Coefficient 
+    V = len(data["nodes"])
+    E = cnt_local 
+
+    if V > 5: 
+        meshedness = (E - V + 1) / (2 * V - 5)
+    else: 
+        meshedness = 0.0
+
+    # custom features 
+    bet_mean, bet_max, straightness, orient_entropy, integration = (
+        TigerNCHS._compute_topology_metrics(data.get("segments", []))
+    )
+
+    return {
+        "FIPS": fips,
+        "label": label_map[fips],
+        "tiger_density_hwy": dens_hwy,
+        "tiger_density_local": dens_local,
+        "tiger_ratio_4way": ratio_4way,
+        "tiger_ratio_3way": ratio_3way,
+        "tiger_meshedness": meshedness,
+        "tiger_avg_len_local": avg_len_local,
+        "tiger_avg_len_hwy": avg_len_hwy,
+        "tiger_density_deadend": dens_deadend,
+        "tiger_circuity_local": circuity,
+        "tiger_betweenness_mean": bet_mean,
+        "tiger_betweenness_max": bet_max,
+        "tiger_straightness_mean": straightness,
+        "tiger_orientation_entropy": orient_entropy,
+        "tiger_integration_r3": integration,
+    }
+
+class TigerNCHS:
     
     SRC_CRS = "EPSG:4269"
     PROJ_CRS = "EPSG:5070"
@@ -267,89 +338,32 @@ class TigerNHCS:
     def _save(self, stats):
         gdf = gpd.read_file(self.county_shp)
         gdf["FIPS"] = gdf["GEOID"]
+
+        area_map = dict(zip(gdf["FIPS"], gdf["ALAND"].astype(float) / 1e6))
         
+        fips_list  = list(stats.keys())
+        chunk_size = 50
+            
         rows = []
-        for fips, data in stats.items():
-            if fips not in self.label_map: continue
-            
-            try:
-                row = gdf.loc[gdf["FIPS"]==fips]
-                if row.empty: continue
-                aland = row["ALAND"].values[0]
-                area_km2 = float(aland) / 1e6
-            except: continue
-            
-            if area_km2 < 0.1: area_km2 = 0.1
-            
-            # --- FEATURE 1-2: Densities ---
-            dens_hwy = (data["len_hwy"]/1000)/area_km2
-            dens_local = (data["len_local"]/1000)/area_km2
-            
-            # --- FEATURE 3-4: Avg Lengths ---
-            cnt_local = data.get("cnt_local", 0)
-            avg_len_local = (data["len_local"] / cnt_local) if cnt_local > 0 else 0.0
-            
-            cnt_hwy = data.get("cnt_hwy", 0)
-            avg_len_hwy = (data["len_hwy"] / cnt_hwy) if cnt_hwy > 0 else 0.0
-            
-            # --- FEATURE 5: 4-Way Ratio (Grid) ---
-            # --- FEATURE 6: Dead-End Density (Suburban) ---
-            deg1, deg3, deg4 = 0, 0, 0
-            for _, count in data["nodes"].items():
-                if count == 1: deg1 += 1
-                elif count == 3: deg3 += 1
-                elif count >= 4: deg4 += 1
-            
-            total_int = deg3 + deg4
+        with Pool(processes=4, maxtasksperchild=10) as pool: 
+            for start in range(0, len(fips_list), chunk_size): 
+                chunk = fips_list[start:start + chunk_size]
+                args  = [(f, stats[f], self.label_map, area_map) for f in chunk]
 
-            ratio_4way = deg4 / total_int if total_int > 0 else 0.0 
-            
-            ratio_3way = deg3 / total_int if total_int > 0 else 0.0 
-            
-            # Dead End Density (Dead Ends / km2)
-            dens_deadend = deg1 / area_km2
-            
-            # Circuity (Shape) ---
-            # Ratio of Actual Length / Straight Line Length
-            # 1.0 = Straight, >1.2 = Winding
-            sum_euclid = data.get("euclid_local", 0)
-            if sum_euclid > 0:
-                circuity = data["len_local"] / sum_euclid
-            else:
-                circuity = 1.0 # Default to straight if no data
-            
-            # Meshedness Coefficient 
-            V = len(data["nodes"])
-            E = cnt_local 
+                for row in pool.map(_row_from_stats, args): 
+                    if row is not None: 
+                        rows.append(row)
 
-            if V > 5: 
-                meshedness = (E - V + 1) / (2 * V - 5)
-            else: 
-                meshedness = 0.0
+                for f in chunk: 
+                    stats[f].get("segments", []).clear() 
+                    stats[f].get("nodes", {}).clear() 
+                    del stats[f]
 
-            # custom features 
-            bet_mean, bet_max, straightness, orient_entropy, integration = (
-                self._compute_topology_metrics(data.get("segments", []))
-            )
+                gc.collect() 
+                print(f"[{min(start + chunk_size, len(fips_list))}/{len(fips_list)}] "
+                       "counties complete")
 
-            rows.append({
-                "FIPS": fips,
-                "label": self.label_map[fips],
-                "tiger_density_hwy": dens_hwy,
-                "tiger_density_local": dens_local,
-                "tiger_ratio_4way": ratio_4way, 
-                "tiger_ratio_3way": ratio_3way, 
-                "tiger_meshedness": meshedness, 
-                "tiger_avg_len_local": avg_len_local,
-                "tiger_avg_len_hwy": avg_len_hwy,
-                "tiger_density_deadend": dens_deadend,
-                "tiger_circuity_local": circuity, 
-                "tiger_betweenness_mean": bet_mean, 
-                "tiger_betweenness_max": bet_max, 
-                "tiger_straightness_mean": straightness,
-                "tiger_orientation_entropy": orient_entropy,
-                "tiger_integration_r3": integration
-            })
+        rows = [r for r in rows if r is not None]
             
         df = pd.DataFrame(rows)
         if not df.empty:
@@ -383,18 +397,102 @@ class TigerNHCS:
 
     # Custom Statistics
 
-    def _compute_topology_metrics(self, segments): 
+    @staticmethod 
+    def _compute_topology_metrics(segments): 
         if not segments: 
             return 0.0, 0.0, 0.0, 0.0, 0.0 
         rng = np.random.default_rng(0)
-        dual_adj = self._build_dual_adjacency(segments)
-        bc       = self._approx_betweenness(dual_adj, rng)
+        dual_adj = TigerNCHS._build_dual_adjacency(segments)
+        bc       = TigerNCHS._approx_betweenness(dual_adj)
         bet_mean = float(np.mean(bc)) if bc.size else 0.0 
         bet_max  = float(np.max(bc)) if bc.size else 0.0 
-        straightness   = self._straightness_mean(segments, rng)
-        orient_entropy = self._orientation_entropy(segments)
-        integration    = self._integration_mean(dual_adj, radius=3)
+        straightness   = TigerNCHS._straightness_mean(segments, rng)
+        orient_entropy = TigerNCHS._orientation_entropy(segments)
+        integration    = TigerNCHS._integration_mean(dual_adj, radius=3)
         return bet_mean, bet_max, straightness, orient_entropy, integration 
+
+    @staticmethod 
+    def _build_nk_graph_from_adj(adj): 
+        G = nk.graph.Graph(len(adj), weighted=False, directed=False)
+        for u, nbrs in enumerate(adj): 
+            for v in nbrs: 
+                if v > u: 
+                    G.addEdge(u, v)
+        return G
+
+    @staticmethod 
+    def _build_nk_graph_from_weighted(adj_w): 
+        G = nk.graph.Graph(len(adj_w), weighted=True, directed=False)
+        for u, edges in enumerate(adj_w): 
+            for v, w in edges: 
+                if v > u: 
+                    G.addEdge(u, v, w)
+        return G 
+
+    @staticmethod 
+    def _build_dual_adjacency(segments):
+        """
+        Nodes are roads (segments). Two roads connect if they share an endpoint.
+        """
+        n = len(segments)
+        node_to_segments = {}
+
+        for i, (a, b, _, _) in enumerate(segments):
+            node_to_segments.setdefault(a, []).append(i)
+            node_to_segments.setdefault(b, []).append(i)
+
+        adj = [set() for _ in range(n)]
+        for segs in node_to_segments.values():
+            if len(segs) < 2:
+                continue
+            for i in range(len(segs)):
+                u = segs[i]
+                for j in range(i + 1, len(segs)):
+                    v = segs[j]
+                    adj[u].add(v)
+                    adj[v].add(u)
+
+        return adj
+
+    @staticmethod 
+    def _approx_betweenness(adj):
+        n = len(adj)
+        if n == 0:
+            return np.zeros(0, dtype=np.float64)
+
+        G = TigerNCHS._build_nk_graph_from_adj(adj)
+        bc = nk.centrality.ApproxBetweenness(G, epsilon=0.1, delta=0.1)
+        bc.run() 
+        return np.array(bc.scores(), dtype=np.float64)
+
+    @staticmethod 
+    def _straightness_mean(segments, rng): 
+        coords, adj_w = TigerNCHS._build_primal_graph(segments)
+        n = len(coords)
+        if n < 2: 
+            return 0.0 
+
+        k_pivots = max(1, int(np.sqrt(n)))
+        pivots = rng.choice(n, size=min(k_pivots, n), replace=False)
+
+        G = TigerNCHS._build_nk_graph_from_weighted(adj_w)
+        ratios = []
+        for source in pivots:
+            dijkstra = nk.distance.Dijkstra(G, source, storePaths=False)
+            dijkstra.run()
+            dist = np.array(dijkstra.getDistances(), dtype=np.float64)
+            sx, sy = coords[source]
+            for target in range(n):
+                if target == source:
+                    continue
+                d = dist[target]
+                if not np.isfinite(d) or d <= 0:
+                    continue
+                tx, ty = coords[target]
+                euclid = np.hypot(sx - tx, sy - ty)
+                if euclid > 0:
+                    ratios.append(euclid / d)
+        return float(np.mean(ratios)) if ratios else 0.0
 
     @staticmethod 
     def _build_primal_graph(segments): 
@@ -422,129 +520,6 @@ class TigerNHCS:
 
         return np.array(coords, dtype=np.float64), adj_w
     
-    @staticmethod 
-    def _build_dual_adjacency(segments): 
-        '''
-        Nodes are roads and edges are intersections between roads. Dual to the Primal graph which 
-        is constructed in the opposite manner 
-        '''
-
-        n = len(segments)
-        node_to_segments = {}
-        for i, (a, b, _, _) in enumerate(segments): 
-
-            node_to_segments.setdefault(a, []).append(i)
-            node_to_segments.setdefault(b, []).append(i)
-
-        adj = [set() for _ in range(n)]
-        for segs in node_to_segments.values(): 
-            if len(segs) < 2: 
-                continue 
-            for i in range(len(segs)): 
-                u = segs[i]
-                for j in range(i + 1, len(segs)): 
-                    v = segs[j]
-                    adj[u].add(v)
-                    adj[v].add(u)
-
-    @staticmethod 
-    def _approx_betweenness(adj, rng): 
-        '''
-        Picks some k pivots to compute betweenness on drastically reducing computation time 
-        '''
-
-        n = len(adj)
-        if n == 0: 
-            return np.zeros(0, dtype=np.float64)
-        
-        k_pivots = max(1, int(np.sqrt(n)))
-        pivots   = rng.choice(n, size=min(k_pivots, n), replace=False)
-        bc       = np.zeros(n, dtype=np.float64)
-
-        for s in pivots: 
-            stack = []
-            pred  = [[] for _ in range(n)]
-            sigma = np.zeros(n, dtype=np.float64)
-            dist  = -np.ones(n, dtype=np.int32)
-
-            sigma[s] = 1.0 
-            dist[s]  = 0 
-            q = deque([s])
-
-            while q: 
-                v = q.popleft() 
-                stack.append(v)
-                for w in adj[v]: 
-                    if dist[w] < 0: 
-                        dist[w] = dist[v] + 1 
-                        q.append(w)
-                    if dist[w] == dist[v] + 1: 
-                        sigma[w] += sigma[v]
-                        pred[w].append(v)
-
-            delta = np.zeros(n, dtype=np.float64)
-            while stack: 
-                w = stack.pop() 
-                if sigma[w] == 0: 
-                    continue 
-                for v in pred[w]: 
-                    delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
-                if w != s: 
-                    bc[w] += delta[w]
-
-        bc /= float(len(pivots))
-        return bc 
-
-    @staticmethod 
-    def _dijkstra(adj_w, source): 
-        n = len(adj_w)
-        dist = [np.inf] * n 
-        dist[source] = 0.0 
-        heap = [(0.0, source)]
-
-        while heap: 
-            d, u = heapq.heappop(heap)
-            if d != dist[u]: 
-                continue 
-
-            for v, w in adj_w[u]: 
-                nd = d + w 
-                if nd < dist[v]: 
-                    dist[v] = nd 
-                    heapq.heappush(heap, (nd, v))
-        
-        return dist 
-
-    @staticmethod 
-    def _straightness_mean(segments, rng): 
-        '''
-        Measure of mean curvature of rodes 
-        '''
-        coords, adj_w = TigerNHCS._build_primal_graph(segments) 
-        n = len(coords)
-        if n < 2: 
-            return 0.0 
-
-        k_pivots = max(1, int(np.sqrt(n)))
-        pivots   = rng.choice(n, size=min(k_pivots, n), replace=False)
-
-        ratios = []
-        for source in pivots:
-            dist = TigerNHCS._dijkstra(adj_w, source)
-            sx, sy = coords[source]
-            for target in range(n): 
-                if target == source: 
-                    continue 
-                d = dist[target]
-                if not np.isfinite(d) or d <= 0: 
-                    continue 
-                tx, ty = coords[target]
-                euclid = np.hypot(sx - tx, sy - ty)
-                if euclid > 0: 
-                    ratios.append(euclid / d)
-
-        return float(np.mean(ratios)) if ratios else 0.0 
-
     @staticmethod 
     def _orientation_entropy(segments, bins=36): 
         '''
@@ -588,7 +563,7 @@ class TigerNHCS:
                         dist[w] = dist[v] + 1 
                         q.append(w)
             
-            depths = [d for n, d in dist.items() if n != 5 and d <= radius]
+            depths = [d for n, d in dist.items() if n != source and d <= radius]
             if not depths: 
                 continue 
 
@@ -607,7 +582,7 @@ def main():
     parser.add_argument("--labels", default=project_path("data", "nchs", "nchs_classification.csv"))
     args = parser.parse_args()
     
-    TigerNHCS(args.gdb, args.shapefile, args.out, args.labels).run()
+    TigerNCHS(args.gdb, args.shapefile, args.out, args.labels).run()
 
 
 if __name__ == "__main__":

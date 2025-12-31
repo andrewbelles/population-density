@@ -8,6 +8,7 @@
 
 from numpy.typing import NDArray
 
+from scipy.sparse import random
 import optuna, yaml 
 from optuna.samplers import CmaEsSampler, TPESampler
 
@@ -32,6 +33,11 @@ from models.post_processing import (
     CorrectAndSmooth,
     make_train_mask, 
     normalized_proba 
+)
+
+from models.graph_utils import (
+    make_mobility_adjacency_factory,
+    normalize_adjacency
 )
 
 from analysis.graph_metrics import (
@@ -193,6 +199,16 @@ class StandardEvaluator(OptunaEvaluator):
         
         raise ValueError("no suitable metric found in summary results ")
 
+class PipelineEvaluator(OptunaEvaluator): 
+    '''
+    Full optimization of pipeline with entry point at VIIRS, TIGER, NLCD Experts all 
+    the way through Correct and Smooth algorithm. 
+
+    Right now uses Travel Proxy metric space to generate graph topology but future plans 
+    include improving learned metric space. 
+    '''
+    pass 
+
 # ---------------------------------------------------------
 # Correct and Smooth Model 
 # ---------------------------------------------------------
@@ -295,8 +311,8 @@ class MetricCASEvaluator(OptunaEvaluator):
         y    = np.asarray(data["labels"]).reshape(-1)
         fips = np.asarray(data["sample_ids"], dtype="U5")
 
-        max_components = max(1, min(128, X.shape[1]))
-        max_neighbors  = max(1, min(100, X.shape[0] - 1))
+        max_components = max(5, min(128, X.shape[1]))
+        max_neighbors  = max(5, min(100, X.shape[0] - 1))
 
         if "n_components_frac" in params: 
             frac = params.pop("n_components_frac")
@@ -350,7 +366,7 @@ class MetricCASEvaluator(OptunaEvaluator):
         _, best_value = run_optimization(
             name="CorrectAndSmooth_inner",
             evaluator=cs, 
-            n_trials=100,
+            n_trials=150,
             early_stopping_rounds=40,
             early_stopping_delta=1e-4,
             sampler_type="multivariate-tpe", 
@@ -359,6 +375,85 @@ class MetricCASEvaluator(OptunaEvaluator):
 
         return best_value 
   
+# ---------------------------------------------------------
+# Graph Construction Optimization   
+# ---------------------------------------------------------
+
+class MobilityEvaluator(OptunaEvaluator): 
+
+    def __init__(
+        self,
+        *,
+        mobility_path: str, 
+        proba_path: str, 
+        k_min: int = 5, 
+        k_neighbors: int | None = None, 
+        proba_model_name: str | None = None, 
+        train_size: float = 0.3, 
+        random_state: int = 0 
+    ): 
+        self.mobility_path    = mobility_path 
+        self.proba_path       = proba_path 
+        self.k_min            = k_min 
+        self.proba_model_name = proba_model_name 
+        self.random_state     = random_state 
+        self.k_neighbors      = k_neighbors
+
+        oof = load_oof_predictions(proba_path)
+        self.fips = np.asarray(oof["fips_codes"]).astype("U5")
+        self.y    = np.asarray(oof["labels"]).reshape(-1)
+
+        self.P, self.class_labels = _load_probs_for_fips(
+            proba_path, self.fips, model_name=proba_model_name
+        )
+
+        self.train_mask = make_train_mask(
+            self.y,
+            train_size=train_size,
+            random_state=random_state,
+            stratify=True 
+        )
+        self.test_mask = ~self.train_mask 
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        if self.k_neighbors is not None: 
+            return {"k_neighbors": self.k_neighbors}
+        return {
+            "k_neighbors": trial.suggest_int("k_neighbors", self.k_min, 100)
+        }
+
+
+    def evaluate(self, params: Dict[str, Any]) -> float:
+        k = int(params["k_neighbors"])
+
+        adj_factory = make_mobility_adjacency_factory(
+            self.mobility_path,
+            self.proba_path,
+            k_neighbors=k
+        )
+        adj = adj_factory(list(self.fips))
+        W   = normalize_adjacency(adj)
+
+        cs  = CorrectAndSmoothEvaluator(
+            P=self.P,
+            W_by_name={"mobility": W}, 
+            y_train=self.y,
+            train_mask=self.train_mask,
+            test_mask=self.test_mask,
+            class_labels=self.class_labels
+        )
+
+        _, best_value = run_optimization(
+            name="CorrectAndSmooth_inner",
+            evaluator=cs, 
+            n_trials=150,
+            early_stopping_rounds=40,
+            early_stopping_delta=1e-4,
+            sampler_type="multivariate-tpe", 
+            random_state=self.random_state
+        )
+        return best_value 
+
 # ---------------------------------------------------------
 # Definitions of Parameter Space  
 # ---------------------------------------------------------
@@ -438,6 +533,11 @@ def define_idml_space(trial):
         "label_spreading_alpha": trial.suggest_float("label_spreading_alpha", 0.1, 0.9),
         "max_iter": trial.suggest_int("max_iter", 1, 10), 
         "n_jobs": -1 
+    }
+
+def define_mobility_space(trial): 
+    return {
+        "k_components": trial.suggest_float("k_components", 5, 100)
     }
 
 # ---------------------------------------------------------

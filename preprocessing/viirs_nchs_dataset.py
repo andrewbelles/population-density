@@ -110,8 +110,7 @@ class ViirsDataset:
 
         custom_stats_map = {
             "variance": self._get_variance, 
-            "entropy": self._get_vrei, 
-            "vrei": lambda x: self._get_vrei(x, bins=64)
+            "vrei": lambda x: self._get_vrei(x, bins=64),
             "skew": self._get_skew, 
             "kurtosis": self._get_kurtosis
         }

@@ -69,7 +69,7 @@ pkgs.mkShell {
     pip install --upgrade pip
     
     # Only install packages not available in nixpkgs
-    pip install rasterstats pyrosm osmnx nevergrad  
+    pip install rasterstats pyrosm osmnx nevergrad networkit  
     
     echo "[NIX-SHELL] Installing CUDA XGBoost"
     pip install --upgrade pip

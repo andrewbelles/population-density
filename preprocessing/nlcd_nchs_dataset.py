@@ -19,6 +19,8 @@ from support.helpers import project_path
 
 import scipy.ndimage as nd 
 
+STRUCTURE = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+
 class NlcdDataset:
     
     # NLCD Class Groups (Annual NLCD Collection 1.0)
@@ -137,6 +139,27 @@ class NlcdDataset:
                 return None
                 
             unique, counts = np.unique(valid_pixels, return_counts=True)
+
+            classes = np.array(sorted(unique), dtype=np.int32)
+            adj_counts, class_index = self._adjacency_counts(data, valid_mask, classes)
+
+            ai_dev_open = self._aggregation_index(adj_counts, class_index, self.CODE_DEV_OPEN)
+            ai_dev_low  = self._aggregation_index(adj_counts, class_index, self.CODE_DEV_LOW)
+            ai_dev_med  = self._aggregation_index(adj_counts, class_index, self.CODE_DEV_MED)
+            ai_dev_high = self._aggregation_index(adj_counts, class_index, self.CODE_DEV_HIGH)
+            contagion   = self._contagion(adj_counts)
+            
+            edge_dens_dev_open = self._edge_density(
+                data == self.CODE_DEV_OPEN, 
+                valid_mask
+            )
+            edge_dens_nature   = self._edge_density(
+                np.isin(data, list(self.CODES_NATURE)),
+                valid_mask
+            )
+
+            lpi_dev_high = self._largest_patch_index(data == self.CODE_DEV_HIGH, valid_mask)
+
             total_px = valid_pixels.size
             class_counts = dict(zip(unique, counts))
             
@@ -188,7 +211,15 @@ class NlcdDataset:
                 "nlcd_lawn_index": lawn_index,
                 "nlcd_urban_core": concrete_index,
                 "nlcd_edge_dens":  edge_density,
-                "nlcd_diversity":  shannon_diversity 
+                "nlcd_diversity":  shannon_diversity,
+                "nlcd_ai_dev_open": ai_dev_open,
+                "nlcd_ai_dev_low": ai_dev_low,
+                "nlcd_ai_dev_med": ai_dev_med,
+                "nlcd_ai_dev_high": ai_dev_high,
+                "nlcd_contagion": contagion,
+                "nlcd_edge_dens_dev_open": edge_dens_dev_open,
+                "nlcd_edge_dens_nature": edge_dens_nature,
+                "nlcd_lpi_dev_high": lpi_dev_high
             }
 
         except Exception:
@@ -210,6 +241,97 @@ class NlcdDataset:
 
         savemat(output_path, mat)
         print(f"Saved .mat file: {output_path} ({self.df.shape[0]} rows)")
+
+    @staticmethod 
+    def _adjacency_counts(data, valid_mask, classes): 
+        classes = np.asarray(classes, dtype=np.int32)
+        if classes.size == 0: 
+            return np.zeros((0, 0), dtype=np.int64), {}
+        max_val = int(classes.max())
+        lookup  = np.full(max_val + 1, -1, dtype=np.int32)
+        lookup[classes] = np.arange(classes.size, dtype=np.int32)
+
+        counts = np.zeros((classes.size, classes.size), dtype=np.int64)
+
+        def add_pairs(a, b, mask): 
+            if not np.any(mask): 
+                return 
+            la = lookup[a[mask]]
+            lb = lookup[b[mask]]
+            valid = (la >= 0) & (lb >= 0)
+            la = la[valid]
+            lb = lb[valid]
+            np.add.at(counts, (la, lb), 1)
+            np.add.at(counts, (lb, la), 1)
+
+        add_pairs(data[:, :-1], data[:, 1:], valid_mask[:, :-1] & valid_mask[:, 1:])
+        add_pairs(data[:-1, :], data[1:, :], valid_mask[:-1, :] & valid_mask[1:, :])
+
+        class_index = {int(c): i for i, c in enumerate(classes)}
+        return counts, class_index 
+
+    @staticmethod 
+    def _aggregation_index(adj_counts, class_index, class_code): 
+        idx = class_index.get(int(class_code))
+        if idx is None: 
+            return 0.0 
+        gii = adj_counts[idx, idx]
+        gi  = adj_counts[idx, :].sum() 
+        if gi == 0:
+            return 0.0 
+        return float(gii / gi)
+
+    @staticmethod
+    def _contagion(adj_counts): 
+        total = adj_counts.sum() 
+        if total == 0: 
+            return 0.0 
+        m = adj_counts.shape[0]
+        if m <= 1: 
+            return 0.0 
+        p = adj_counts / total 
+        mask = p > 0 
+        value = 1.0 + (np.sum(p[mask] * np.log(p[mask])) / (2.0 * np.log(m)))
+        return float(value)
+
+    @staticmethod 
+    def _edge_density(mask, valid_mask): 
+        total = int(valid_mask.sum())
+        if total == 0: 
+            return 0.0 
+        m = mask & valid_mask 
+        if not np.any(m): 
+            return 0.0 
+
+        edges = 0 
+        left  = m[:, :-1]
+        right = m[:, 1:]
+        edges += np.count_nonzero(left & ~right)
+        edges += np.count_nonzero(~left & right)
+        up    = m[:-1, :]
+        down  = m[1:, :]
+        edges += np.count_nonzero(up & ~down)
+        edges += np.count_nonzero(~up & down)
+        return float(edges / total)
+
+    @staticmethod 
+    def _largest_patch_index(mask, valid_mask): 
+        total = int(valid_mask.sum())
+        if total == 0: 
+            return 0.0 
+        m = mask & valid_mask 
+        if not np.any(m): 
+            return 0.0 
+        
+        labeled, num = nd.label(m, structure=STRUCTURE)
+        if num == 0: 
+            return 0.0 
+        counts = np.bincount(labeled.ravel())
+        if counts.size <= 1: 
+            return 0.0 
+        largest = counts[1:].max()
+        return float(largest / total)
+        
 
 def main():
     parser = argparse.ArgumentParser()

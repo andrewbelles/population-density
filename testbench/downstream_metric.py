@@ -7,10 +7,12 @@
 # 
 
 import argparse 
-import numpy as np 
+import numpy as np
+import pandas as pd
 
 from analysis.hyperparameter import (
     MetricCASEvaluator,
+    MobilityEvaluator,
     CorrectAndSmoothEvaluator, 
     define_idml_space,
     run_optimization,
@@ -21,9 +23,9 @@ from analysis.hyperparameter import (
 )
 
 from models.post_processing import make_train_mask
+
 from preprocessing.loaders import (
     load_concat_datasets,
-    load_coords_from_mobility,
     load_viirs_nchs,
     load_oof_predictions,
     _align_on_fips
@@ -42,6 +44,40 @@ from testbench.test_utils import (
     _select_specs_psv,
     _make_idml
 ) 
+
+def mobility(
+    mobility_path: str, 
+    proba_path: str
+):
+    import matplotlib.pyplot as plt 
+
+    evaluator = MobilityEvaluator(
+        mobility_path=mobility_path,
+        proba_path=proba_path
+    )
+
+    rows = []
+    for k in range(4, 101): 
+        score = evaluator.evaluate({"k_neighbors": k})
+        rows.append({"k": k, "score": score})
+
+    df = pd.DataFrame(rows)
+
+    y_min = df["score"].min() 
+    y_max = df["score"].max() 
+    pad   = max(0.002, 0.1 * (y_max - y_min))
+
+    plt.figure(figsize=(10,7))
+    plt.bar(df["k"], df["score"], width=0.9)
+    plt.ylim(y_min - pad, y_max + pad)
+    plt.xlabel("k neighbors")
+    plt.ylabel("Downstream C+S accuracy")
+    plt.title(f"Mobility k sweep best_k={np.argmax(df['score'])}")
+    plt.tight_layout()
+    plt.savefig("mobility_k_sweep.png", dpi=150)
+    plt.close()
+    print(f"> Saved plot: mobility_k_sweep.png")
+    
 
 def idml(
     dataset_name: str, 
@@ -160,6 +196,7 @@ def main():
     parser = argparse.ArgumentParser() 
     parser.add_argument("--sources", default="viirs,tiger,nlcd,oof,coords")
     parser.add_argument("--suppress", action="store_true")
+    parser.add_argument("--mobility", action="store_true")
     parser.add_argument("--idml", action="store_true")
     parser.add_argument("--downstream", action="store_true")
     args = parser.parse_args() 
@@ -177,7 +214,14 @@ def main():
             labels_loader=label_loader
         )
 
-    proba_path = project_path("data", "results", "final_stacked_predictions.mat")
+    proba_path    = project_path("data", "results", "final_stacked_predictions.mat")
+    mobility_path = project_path("data", "datasets", "travel_proxy.mat")
+
+    if args.mobility: 
+        mobility(
+            mobility_path=mobility_path,
+            proba_path=proba_path
+        )
 
     if args.idml: 
         idml(
