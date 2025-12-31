@@ -88,10 +88,10 @@ models:
     gamma: 0.3078629370840729
   CorrectAndSmooth:
     adjacency: queen
-    correction_alpha: 0.1268422684292856
-    smoothing_alpha: 0.07354637883529716
-    correction_max_iter: 12
-    smoothing_max_iter: 1
+    correction_alpha: 0.19298884859834387
+    smoothing_alpha: 0.003024245938392855
+    correction_max_iter: 10
+    smoothing_max_iter: 22
     autoscale: false
   StackingOOF/IDML:
     n_neighbors_frac: 0.1701592122936776
@@ -107,3 +107,23 @@ models:
     correction_max_iter: 3
     smoothing_max_iter: 1
     autoscale: false
+  StackingPassthrough/Logistic:
+    C: 3.131060709581739
+    class_weight: null
+  StackingPassthrough/RandomForest:
+    n_estimators: 155
+    max_depth: 8
+    min_samples_split: 43
+    min_samples_leaf: 20
+    max_features: log2
+    criterion: gini
+  StackingPassthrough/XGBoost:
+    n_estimators: 893
+    learning_rate: 0.0035348446686374415
+    max_depth: 6
+    subsample: 0.6862433424195671
+    colsample_bytree: 0.6747034611430234
+    min_child_weight: 7
+    reg_alpha: 0.32645243669276236
+    reg_lambda: 0.16101223053866057
+    gamma: 5.794661658824768

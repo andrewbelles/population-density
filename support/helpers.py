@@ -58,10 +58,35 @@ def resolve_feature_subset(feature_names, subset):
     idx = [int(np.where(feature_names == s)[0][0]) for s in subset]
     return idx 
 
+class ConfigGapTransformer: 
+    def __init__(self, integ_idx, viirs_idx): 
+        self.integ_idx = int(integ_idx)
+        self.viirs_idx = int(viirs_idx)
+
+    def fit(self, X, y=None): 
+        integ = X[:, self.integ_idx]
+        viirs = X[:, self.viirs_idx]
+        self.mu_i = integ.mean() 
+        self.sd_i = integ.std() + 1e-9 
+        self.mu_v = viirs.mean() 
+        self.sd_v = viirs.std() + 1e-9 
+        return self 
+
+    def transform(self, X):
+        integ = X[:, self.integ_idx]
+        viirs = X[:, self.viirs_idx]
+        cfg_gap = ((integ - self.mu_i) / self.sd_i) - ((viirs - self.mu_v) / self.sd_v)
+        return np.hstack([X, cfg_gap.reshape(-1, 1)])
+
+def make_cfg_gap_factory(feature_names): 
+    names = np.asarray(feature_names)
+    integ_idx = int(np.where(names == "cross__cross_tiger_integ")[0][0])
+    viirs_idx = int(np.where(names == "cross__cross_viirs_log_mean")[0][0])
+    return lambda: [ConfigGapTransformer(integ_idx, viirs_idx)]
+
 # ---------------------------------------------------------
 # Fold/Fit Functions 
 # ---------------------------------------------------------
-
 
 def split_indices(n_samples: int, test_size: float, seed: int | None = None): 
     if n_samples <= 0: 

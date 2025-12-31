@@ -18,12 +18,12 @@ python testbench/stacking.py --resume
 
 | Stage | Model | accuracy | f1_macro | roc_auc |
 | --- | --- | --- | --- | --- |
-| VIIRS | XGBoost | 0.5780 | 0.4586 | 0.8202 |
-| TIGER | XGBoost | 0.5171 | 0.4154 | 0.7838 |
-| NLCD | XGBoost | 0.6106 | 0.5159 | 0.8387 |
-| Majority | Vote | 0.5997 | 0.5080 | 0.6999 |
-| Stacking | Logistic | 0.6252 | 0.5380 | 0.8447 |
-| CorrectAndSmooth | queen | 0.6456 | 0.5686 | 0.8771 |
+| VIIRS | XGBoost | 0.5818 | 0.4634 | 0.8216 |
+| TIGER | XGBoost | 0.5139 | 0.4126 | 0.7808 |
+| NLCD | XGBoost | 0.6045 | 0.4975 | 0.8407 |
+| Majority | Vote | 0.6029 | 0.5029 | 0.6980 |
+| Stacking | Logistic | 0.6254 | 0.5453 | 0.8474 |
+| CorrectAndSmooth | queen | 0.6516 | 0.5888 | 0.8756 |
 
 Accompanying this table are figures showing class predictions of CONUS from each stage of the model. Majority refers to a majority vote between the predictions of each expert model for the VIIRS, TIGER, and NLCD datasets after the first stage. MAE refers to the mean absolute error of predictions. 
 

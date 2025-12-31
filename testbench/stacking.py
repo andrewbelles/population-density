@@ -44,7 +44,7 @@ from preprocessing.disagreement import (
     DisagreementSpec
 )
 
-from support.helpers import project_path
+from support.helpers import make_cfg_gap_factory, project_path
 
 from models.post_processing import (
     CorrectAndSmooth, 
@@ -70,6 +70,32 @@ from testbench.test_utils import (
     _metrics_from_preds
 )
 
+def _build_specs(oof_files): 
+    return  [
+    {
+        "name": "viirs", 
+        "raw_path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
+        "raw_loader": load_viirs_nchs,
+        "oof_path": oof_files[0], 
+        "oof_loader": load_oof_predictions 
+    },
+    {
+        "name": "tiger", 
+        "raw_path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
+        "raw_loader": load_viirs_nchs,
+        "oof_path": oof_files[1],
+        "oof_loader": load_oof_predictions
+    },
+    {
+        "name": "nlcd",
+        "raw_path": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
+        "raw_loader": load_viirs_nchs,
+        "oof_path": oof_files[2],
+        "oof_loader": load_oof_predictions 
+    }
+]
+
+
 def plot_class_maps(
     *,
     y_true,
@@ -88,6 +114,8 @@ def plot_class_maps(
     if y_true.shape[0] != y_pred.shape[0] or y_true.shape[0] != fips.shape[0]:
         raise ValueError("y_true, y_pred, fips must have same length")
 
+    # -5 means was most urban guessed most rural  
+    # likewise 5 means most rural and guessed most urban
     class_distance = y_true - y_pred 
     dist_abs       = np.abs(class_distance)
 
@@ -375,7 +403,8 @@ def optimize_dataset(
     resume=False, 
     cache=None,
     config_path=None,
-    random_state: int = 0 
+    random_state: int = 0,
+    transforms=None
 ): 
 
     models_list = ["Logistic", "RandomForest", "XGBoost"]
@@ -431,7 +460,8 @@ def optimize_dataset(
             base_factory_func=get_factory(m), 
             param_space=get_param_space(m),
             task=CLASSIFICATION,
-            config=CVConfig(n_splits=5, n_repeats=1)
+            config=CVConfig(n_splits=5, n_repeats=1), 
+            feature_transform_factory=transforms 
         )
 
         mean_score, best_params, _, _ = run_nested_cv(
@@ -503,12 +533,6 @@ def generate_oof(dataset_name, filepath, loader_func, winner, output_path):
 # ---------------------------------------------------------
 
 def stacking(config_path, args):
-    passthrough = [
-        "viirs_variance", 
-        "nlcd_urban_core",
-        "tiger_density_deadend",
-        "nlcd_edge_dens"
-    ]
 
     cache = _load_yaml_config(Path(config_path)) if args.resume else {}
 
@@ -546,49 +570,51 @@ def stacking(config_path, args):
 
     print("[Stacking] starting meta-learner optimization")
 
-    specs: list[DisagreementSpec] = [
-        {
-            "name": "viirs", 
-            "raw_path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
-            "raw_loader": load_viirs_nchs,
-            "oof_path": oof_files[0], 
-            "oof_loader": load_oof_predictions 
-        },
-        {
-            "name": "tiger", 
-            "raw_path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
-            "raw_loader": load_viirs_nchs,
-            "oof_path": oof_files[1],
-            "oof_loader": load_oof_predictions
-        },
-        {
-            "name": "nlcd",
-            "raw_path": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
-            "raw_loader": load_viirs_nchs,
-            "oof_path": oof_files[2],
-            "oof_loader": load_oof_predictions 
-        }
-    ]
-
     if args.passthrough: 
+        cross_modal_path = project_path("data", "datasets", "cross_modal_2023.mat")
+
+        passthrough_specs = [
+            {
+                "name": "cross",
+                "raw_path": cross_modal_path,
+                "raw_loader": load_viirs_nchs
+            }
+        ]
+
+        passthrough = [
+            "cross__cross_viirs_log_mean", 
+            "cross__cross_tiger_integ",
+            "cross__cross_radiance_entropy",
+            "cross__cross_dev_intensity_gradient",
+            "cross__cross_vanui_proxy",
+            "cross__cross_effective_mesh_proxy",
+            "cross__cross_road_effect_intensity",
+        ]
+
         stack_loader = lambda fp: load_pass_through_stacking(
-            specs, 
-            label_path=fp, 
+            _build_specs(oof_files), 
+            label_path=project_path("data", "datasets", "viirs_nchs_2023.mat"), 
             label_loader=load_viirs_nchs,
-            passthrough_features=passthrough
+            passthrough_features=passthrough, 
+            passthrough_specs=passthrough_specs
         )
     else: 
         stack_loader = lambda _: load_stacking(oof_files)
 
     dummy  = oof_files[0]
     prefix = "StackingPassthrough" if args.passthrough else "Stacking"
+    cfg_gap_factory = None 
+    if args.passthrough: 
+        stack_data = stack_loader(dummy)
+        cfg_gap_factory = make_cfg_gap_factory(stack_data["feature_names"])
 
     stack_winner = optimize_dataset(
         prefix,
         dummy,
         stack_loader, 
         n_trials=250,
-        config_path=config_path
+        config_path=config_path,
+        transforms=cfg_gap_factory if args.passthrough else None 
     )
 
     if args.passthrough:
@@ -601,10 +627,12 @@ def stacking(config_path, args):
     print(f"> stacking predictions saved to {final_output}")
 
 
-def correct_and_smooth(config_path): 
+def correct_and_smooth(config_path, args): 
 
-    stacking_oof_path = project_path("data", "results", 
-                                     "final_stacked_predictions.mat")
+    if args.passthrough: 
+        stacking_oof_path = project_path("data", "results", "final_stacked_passthrough.mat")
+    else: 
+        stacking_oof_path = project_path("data", "results", "final_stacked_predictions.mat")
     shapefile = project_path("data", "geography", "county_shapefile", 
                              "tl_2020_us_county.shp")
     mobility_mat = project_path("data", "datasets", "travel_proxy.mat")
@@ -623,13 +651,12 @@ def correct_and_smooth(config_path):
 
 def report(
     config_path,
+    args
 ): 
 
     shapefile  = project_path("data", "geography", "county_shapefile",
                              "tl_2020_us_county.shp")
     out_dir    = project_path("testbench", "images") 
-
-    config_path = project_path("testbench", "model_config.yaml")
     cfg         = _load_yaml_config(Path(config_path))
     models_cfg  = cfg.get("models", {})
 
@@ -639,12 +666,14 @@ def report(
         "NLCD": project_path("data", "datasets", "nlcd_nchs_2023.mat")
     }
 
+    stacking_oof_path = project_path("data", "results", "stacking_oof_path.mat")
+
     rows = []
     oof_files = []
 
     config = CVConfig(
         n_splits=5,
-        n_repeats=1,
+        n_repeats=3,
         stratify=True, 
         random_state=0,
         verbose=False
@@ -741,7 +770,36 @@ def report(
         prefix="majority"
     )
 
-    stack_loader = lambda _: load_stacking(oof_files) 
+    if args.passthrough:
+        cross_modal_path = project_path("data", "datasets", "cross_modal_2023.mat")
+
+        passthrough_specs = [
+            {
+                "name": "cross",
+                "raw_path": cross_modal_path,
+                "raw_loader": load_viirs_nchs
+            }
+        ]
+
+        passthrough = [
+            "cross__cross_viirs_log_mean",
+            "cross__cross_tiger_integ",
+            "cross__cross_radiance_entropy",
+            "cross__cross_dev_intensity_gradient",
+            "cross__cross_vanui_proxy",
+            "cross__cross_effective_mesh_proxy",
+            "cross__cross_road_effect_intensity",
+        ]
+
+        stack_loader = lambda fp: load_pass_through_stacking(
+            _build_specs(oof_files),
+            label_path=project_path("data", "datasets", "viirs_nchs_2023.mat"),
+            label_loader=load_viirs_nchs,
+            passthrough_features=passthrough,
+            passthrough_specs=passthrough_specs
+        )
+    else:
+        stack_loader = lambda _: load_stacking(oof_files)
     
     best = {
         "stack": None,
@@ -751,7 +809,10 @@ def report(
     }
 
     for model_name in ("Logistic", "RandomForest", "XGBoost"):
-        key = f"Stacking/{model_name}"
+        if args.passthrough: 
+            key = f"StackingPassthrough/{model_name}"
+        else: 
+            key = f"Stacking/{model_name}"
         params = models_cfg.get(key)
         if params is None: 
             continue 
@@ -774,14 +835,13 @@ def report(
         raise ValueError
 
     _, model_name, params, metrics = best["stack"]
-    stacking_oof = project_path("data", "stacking", "stacking_oof.mat")
     evaluate_model(
         oof_files[0], 
         stack_loader,
         model_name, 
         params, 
         config=config,
-        oof_path=stacking_oof
+        oof_path=stacking_oof_path
     )
     rows.append({
         "Stage": "Stacking",
@@ -801,7 +861,7 @@ def report(
     cs_params  = models_cfg.get("CorrectAndSmooth")
     mobility   = project_path("data", "datasets", "travel_proxy.mat")
     cs_metrics, fips, labels, preds = evaluate_correct_and_smooth(
-        stacking_oof, 
+        stacking_oof_path, 
         shapefile,
         mobility,
         cs_params,
@@ -858,10 +918,10 @@ def main():
         stacking(config_path, args)
 
     if args.cs: 
-        correct_and_smooth(config_path)
+        correct_and_smooth(config_path, args)
 
     if args.report: 
-        report(config_path)
+        report(config_path, args)
 
 
 if __name__ == "__main__": 

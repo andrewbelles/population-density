@@ -91,8 +91,11 @@ def load_pass_through_stacking(
     specs: list[DisagreementSpec],
     label_path: str, 
     label_loader: Callable[[str], DatasetDict], 
-    passthrough_features: list[str]
+    passthrough_features: list[str],
+    passthrough_specs=None 
 ) -> DatasetDict: 
+
+    passthrough_specs = passthrough_specs or []
 
     label_data = label_loader(label_path)
     label_fips = list(label_data["sample_ids"])
@@ -105,9 +108,13 @@ def load_pass_through_stacking(
         raw_data[s["name"]] = s["raw_loader"](s["raw_path"])
         oof_data[s["name"]] = s["oof_loader"](s["oof_path"])
 
+    for s in passthrough_specs: 
+        raw_data[s["name"]] = s["raw_loader"](s["raw_path"])
+
     fips_sets = [set(label_fips)]
     for name in raw_data: 
         fips_sets.append(set(raw_data[name]["sample_ids"])) 
+    for name in oof_data: 
         fips_sets.append(set(oof_data[name]["fips_codes"]))
     common = [f for f in label_fips if all(f in s for s in fips_sets)]
     

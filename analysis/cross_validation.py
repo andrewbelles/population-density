@@ -273,11 +273,15 @@ class CrossValidator:
         task: TaskSpec = REGRESSION, 
         scale_X: bool = True, 
         scale_y: bool = True,
+        feature_transform_factory=None, 
+        feature_transforms=None, 
     ): 
         self.filepath = filepath 
         self.task     = task 
         self.scale_X  = scale_X 
         self.scale_y  = False if task.task_type == "classification" else scale_y 
+        self.feature_transform_factory = feature_transform_factory 
+        self.feature_transforms = feature_transforms
 
         data   = loader(filepath)
     
@@ -318,6 +322,7 @@ class CrossValidator:
         if oof: 
             oof_sums, oof_counts, oof_classes = self._init_oof(models, y_for_split)
 
+        transforms = self._init_feature_transforms()
         for model_name, make_model in models.items(): 
             if config.verbose: 
                 print(f"> {model_name} now folding...")
@@ -325,6 +330,10 @@ class CrossValidator:
                 X_train, X_test = self.X[train_idx], self.X[test_idx]
                 y_train, y_test = self.y[train_idx], self.y[test_idx]
                 coords_train, coords_test = self.coords[train_idx], self.coords[test_idx]
+
+                X_train, X_test = self._apply_feature_transforms(
+                    transforms, X_train, X_test, coords_train, coords_test 
+                )
 
                 base_model = make_model()
                 model      = self._build_model(base_model)
@@ -412,6 +421,38 @@ class CrossValidator:
             scale_X=self.scale_X, 
             scale_y=self.scale_y 
         )
+
+    def _call_transform(self, fn, X, coords=None):
+        try: 
+            return fn(X, coords=coords)
+        except TypeError: 
+            return fn(X)
+
+    def _init_feature_transforms(self): 
+        if self.feature_transform_factory is not None: 
+            transforms = self.feature_transform_factory()
+            return transforms or []
+        if self.feature_transforms is None: 
+            return []
+        out = []
+        for t in self.feature_transforms:
+            try: 
+                out.append(clone(t))
+            except Exception:
+                import copy 
+                out.append(copy.deepcopy(t))
+        return out 
+
+    def _apply_feature_transforms(self, transforms, X_train, X_test, coords_train, coords_test): 
+        X_tr, X_te = X_train, X_test 
+        for t in transforms: 
+            if hasattr(t, "fit_transform"): 
+                X_tr = self._call_transform(t.fit_transform, X_tr, coords_train)
+            else: 
+                self._call_transform(t.fit, X_tr, coords_train)
+                X_tr = self._call_transform(t.transform, X_tr, coords_train)
+            X_te = self._call_transform(t.transform, X_te, coords_test)
+        return X_tr, X_te 
 
     def _get_transform(self, label_transforms, model_name): 
         if label_transforms is None: 

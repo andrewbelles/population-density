@@ -162,7 +162,8 @@ class StandardEvaluator(OptunaEvaluator):
         base_factory_func: Callable, 
         param_space: Callable[[optuna.Trial], Dict[str, Any]], 
         task: TaskSpec, 
-        config: CVConfig
+        config: CVConfig,
+        feature_transform_factory=None 
     ): 
         self.filepath       = filepath 
         self.loader         = loader_func 
@@ -171,6 +172,7 @@ class StandardEvaluator(OptunaEvaluator):
         self.task           = task 
         self.config         = config
         self.config.verbose = False
+        self.feature_transform_factory = feature_transform_factory
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]: 
         return self.param_space_fn(trial)
@@ -184,6 +186,7 @@ class StandardEvaluator(OptunaEvaluator):
             loader=self.loader, 
             task=self.task, 
             scale_y=False, 
+            feature_transform_factory=self.feature_transform_factory
         )
 
         results = cv.run(
