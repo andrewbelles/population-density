@@ -3,6 +3,18 @@
 County-level population density modeling with multi‑modal features, stacking, and graph
 post‑processing.
 
+## Current Model Performance 
+
+The below table shows performance results for each stage of the model architecture of the classifier. Queen adjacency in this instance refers to two counties having an edge in the graph topology iff they share an explicit edge (or vertex). 
+
+| Stage | Model | accuracy | f1_macro | roc_auc |
+| --- | --- | --- | --- | --- |
+| VIIRS | XGBoost | 0.5853 | 0.4641 | 0.8198 |
+| TIGER | XGBoost | 0.5167 | 0.4195 | 0.7805 |
+| NLCD | XGBoost | 0.6065 | 0.5039 | 0.8399 |
+| Stacking | Logistic | 0.6268 | 0.5358 | 0.8455 |
+| CorrectAndSmooth | queen | 0.6433 | 0.5679 | 0.8772 |
+
 ## Current Status
 
 The project now spans three primary feature sources (VIIRS nighttime lights, TIGER roads, NLCD land
