@@ -12,6 +12,10 @@ import os, argparse
 from pathlib import Path
 import numpy as np
 import optuna
+import pandas as pd 
+import geopandas as gpd 
+import matplotlib.pyplot as plt 
+from matplotlib.colors import BoundaryNorm
 
 from analysis.cross_validation import (
     CrossValidator,
@@ -31,7 +35,8 @@ from analysis.hyperparameter import (
 from preprocessing.loaders import (
     load_viirs_nchs,
     load_stacking, 
-    load_oof_predictions
+    load_oof_predictions,
+    _align_on_fips 
 )
 
 from preprocessing.disagreement import (
@@ -60,8 +65,109 @@ from testbench.test_utils import (
     _score_from_summary, 
     _get_cached_params,
     _normalize_params,
-    _best_score
+    _best_score,
+    _majority_vote,
+    _metrics_from_preds
 )
+
+def plot_class_maps(
+    *,
+    y_true,
+    y_pred,
+    fips,
+    shapefile,
+    out_dir,
+    prefix,
+    vmin=-5,
+    vmax=5
+): 
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    fips   = np.asarray(fips).astype("U5")
+
+    if y_true.shape[0] != y_pred.shape[0] or y_true.shape[0] != fips.shape[0]:
+        raise ValueError("y_true, y_pred, fips must have same length")
+
+    class_distance = y_true - y_pred 
+    dist_abs       = np.abs(class_distance)
+
+    df = pd.DataFrame({
+        "FIPS": fips, 
+        "True_Class": y_true, 
+        "Predicted_Class": y_pred, 
+        "Class_Distance": class_distance
+    })
+
+    counties = gpd.read_file(shapefile)
+    counties["FIPS"] = counties["GEOID"].astype(str).str.zfill(5)
+
+    exclude  = {"02", "15", "60", "66", "69", "72", "78"}
+    counties = counties[~counties["STATEFP"].isin(exclude)]
+
+    gdf = counties.merge(df, on="FIPS", how="left")
+
+    def _plot(column, title, out_path, cmap, vmin=None, vmax=None): 
+        vals = gdf[column].dropna() 
+        if vals.empty: 
+            return 
+        
+        lo = int(vals.min()) if vmin is None else vmin 
+        hi = int(vals.max()) if vmax is None else vmax 
+        bounds = np.arange(lo, hi + 2) - 0.5 
+        ticks  = np.arange(lo, hi + 1)
+
+        fig, ax = plt.subplots(1, 1, figsize=(9,6))
+        norm = BoundaryNorm(bounds, cmap.N)
+        gdf.plot(
+            column=column, 
+            ax=ax,
+            cmap=cmap,
+            norm=norm,
+            linewidth=0,
+            edgecolor="none",
+            missing_kwds={"color": "lightgrey"}
+        )
+        ax.set_title(title)
+        ax.axis("off")
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        setattr(sm, "_A", [])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.3, pad=0.02, ticks=ticks)
+        cbar.ax.set_yticklabels([str(t) for t in ticks])
+
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    _plot(
+        "True_Class",
+        f"True Class", 
+        os.path.join(out_dir, "true_class.png"),
+        cmap=plt.cm.viridis
+    )
+    _plot(
+        "Predicted_Class",
+        f"{prefix}: Predicted Class",
+        os.path.join(out_dir, f"{prefix}_pred_class.png"),
+        cmap=plt.cm.viridis
+    )
+    _plot(
+        "Class_Distance",
+        f"{prefix}: Class Distance (MAE={dist_abs.mean():.3f})",
+        os.path.join(out_dir, f"{prefix}_class_distance.png"),
+        cmap=plt.cm.magma,
+        vmin=vmin,
+        vmax=vmax
+    )
+
+    return {
+        "class_distance_mae": float(dist_abs.mean()),
+        "class_distance_mean": float(class_distance.mean()),
+        "within_1": float((dist_abs <= 1).mean())
+    }
+
 
 def evaluate_model(
     filepath, 
@@ -82,12 +188,31 @@ def evaluate_model(
     results = cv.run(
         models={"model": model},
         config=config,
-        oof=oof_path is not None
+        oof=oof_path is not None,
+        collect=True
     )
     summary = cv.summarize(results)
+
+    pred_rows = cv.predictions_[cv.predictions_["model"] == "model"]
+    n = cv.n_samples 
+    preds  = np.full(n, np.nan, dtype=float)
+    labels = np.full(n, np.nan, dtype=float)
+
+    idx = pred_rows["idx"].to_numpy(dtype=int)
+    preds[idx]  = pred_rows["y_pred"].to_numpy(dtype=float)
+    labels[idx] = pred_rows["y_true"].to_numpy(dtype=float)
+
+    if np.isnan(preds).any() or np.isnan(labels).any(): 
+        raise ValueError("missing predictions for some samples")
+
+    preds  = preds.astype(int)
+    labels = labels.astype(int)
+    fips   = cv.sample_ids 
+
     if oof_path: 
         cv.save_oof(oof_path)
-    return _metrics_from_summary(summary), _score_from_summary(summary)
+    return _metrics_from_summary(summary), _score_from_summary(summary), preds, labels, fips
+
 
 def evaluate_correct_and_smooth(
     oof_path,
@@ -131,7 +256,7 @@ def evaluate_correct_and_smooth(
         "accuracy": accuracy_score(y_true, pred_labels), 
         "f1_macro": f1_score(y_true, pred_labels, average="macro"), 
         "roc_auc": roc_auc_score(y_true, P_cs_norm, multi_class="ovr", average="macro")
-    }
+    }, oof["fips_codes"], y_train, cs.predict(),
 
 # ---------------------------------------------------------
 # "Enum" into parameter space and model factory 
@@ -496,7 +621,13 @@ def correct_and_smooth(config_path):
     print(cs_params, cs_score)
 
 
-def report(config_path): 
+def report(
+    config_path,
+): 
+
+    shapefile  = project_path("data", "geography", "county_shapefile",
+                             "tl_2020_us_county.shp")
+    out_dir    = project_path("testbench", "images") 
 
     config_path = project_path("testbench", "model_config.yaml")
     cfg         = _load_yaml_config(Path(config_path))
@@ -519,8 +650,17 @@ def report(config_path):
         verbose=False
     )
 
+    stage_preds  = []
+    stage_labels = None
+    stage_fips   = [] 
+    stage_label_fips = None
+
     for name, path in datasets.items(): 
         best = None
+        best_preds = None 
+        best_fips = None 
+        best_labels = None
+
         for model_name in ("Logistic", "RandomForest", "XGBoost"): 
             key = f"{name}/{model_name}"
             params = models_cfg.get(key)
@@ -528,19 +668,31 @@ def report(config_path):
                 continue 
 
             params = _normalize_params(model_name, params)
-            metrics, score = evaluate_model(
+            metrics, score, preds, labels, fips = evaluate_model(
                 path, 
                 load_viirs_nchs, 
                 model_name, 
                 params,
                 config=config
             )
+
             score = _best_score(metrics)
             if best is None or score > best[0]: 
                 best = (score, model_name, params, metrics)
+                best_preds = preds 
+                best_labels = labels 
+                best_fips = fips 
 
         if best is None: 
             continue 
+
+        _, model_name, params, metrics = best 
+
+        stage_preds.append(best_preds.reshape(-1)) 
+        stage_fips.append(best_fips)
+        if stage_labels is None: 
+            stage_labels = best_labels 
+            stage_label_fips = best_fips 
 
         _, model_name, params, metrics = best 
         oof_path = project_path("data", "stacking", f"{name.lower()}_optimized_oof.mat")
@@ -560,8 +712,43 @@ def report(config_path):
             **metrics 
         })
 
+    common = stage_fips[0]
+    for f in stage_fips[1:]:
+        fset = set(f)
+        common = [x for x in common if x in fset]
+
+    aligned_preds = [
+        preds[_align_on_fips(common, fips)] 
+        for preds, fips in zip(stage_preds, stage_fips)
+    ]
+
+    majority_pred   = _majority_vote(np.column_stack(aligned_preds))
+    majority_labels = stage_labels[_align_on_fips(common, stage_label_fips)]
+    majority_metrics = _metrics_from_preds(majority_labels, majority_pred)
+
+    rows.append({
+        "Stage": "Majority", 
+        "Model": "Vote", 
+        **majority_metrics
+    })
+
+    plot_class_maps(
+        y_true=majority_labels,
+        y_pred=majority_pred,
+        fips=np.array(common, dtype="U5"),
+        shapefile=shapefile,
+        out_dir=out_dir,
+        prefix="majority"
+    )
+
     stack_loader = lambda _: load_stacking(oof_files) 
-    best_stack = None 
+    
+    best = {
+        "stack": None,
+        "preds": None, 
+        "labels": None, 
+        "fips": None
+    }
 
     for model_name in ("Logistic", "RandomForest", "XGBoost"):
         key = f"Stacking/{model_name}"
@@ -570,20 +757,23 @@ def report(config_path):
             continue 
 
         params = _normalize_params(model_name, params)
-        metrics, score = evaluate_model(
+        metrics, score, preds, labels, fips = evaluate_model(
             "virtual", 
             stack_loader, 
             model_name, 
             params, 
             config=config
         )
-        if best_stack is None or score > best_stack[0]: 
-            best_stack = (score, model_name, params, metrics)
+        if best["stack"] is None or score > best["stack"][0]: 
+            best["stack"]  = (score, model_name, params, metrics)
+            best["preds"]  = preds 
+            best["labels"] = labels 
+            best["fips"]   = fips 
 
-    if best_stack is None: 
+    if best["stack"] is None: 
         raise ValueError
 
-    _, model_name, params, metrics = best_stack 
+    _, model_name, params, metrics = best["stack"]
     stacking_oof = project_path("data", "stacking", "stacking_oof.mat")
     evaluate_model(
         oof_files[0], 
@@ -599,11 +789,18 @@ def report(config_path):
         **metrics
     })
 
+    plot_class_maps(
+        y_true=best["labels"],
+        y_pred=best["preds"].reshape(-1),
+        fips=best["fips"],
+        shapefile=shapefile,
+        out_dir=out_dir,
+        prefix="stacking"
+    )
+
     cs_params  = models_cfg.get("CorrectAndSmooth")
-    shapefile  = project_path("data", "geography", "county_shapefile",
-                             "tl_2020_us_county.shp")
     mobility   = project_path("data", "datasets", "travel_proxy.mat")
-    cs_metrics = evaluate_correct_and_smooth(
+    cs_metrics, fips, labels, preds = evaluate_correct_and_smooth(
         stacking_oof, 
         shapefile,
         mobility,
@@ -616,6 +813,15 @@ def report(config_path):
         "Model": cs_params.get("adjacency"),
         **cs_metrics
     })
+
+    plot_class_maps(
+        y_true=labels,
+        y_pred=preds,
+        fips=fips,
+        shapefile=shapefile,
+        out_dir=out_dir,
+        prefix="correct_and_smooth"
+    )
 
     headers = ["Stage", "Model", "accuracy", "f1_macro", "roc_auc"]
     lines = [

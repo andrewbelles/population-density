@@ -14,6 +14,41 @@ Example:
 python testbench/stacking.py --resume
 ```
 
+### Model Architecture Results for each Stage
+
+| Stage | Model | accuracy | f1_macro | roc_auc |
+| --- | --- | --- | --- | --- |
+| VIIRS | XGBoost | 0.5780 | 0.4586 | 0.8202 |
+| TIGER | XGBoost | 0.5171 | 0.4154 | 0.7838 |
+| NLCD | XGBoost | 0.6106 | 0.5159 | 0.8387 |
+| Majority | Vote | 0.5997 | 0.5080 | 0.6999 |
+| Stacking | Logistic | 0.6252 | 0.5380 | 0.8447 |
+| CorrectAndSmooth | queen | 0.6456 | 0.5686 | 0.8771 |
+
+Accompanying this table are figures showing class predictions of CONUS from each stage of the model. Majority refers to a majority vote between the predictions of each expert model for the VIIRS, TIGER, and NLCD datasets after the first stage. 
+
+![True County Classifications](images/true_class.png)
+
+The majority vote by the experts:
+
+![Majority Vote Predictions](images/majority_pred_class.png)
+
+Distance from predicted label to true label (negative implies ground truth is more rural than predicted): 
+
+![Majority Vote Class Distances](images/majority_class_distance.png)
+
+The stacking meta-learner: 
+
+![Stacked Predictions](images/stacking_pred_class.png)
+
+![Stacked Class Distances](images/stacking_class_distance.png)
+
+The Correct and Smooth diffusion model applied to stacked probabilities:
+
+![Correct and Smooth Predictions](images/correct_and_smooth_pred_class.png)
+
+![Correct and Smooth Class Distances](images/correct_and_smooth_class_distance.png)
+
 ## Config caching:
 
 - `testbench/model_config.yaml`

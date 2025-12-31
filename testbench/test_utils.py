@@ -7,6 +7,7 @@
 # 
 
 
+from enum import unique
 from typing import Sequence
 import numpy as np
 
@@ -28,6 +29,8 @@ from preprocessing.loaders import (
     make_oof_dataset_loader,
     ConcatSpec
 )
+
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 from itertools import combinations
 
@@ -110,6 +113,44 @@ def _metrics_from_summary(summary):
         "f1_macro": float(row["f1_macro_mean"]) if "f1_macro_mean" in row else np.nan,
         "roc_auc": float(row["roc_auc_mean"]) if "roc_auc_mean" in row else np.nan
     }
+
+
+def _extract_oof_preds(oof, model_name=None): 
+    preds = np.asarray(oof["preds"])
+    model_names = oof["model_names"]
+    if preds.ndim == 2: 
+        if model_name and model_name in model_names: 
+            m_idx = int(np.where(model_names == model_name)[0][0])
+        else: 
+            m_idx = 0
+        return preds[:, m_idx]
+    return preds.reshape(-1)
+
+
+def _majority_vote(pred_matrix): 
+    out = np.empty(pred_matrix.shape[0], dtype=pred_matrix.dtype)
+    for i, row in enumerate(pred_matrix):
+        vals, counts = np.unique(row, return_counts=True)
+        out[i] = vals[np.argmax(counts)]
+    return out 
+
+
+def _metrics_from_preds(y_true, y_pred, class_labels=None):
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+
+    acc = float(accuracy_score(y_true, y_pred))
+    f1  = float(f1_score(y_true, y_pred, average="macro"))
+
+    labels = (np.asarray(class_labels).reshape(-1) if class_labels is not None and 
+        len(class_labels) else np.unique(y_true))
+    labels = np.array(sorted(labels.tolist()))
+    scores = np.zeros((y_pred.shape[0], labels.size), dtype=np.float64)
+    for i, lbl in enumerate(labels): 
+        scores[y_pred == lbl, i] = 1.0 
+    roc = float(roc_auc_score(y_true, scores, multi_class="ovr", average="macro", labels=labels))
+
+    return {"accuracy": acc, "f1_macro": f1, "roc_auc": roc}
 
 
 def _best_score(metrics): 
