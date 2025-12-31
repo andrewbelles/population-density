@@ -25,7 +25,7 @@ python testbench/stacking.py --resume
 | Stacking | Logistic | 0.6252 | 0.5380 | 0.8447 |
 | CorrectAndSmooth | queen | 0.6456 | 0.5686 | 0.8771 |
 
-Accompanying this table are figures showing class predictions of CONUS from each stage of the model. Majority refers to a majority vote between the predictions of each expert model for the VIIRS, TIGER, and NLCD datasets after the first stage. 
+Accompanying this table are figures showing class predictions of CONUS from each stage of the model. Majority refers to a majority vote between the predictions of each expert model for the VIIRS, TIGER, and NLCD datasets after the first stage. MAE refers to the mean absolute error of predictions. 
 
 ![True County Classifications](images/true_class.png)
 
