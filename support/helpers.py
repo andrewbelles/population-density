@@ -79,7 +79,11 @@ class ConfigGapTransformer:
         return np.hstack([X, cfg_gap.reshape(-1, 1)])
 
 def make_cfg_gap_factory(feature_names): 
+    if feature_names is None: 
+        return lambda: []
     names = np.asarray(feature_names)
+    if "cross__cross_tiger_integ" not in names or "cross__cross_viirs_log_mean" not in names: 
+        return lambda: []
     integ_idx = int(np.where(names == "cross__cross_tiger_integ")[0][0])
     viirs_idx = int(np.where(names == "cross__cross_viirs_log_mean")[0][0])
     return lambda: [ConfigGapTransformer(integ_idx, viirs_idx)]

@@ -13,7 +13,7 @@ import numpy as np
 
 from pathlib import Path
 
-from models.metric import IDMLGraphLearner
+from models.metric import GradientBoostingMetricLearner, IDMLGraphLearner
 
 from support.helpers import project_path
 
@@ -31,6 +31,9 @@ from preprocessing.loaders import (
 )
 
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler 
+from sklearn.neighbors import kneighbors_graph 
+from models.graph_utils import normalize_adjacency
 
 from itertools import combinations
 
@@ -50,18 +53,65 @@ BASE: dict[str, ConcatSpec] = {
         "path": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
         "loader": load_compact_dataset
     },
+    "COORDS": {
+        "name": "COORDS",
+        "path": project_path("data", "datasets", "travel_proxy.mat"),
+        "loader": load_coords_from_mobility
+    },
+    "PASSTHROUGH": {
+        "name": "PASSTHROUGH",
+        "path": project_path("data", "datasets", "cross_modal_2023.mat"),
+        "loader": load_viirs_nchs
+    },
     "OOF": {
         "name": "OOF",
         "path": project_path("data", "results", "final_stacked_predictions.mat"),
         "loader": make_oof_dataset_loader()
     },
-    "COORDS": {
-        "name": "COORDS",
-        "path": project_path("data", "datasets", "travel_proxy.mat"),
-        "loader": load_coords_from_mobility
-    } 
 }
 
+
+def _align_by_fips(fips_order, fips_vec):
+    idx_map = {f: i for i, f in enumerate(fips_vec)}
+    return np.array([idx_map[f] for f in fips_order], dtype=int)
+
+
+def _coords_for_fips(coords_path: str, fips_order):
+    data = load_coords_from_mobility(coords_path)
+    idx = _align_by_fips(fips_order, data["sample_ids"])
+    return np.asarray(data["coords"])[idx]
+
+
+def _apply_transforms(X, transforms):
+    for t in transforms: 
+        if hasattr(t, "fit_transform"):
+            X = t.fit_transform(X)
+        else: 
+            t.fit(X)
+            X = t.transform(X)
+    return X 
+
+
+def _iter_metric_models(cfg): 
+    models = cfg.get("models", {})
+    for key, params in models.items(): 
+        if not isinstance(params, dict): 
+            continue 
+        if not key.endswith(("/IDML", "/GBM")):
+            continue 
+        if "dataset" not in params: 
+            continue 
+        yield key, dict(params)
+
+
+def _override_oof_path(specs, oof_path: str):
+    out = []
+    for s in specs: 
+        if s["name"].upper() == "OOF": 
+            s = dict(s)
+            s["path"] = oof_path 
+        out.append(s)
+    return out 
 
 def _load_model_params(config_path: str, key: str) -> dict: 
 
@@ -171,7 +221,6 @@ def _power_set(specs):
         for combo in combinations(specs, r): 
             yield combo 
 
-
 def _map_fracs(params: dict, X): 
     max_components = max(1, min(128, X.shape[1]))
     max_neighbors  = max(1, min(100, X.shape[0] - 1))
@@ -187,3 +236,7 @@ def _map_fracs(params: dict, X):
 
 def _make_idml(**kwargs): 
     return IDMLGraphLearner(**kwargs)
+
+
+def _make_gb_metric(**kwargs):
+    return GradientBoostingMetricLearner(**kwargs)

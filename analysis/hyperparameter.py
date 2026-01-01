@@ -8,7 +8,6 @@
 
 from numpy.typing import NDArray
 
-from scipy.sparse import random
 import optuna, yaml 
 from optuna.samplers import CmaEsSampler, TPESampler
 
@@ -38,10 +37,6 @@ from models.post_processing import (
 from models.graph_utils import (
     make_mobility_adjacency_factory,
     normalize_adjacency
-)
-
-from analysis.graph_metrics import (
-    MetricAnalyzer,
 )
 
 from sklearn.metrics import accuracy_score
@@ -268,6 +263,22 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
 # Metric Learning Evaluator  
 # ---------------------------------------------------------
 
+def _apply_train_test_transforms(transforms, X, train_mask):
+    X_train = X[train_mask]
+    X_test  = X[~train_mask]
+    for t in transforms: 
+        if hasattr(t, "fit_transform"): 
+            X_train = t.fit_transform(X_train)
+        else: 
+            t.fit(X_train)
+            X_train = t.transform(X_train)
+        X_test = t.transform(X_test)
+    X_full = np.zeros((X.shape[0], X_train.shape[1]), dtype=X_train.dtype)
+    X_full[train_mask]  = X_train
+    X_full[~train_mask] = X_test 
+    return X_full
+
+
 class MetricCASEvaluator(OptunaEvaluator): 
     '''
     Targets downstream optimization of accuracy 
@@ -276,7 +287,6 @@ class MetricCASEvaluator(OptunaEvaluator):
     def __init__(
         self, 
         filepath: str, 
-        # loader_func: Callable, 
         base_factory_func: Callable,
         param_space: Callable[[optuna.Trial], Dict[str, Any]],
         *,
@@ -284,7 +294,9 @@ class MetricCASEvaluator(OptunaEvaluator):
         proba_path: str, 
         proba_model_name: str | None = None, 
         random_state: int = 0, 
-        train_size: float = 0.3
+        train_size: float = 0.3,
+        passthrough_adj_fn=None, 
+        feature_transform_factory=None
     ): 
         self.filepath         = filepath 
         self.factory          = base_factory_func 
@@ -294,6 +306,8 @@ class MetricCASEvaluator(OptunaEvaluator):
         self.proba_model_name = proba_model_name 
         self.random_state     = random_state
         self.train_size       = train_size 
+        self.passthrough_adj_fn = passthrough_adj_fn
+        self.feature_transform_factory = feature_transform_factory
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         params = self.param_space_fn(trial)
@@ -350,11 +364,17 @@ class MetricCASEvaluator(OptunaEvaluator):
         )
         test_mask  = ~train_mask
 
+        if self.feature_transform_factory is not None: 
+            feature_names = data.get('feature_names')
+            factory = self.feature_transform_factory(feature_names)
+            transforms = factory() if callable(factory) else factory
+            if transforms: 
+                X = _apply_train_test_transforms(transforms, X, train_mask)
+
         model = self.factory(**params)
         model.fit(X, y, train_mask=train_mask)
 
         adj = model.get_graph(X)
-
 
         # Downstream target is to maximize correct and smooth accuracy
         cs = CorrectAndSmoothEvaluator(
@@ -541,6 +561,19 @@ def define_idml_space(trial):
 def define_mobility_space(trial): 
     return {
         "k_components": trial.suggest_float("k_components", 5, 100)
+    }
+
+def define_gbm_metric_space(trial):
+    return {
+        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+        "max_depth": trial.suggest_int("max_depth", 2, 8),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        "n_negatives": trial.suggest_int("n_negatives", 2, 10),
+        "hard_mining_ratio": trial.suggest_float("hard_mining_ratio", 0.0, 1.0),
+        "n_pos_per_anchor": trial.suggest_int("n_pos_per_anchor", 1, 3),
+        "anchors_per_class": trial.suggest_int("anchors_per_class", 50, 500),
+        "candidate_k": trial.suggest_int("candidate_k", 10, 100),
+        "n_neighbors": trial.suggest_int("n_neighbors", 3, 30),   
     }
 
 # ---------------------------------------------------------

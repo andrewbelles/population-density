@@ -13,11 +13,11 @@ import pandas as pd
 from analysis.hyperparameter import (
     MetricCASEvaluator,
     MobilityEvaluator,
-    CorrectAndSmoothEvaluator, 
+    CorrectAndSmoothEvaluator,
+    define_gbm_metric_space, 
     define_idml_space,
     run_optimization,
     _save_model_config,
-    _load_yaml_config,
     _load_yaml_config,
     _load_probs_for_fips
 )
@@ -31,9 +31,7 @@ from preprocessing.loaders import (
     _align_on_fips
 )
 
-from support.helpers import project_path 
-
-from models.metric import IDMLGraphLearner 
+from support.helpers import make_cfg_gap_factory, project_path 
 
 from pathlib import Path
 
@@ -42,8 +40,11 @@ from testbench.test_utils import (
     _map_fracs,
     _select_specs_csv,
     _select_specs_psv,
-    _make_idml
+    _make_idml,
+    _make_gb_metric,
 ) 
+
+FULL_KEY = "VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH"
 
 def mobility(
     mobility_path: str, 
@@ -79,25 +80,40 @@ def mobility(
     print(f"> Saved plot: mobility_k_sweep.png")
     
 
-def idml(
+def optimize_metric(
     dataset_name: str, 
     proba_path: str,
     dataset_loaders, 
+    label_path, 
+    label_loader,
     n_trials: int = 100, 
+    base_factory=_make_idml,
+    param_space=define_idml_space,
+    metric_tag="idml",
 ): 
 
     filepath = project_path("virtual")
 
+    full_specs = _select_specs_psv(FULL_KEY)
+    dataset_loaders = {
+        "PASSTHROUGH+COORDS": lambda _: load_concat_datasets(
+            specs=full_specs,
+            labels_path=label_path,
+            labels_loader=label_loader
+        )
+    }
+
     evaluator = MetricCASEvaluator(
         filepath=filepath,
-        base_factory_func=_make_idml,
-        param_space=define_idml_space,
+        base_factory_func=base_factory,
+        param_space=param_space,
         proba_path=proba_path,
         dataset_loaders=dataset_loaders,
+        feature_transform_factory=make_cfg_gap_factory,
     )
 
     best_params, best_value = run_optimization(
-        name=f"{dataset_name}/IDML", 
+        name=f"{dataset_name}/{metric_tag}", 
         evaluator=evaluator,
         n_trials=n_trials,
         direction="maximize",
@@ -109,7 +125,7 @@ def idml(
     print(f"> Max Downstream Accuracy: {best_value:.4f}")
 
     config_path = project_path("testbench", "model_config.yaml")
-    model_key   = f"{dataset_name}/IDML"
+    model_key   = f"{dataset_name}/{metric_tag}"
     _save_model_config(str(config_path), model_key, best_params)
 
 
@@ -119,7 +135,8 @@ def downstream(
     config_path: str, 
     proba_path: str, 
     label_path: str, 
-    label_loader 
+    label_loader,
+    base_factory
 ): 
     config = _load_yaml_config(Path(config_path))
     params = config.get("models", {}).get(metric_key)
@@ -127,12 +144,16 @@ def downstream(
         raise ValueError(f"missing model config: {metric_key}")
 
     params = dict(params)
+    params.pop("dataset", None)
+    '''
     dataset_key = params.pop("dataset", None)
     if dataset_key is None: 
         raise ValueError("metric config missing 'dataset' key")
+    ''' 
 
+    dataset_key = FULL_KEY 
     specs = _select_specs_psv(dataset_key)
-
+    
     data = load_concat_datasets(
         specs=specs,
         labels_path=label_path,
@@ -143,6 +164,7 @@ def downstream(
     y    = np.asarray(data["labels"]).reshape(-1)
     fips = np.asarray(data["sample_ids"], dtype="U5")
     oof  = load_oof_predictions(proba_path)
+
     
     oof_fips = np.asarray(oof["fips_codes"]).astype("U5")
     common   = [f for f in fips if f in set(oof_fips)]
@@ -158,7 +180,7 @@ def downstream(
     P, class_labels = _load_probs_for_fips(proba_path, fips)
     params = _map_fracs(params, X)
 
-    model = IDMLGraphLearner(**params)
+    model = base_factory(**params)
     model.fit(X, y)
     adj = model.get_graph(X)
 
@@ -194,17 +216,41 @@ def downstream(
 
 def main(): 
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--sources", default="viirs,tiger,nlcd,oof,coords")
+    parser.add_argument("--sources", default="viirs,tiger,nlcd,coord")
     parser.add_argument("--suppress", action="store_true")
     parser.add_argument("--mobility", action="store_true")
-    parser.add_argument("--idml", action="store_true")
+    parser.add_argument("--metric", choices=["idml", "gbm"], default="idml")
+    parser.add_argument("--metric-opt", action="store_true")
     parser.add_argument("--downstream", action="store_true")
+    parser.add_argument("--passthrough", action="store_true")
     args = parser.parse_args() 
+    
+    if args.metric == "gbm": 
+        metric_tag   = "GBM"
+        base_factory = _make_gb_metric 
+        space_fn     = define_gbm_metric_space 
+    else: 
+        metric_tag   = "IDML"
+        base_factory = _make_idml
+        space_fn     = define_idml_space
+
+    if args.passthrough:
+        args.sources  = args.sources + ",passthrough" 
+        metric_prefix = "StackingPassthrough"
+    else: 
+        metric_prefix = "StackingOOF"
 
     specs = _select_specs_csv(args.sources)
     label_path   = project_path("data", "datasets", "viirs_nchs_2023.mat")
     label_loader = load_viirs_nchs
     
+    if args.passthrough:
+        proba_path    = project_path("data", "results", "final_stacked_passthrough.mat")
+        dataset_name  = "StackingPassthrough"
+    else: 
+        proba_path    = project_path("data", "results", "final_stacked_predictions.mat")
+        dataset_name  = "StackingOOF"
+
     dataset_loaders = {}
     for combo in _power_set(specs): 
         key = "+".join(s["name"] for s in combo)
@@ -214,7 +260,6 @@ def main():
             labels_loader=label_loader
         )
 
-    proba_path    = project_path("data", "results", "final_stacked_predictions.mat")
     mobility_path = project_path("data", "datasets", "travel_proxy.mat")
 
     if args.mobility: 
@@ -223,21 +268,27 @@ def main():
             proba_path=proba_path
         )
 
-    if args.idml: 
-        idml(
-            "StackingOOF", 
+    if args.metric_opt: 
+        optimize_metric(
+            dataset_name, 
             proba_path, 
             dataset_loaders=dataset_loaders, 
-            n_trials=100
+            label_path=label_path, 
+            label_loader=label_loader, 
+            n_trials=100,
+            base_factory=base_factory, 
+            param_space=space_fn,
+            metric_tag=metric_tag
         ) 
 
     if args.downstream: 
         downstream(
-            metric_key="StackingOOF/IDML",
+            metric_key=f"{metric_prefix}/{metric_tag}",
             config_path=project_path("testbench", "model_config.yaml"),
             proba_path=proba_path,
             label_path=project_path("data", "datasets", "viirs_nchs_2023.mat"),
             label_loader=load_viirs_nchs,
+            base_factory=base_factory
         )
 
 if __name__ == "__main__": 

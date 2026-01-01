@@ -127,3 +127,14 @@ models:
     reg_alpha: 0.32645243669276236
     reg_lambda: 0.16101223053866057
     gamma: 5.794661658824768
+  StackingOOF/GBM:
+    n_estimators: 121
+    max_depth: 4
+    learning_rate: 0.04522622249893423
+    n_negatives: 10
+    hard_mining_ratio: 0.2138974010172552
+    n_pos_per_anchor: 3
+    anchors_per_class: 495
+    candidate_k: 10
+    n_neighbors: 22
+    dataset: PASSTHROUGH+COORDS
