@@ -8,7 +8,7 @@
 
 from numpy.typing import NDArray
 
-import optuna, yaml 
+import optuna, yaml, itertools, inspect 
 from optuna.samplers import CmaEsSampler, TPESampler
 
 from pathlib import Path 
@@ -115,7 +115,6 @@ def run_optimization(
         direction=direction, 
         sampler=sampler
     )
-
 
     def objective(trial): 
 
@@ -296,7 +295,8 @@ class MetricCASEvaluator(OptunaEvaluator):
         random_state: int = 0, 
         train_size: float = 0.3,
         passthrough_adj_fn=None, 
-        feature_transform_factory=None
+        feature_transform_factory=None,
+        adjacency_factory=None 
     ): 
         self.filepath         = filepath 
         self.factory          = base_factory_func 
@@ -308,6 +308,7 @@ class MetricCASEvaluator(OptunaEvaluator):
         self.train_size       = train_size 
         self.passthrough_adj_fn = passthrough_adj_fn
         self.feature_transform_factory = feature_transform_factory
+        self.adjacency_factory = adjacency_factory
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         params = self.param_space_fn(trial)
@@ -350,6 +351,10 @@ class MetricCASEvaluator(OptunaEvaluator):
             y = y[idx]
             fips = fips[idx]
 
+        adj = None 
+        if self.adjacency_factory is not None: 
+            adj = self.adjacency_factory(list(fips))
+
         P, class_labels = _load_probs_for_fips(
             self.proba_path,
             fips,
@@ -372,7 +377,11 @@ class MetricCASEvaluator(OptunaEvaluator):
                 X = _apply_train_test_transforms(transforms, X, train_mask)
 
         model = self.factory(**params)
-        model.fit(X, y, train_mask=train_mask)
+        fit_kwargs = {"train_mask": train_mask}
+        if adj is not None and "adj" in inspect.signature(model.fit).parameters:
+            fit_kwargs["adj"] = adj
+
+        model.fit(X, y, **fit_kwargs)
 
         adj = model.get_graph(X)
 
@@ -574,6 +583,30 @@ def define_gbm_metric_space(trial):
         "anchors_per_class": trial.suggest_int("anchors_per_class", 50, 500),
         "candidate_k": trial.suggest_int("candidate_k", 10, 100),
         "n_neighbors": trial.suggest_int("n_neighbors", 3, 30),   
+    }
+
+
+def make_layer_choices(
+    sizes=(32, 64, 128, 256, 512, 1024),
+    min_layers=1,
+    max_layers=10
+): 
+    choices = {}
+    for L in range(min_layers, max_layers+1): 
+        for combo in itertools.product(sizes, repeat=L): 
+            if any(combo[i] < combo[i + 1] for i in range(len(combo) - 1)): 
+                continue 
+            key = "-".join(str(x) for x in combo)
+            choices[key] = combo 
+    return choices 
+
+def define_qg_space(trial):
+    # layer_choices = make_layer_choices()
+    # key = trial.suggest_categorical("hidden_layer_size", list(layer_choices.keys()))
+    return {
+        "hidden_layer_size": (512, 512, 512, 512, 512, 512, 512, 512), 
+        "alpha": trial.suggest_float("alpha", 1e-6, 1e-1, log=True),
+        "max_iter": trial.suggest_int("max_iter", 3000, 6000)
     }
 
 # ---------------------------------------------------------

@@ -78,6 +78,7 @@ class ConfigGapTransformer:
         cfg_gap = ((integ - self.mu_i) / self.sd_i) - ((viirs - self.mu_v) / self.sd_v)
         return np.hstack([X, cfg_gap.reshape(-1, 1)])
 
+
 def make_cfg_gap_factory(feature_names): 
     if feature_names is None: 
         return lambda: []
@@ -87,6 +88,7 @@ def make_cfg_gap_factory(feature_names):
     integ_idx = int(np.where(names == "cross__cross_tiger_integ")[0][0])
     viirs_idx = int(np.where(names == "cross__cross_viirs_log_mean")[0][0])
     return lambda: [ConfigGapTransformer(integ_idx, viirs_idx)]
+
 
 # ---------------------------------------------------------
 # Fold/Fit Functions 

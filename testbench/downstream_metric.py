@@ -16,12 +16,14 @@ from analysis.hyperparameter import (
     CorrectAndSmoothEvaluator,
     define_gbm_metric_space, 
     define_idml_space,
+    define_qg_space,
     run_optimization,
     _save_model_config,
     _load_yaml_config,
     _load_probs_for_fips
 )
 
+from models.graph_utils import make_queen_adjacency_factory
 from models.post_processing import make_train_mask
 
 from preprocessing.loaders import (
@@ -31,7 +33,10 @@ from preprocessing.loaders import (
     _align_on_fips
 )
 
-from support.helpers import make_cfg_gap_factory, project_path 
+from support.helpers import (
+    make_cfg_gap_factory,
+    project_path 
+)
 
 from pathlib import Path
 
@@ -42,6 +47,8 @@ from testbench.test_utils import (
     _select_specs_psv,
     _make_idml,
     _make_gb_metric,
+    _make_qg,
+    make_knn_adjacency_factory
 ) 
 
 FULL_KEY = "VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH"
@@ -86,17 +93,18 @@ def optimize_metric(
     dataset_loaders, 
     label_path, 
     label_loader,
-    n_trials: int = 100, 
+    n_trials: int = 400, 
     base_factory=_make_idml,
     param_space=define_idml_space,
     metric_tag="idml",
+    adjacency_factory=None
 ): 
 
     filepath = project_path("virtual")
 
     full_specs = _select_specs_psv(FULL_KEY)
     dataset_loaders = {
-        "PASSTHROUGH+COORDS": lambda _: load_concat_datasets(
+        FULL_KEY: lambda _: load_concat_datasets(
             specs=full_specs,
             labels_path=label_path,
             labels_loader=label_loader
@@ -109,7 +117,8 @@ def optimize_metric(
         param_space=param_space,
         proba_path=proba_path,
         dataset_loaders=dataset_loaders,
-        feature_transform_factory=make_cfg_gap_factory,
+        feature_transform_factory=None if metric_tag == "QG" else make_cfg_gap_factory,
+        adjacency_factory=adjacency_factory
     )
 
     best_params, best_value = run_optimization(
@@ -118,7 +127,7 @@ def optimize_metric(
         n_trials=n_trials,
         direction="maximize",
         sampler_type="multivariate-tpe",
-        early_stopping_rounds=25,
+        early_stopping_rounds=100,
         early_stopping_delta=1e-4
     )
 
@@ -129,14 +138,15 @@ def optimize_metric(
     _save_model_config(str(config_path), model_key, best_params)
 
 
-def downstream(
+def optimize_downstream(
     *,
     metric_key: str, 
     config_path: str, 
     proba_path: str, 
     label_path: str, 
     label_loader,
-    base_factory
+    base_factory,
+    adjacency_factory=None 
 ): 
     config = _load_yaml_config(Path(config_path))
     params = config.get("models", {}).get(metric_key)
@@ -180,10 +190,6 @@ def downstream(
     P, class_labels = _load_probs_for_fips(proba_path, fips)
     params = _map_fracs(params, X)
 
-    model = base_factory(**params)
-    model.fit(X, y)
-    adj = model.get_graph(X)
-
     train_mask = make_train_mask(
         y,
         train_size=0.3,
@@ -192,6 +198,16 @@ def downstream(
     )
 
     test_mask = ~train_mask 
+
+    model = base_factory(**params)
+
+    fit_kwargs = {}
+    if "train_mask" in model.fit.__code__.co_varnames:
+        fit_kwargs["train_mask"] = train_mask 
+    if adjacency_factory is not None and "adj" in model.fit.__code__.co_varnames: 
+        fit_kwargs["adj"] = adjacency_factory(list(fips))
+    model.fit(X, y, **fit_kwargs)
+    adj = model.get_graph(X)
 
     cs = CorrectAndSmoothEvaluator(
         P=P,
@@ -219,16 +235,27 @@ def main():
     parser.add_argument("--sources", default="viirs,tiger,nlcd,coord")
     parser.add_argument("--suppress", action="store_true")
     parser.add_argument("--mobility", action="store_true")
-    parser.add_argument("--metric", choices=["idml", "gbm"], default="idml")
+    parser.add_argument("--metric", choices=["idml", "gbm", "qg"], default="idml")
+    parser.add_argument("--shapefile", default=project_path("data", "geography",
+                                                            "county_shapefile",
+                                                            "tl_2020_us_county.shp"))
     parser.add_argument("--metric-opt", action="store_true")
     parser.add_argument("--downstream", action="store_true")
     parser.add_argument("--passthrough", action="store_true")
     args = parser.parse_args() 
+
+    mobility_path = project_path("data", "datasets", "travel_proxy.mat")
     
+    adj_factory = None 
     if args.metric == "gbm": 
         metric_tag   = "GBM"
         base_factory = _make_gb_metric 
         space_fn     = define_gbm_metric_space 
+    elif args.metric == "qg": 
+        metric_tag   = "QG"
+        base_factory = _make_qg 
+        space_fn     = define_qg_space 
+        adj_factory  = make_knn_adjacency_factory(mobility_path, 50)
     else: 
         metric_tag   = "IDML"
         base_factory = _make_idml
@@ -260,7 +287,6 @@ def main():
             labels_loader=label_loader
         )
 
-    mobility_path = project_path("data", "datasets", "travel_proxy.mat")
 
     if args.mobility: 
         mobility(
@@ -275,20 +301,22 @@ def main():
             dataset_loaders=dataset_loaders, 
             label_path=label_path, 
             label_loader=label_loader, 
-            n_trials=100,
+            n_trials=400,
             base_factory=base_factory, 
             param_space=space_fn,
-            metric_tag=metric_tag
+            metric_tag=metric_tag,
+            adjacency_factory=adj_factory
         ) 
 
     if args.downstream: 
-        downstream(
+        optimize_downstream(
             metric_key=f"{metric_prefix}/{metric_tag}",
             config_path=project_path("testbench", "model_config.yaml"),
             proba_path=proba_path,
             label_path=project_path("data", "datasets", "viirs_nchs_2023.mat"),
             label_loader=load_viirs_nchs,
-            base_factory=base_factory
+            base_factory=base_factory,
+            adjacency_factory=adj_factory 
         )
 
 if __name__ == "__main__": 

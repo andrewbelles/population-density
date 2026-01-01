@@ -29,6 +29,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted 
 
 from xgboost import XGBClassifier
+from sklearn.neural_network import MLPClassifier
 
 class MetricLearner(BaseEstimator, TransformerMixin, ABC): 
 
@@ -345,3 +346,68 @@ class GradientBoostingMetricLearner(MetricLearner, ClassifierMixin):
 
         diff = A - B 
         return np.hstack([np.abs(diff), diff * diff, A, B]) 
+
+    
+class QueenGateLearner: 
+    def __init__(
+        self,
+        hidden_layer_size=(64,128,64),
+        alpha=1e-4,
+        max_iter=1000, 
+    ): 
+        self.hidden_layer_sizes = hidden_layer_size 
+        self.alpha              = alpha 
+        self.max_iter           = max_iter 
+        self.model_             = None 
+        self.adj_               = None 
+        self.fips_              = None 
+        self.scaler_            = StandardScaler() 
+
+    def _edge_pairs(self, adj): 
+        A = (adj > 0).astype(int)
+        A = sp.triu(A, k=1)
+        return A.nonzero() 
+
+    def _edge_features(self, X, src, dst): 
+        Xi = X[src]
+        Xj = X[dst]
+        return np.hstack([Xi, Xj, Xi - Xj])
+
+    def fit(self, X, y, *, adj, train_mask=None): 
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y).reshape(-1)
+        src, dst = self._edge_pairs(adj)
+
+
+        if train_mask is not None: 
+            mask = np.asarray(train_mask, dtype=bool)
+            self.scaler_.fit(X[mask]) 
+            X = self.scaler_.transform(X)
+            keep = mask[src] & mask[dst]
+            src, dst = src[keep], dst[keep]
+
+        X_edges = self._edge_features(X, src, dst)
+        y_edges = (y[src] == y[dst]).astype(int)
+
+        self.model_ = MLPClassifier(
+            hidden_layer_sizes=self.hidden_layer_sizes, 
+            alpha=self.alpha,
+            max_iter=self.max_iter 
+        )
+        self.model_.fit(X_edges, y_edges)
+        self.adj_ = adj 
+        return self 
+
+    def get_graph(self, X): 
+        if self.adj_ is None or self.model_ is None: 
+            raise ValueError("model not fitted")
+        src, dst = self._edge_pairs(self.adj_)
+        X_edges = self._edge_features(np.asarray(X, dtype=np.float64), src, dst)
+        gate = self.model_.predict_proba(X_edges)[:, 1]
+
+        W = self.adj_.copy().astype(np.float64)
+        W.data = np.zeros_like(W.data)
+
+        W[src, dst] = gate 
+        W[dst, src] = gate 
+        return W 

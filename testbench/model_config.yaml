@@ -138,3 +138,8 @@ models:
     candidate_k: 10
     n_neighbors: 22
     dataset: PASSTHROUGH+COORDS
+  StackingOOF/QG:
+    hidden_layer_size: 128-64
+    alpha: 0.007865935076179597
+    max_iter: 2011
+    dataset: VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH

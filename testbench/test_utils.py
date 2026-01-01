@@ -13,7 +13,7 @@ import numpy as np
 
 from pathlib import Path
 
-from models.metric import GradientBoostingMetricLearner, IDMLGraphLearner
+from models.metric import GradientBoostingMetricLearner, IDMLGraphLearner, QueenGateLearner
 
 from support.helpers import project_path
 
@@ -80,6 +80,38 @@ def _coords_for_fips(coords_path: str, fips_order):
     data = load_coords_from_mobility(coords_path)
     idx = _align_by_fips(fips_order, data["sample_ids"])
     return np.asarray(data["coords"])[idx]
+
+
+def make_knn_adjacency_factory(coords_path: str, k_neighbors: int):
+    data   = load_coords_from_mobility(coords_path)
+    fips   = np.asarray(data["sample_ids"], dtype="U5")
+    coords = np.asarray(data["coords"], dtype=np.float64)
+
+    A = kneighbors_graph(
+        coords, 
+        n_neighbors=max(1, int(k_neighbors)),
+        mode="connectivity", 
+        include_self=False
+    )
+    A = A.maximum(A.T)
+
+    def _factory(fips_order: list[str]):
+        idx = _align_by_fips(fips_order, fips)
+        return A[idx][:, idx]
+
+    return _factory
+
+
+def compose_transform_factories(*factories): 
+    def _factory(feature_names): 
+        transforms = []
+        for f in factories: 
+            if f is None: 
+                continue 
+            out = f(feature_names)
+            transforms.extend(out() if callable(out) else out)
+        return transforms 
+    return _factory 
 
 
 def _apply_transforms(X, transforms):
@@ -240,3 +272,7 @@ def _make_idml(**kwargs):
 
 def _make_gb_metric(**kwargs):
     return GradientBoostingMetricLearner(**kwargs)
+
+
+def _make_qg(**kwargs): 
+    return QueenGateLearner(**kwargs)
