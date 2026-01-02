@@ -1,6 +1,0 @@
-*.env 
-*.so
-*.o 
-test_graph 
-
-__pycache__/ 

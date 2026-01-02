@@ -1,160 +1,95 @@
 #!/usr/bin/env python 
 # 
-# geospatial.py  Andrew Belles  Dec 12th, 2025 
+# construction.py  Andrew Belles  Dec 12th, 2025 
 # 
-# Class that enables GeospatialGraph backend to interact with 
-# ML libraries and attach features to counties by inheriting 
-# the c++ implementation. 
+# Graph Utilities for Adjacency Graph Construction 
 # 
 
 
-from typing import Callable
+from typing import Callable, Optional 
+
 import numpy as np 
-import geopandas as gpd 
-import pandas as pd 
-import torch 
-
-from torch_geometric.data import Data 
-from torch_geometric.utils import subgraph, to_undirected 
 from numpy.typing import NDArray 
 
-import support.helpers as h 
-import support.graph_cpp as g 
+import geopandas as gpd 
 
-from libpysal.weights import Queen
-
+from sklearn.neighbors import kneighbors_graph 
+from libpysal.weights import Queen 
 from scipy import sparse 
-from scipy.io import loadmat
+from scipy.io import loadmat 
 
-from preprocessing.loaders import (
-    load_oof_predictions
-)
+import utils.helpers as h 
+from preprocessing.loaders import load_oof_predictions
 
-from support.helpers import _mat_str_vector
+from utils.helpers import _mat_str_vector
 
+EARTH_RADIUS_KM = 6371.0
 
 def build_knn_graph_from_coords(
     coords: NDArray[np.float64], 
     *, 
     k: int = 5, 
-    directed: bool = False 
-) -> g.Graph: 
+    directed: bool = False,
+    metric: str = "haversine",
+    metric_params: Optional[dict] = None, 
+    include_self: bool = False, 
+    n_jobs: int = -1 
+) -> sparse.csr_matrix:  
 
+    '''
+    Builds a kNN adjacency matrix from (lat,lon) coordinates. 
+    '''
+
+    coords = np.asarray(coords, dtype=np.float64)
     if coords.ndim != 2 or coords.shape[1] != 2: 
         raise ValueError(f"coords must be (n,2), got shape {coords.shape}")
 
     n = coords.shape[0]
-    # Build empty graph 
     if n == 0: 
-        return g.build_graph(
-            0, 
-            np.zeros((2, 0), dtype=np.int64), 
-            np.zeros((0,), dtype=np.float64),
-            g.BuildOptions()
-        )
+        return sparse.csr_matrix((0, 0), dtype=np.float64)
 
-    # Ensure k is feasible, get Distance Matrix 
-    k = max(1, min(k, n - 1)) 
-    D = h._haversine_dist(coords, coords)
-    np.fill_diagonal(D, np.inf) 
+    max_k = n if include_self else n - 1 
+    if k <= 0 or max_k <= 0: 
+        return sparse.csr_matrix((n, n), dtype=np.float64)
 
-    nn_idx  = np.argpartition(D, kth=k - 1, axis=1)[:, :k] 
-    nn_dist = np.take_along_axis(D, nn_idx, axis=1).reshape(-1) 
+    k = min(k, max_k)
 
-    src = np.repeat(np.arange(n, dtype=np.int64), k)
-    dst = nn_idx.reshape(-1).astype(np.int64, copy=False)
-    
-    edge_index  = np.vstack([src, dst]).astype(np.int64, copy=False)
-    edge_weight = nn_dist.astype(np.float64, copy=False) 
+    kwargs = {}
+    if metric_params is not None: 
+        kwargs["metric_params"] = metric_params 
 
-    opt = g.BuildOptions() 
-    opt.directed = directed 
-    opt.add_reverse_edges = False 
-    opt.allow_self_loops  = False 
-    opt.sort_by_dst = True 
-    opt.dedup = g.DuplicateEdgePolicy.MIN
+    coords_rad = None 
+    if metric == "haversine": 
+        coords_rad = np.radians(coords)
 
-    return g.build_graph(n, edge_index, edge_weight, opt)
+    adj = kneighbors_graph(
+        coords_rad if metric == "haversine" else coords, 
+        k,
+        mode="distance",
+        metric=metric,
+        include_self=include_self, 
+        n_jobs=n_jobs,
+        **kwargs
+    ).tocsr() 
 
-
-def to_pyg_data(
-    graph: g.Graph, 
-    *,
-    x: NDArray, 
-    y: NDArray | None = None, 
-    undirect_mean: bool = True 
-) -> Data: 
-
-    edge_index, edge_dist = graph.to_coo_numpy()
-    edge_index = torch.as_tensor(edge_index, dtype=torch.long)
-    edge_attr  = torch.as_tensor(edge_dist, dtype=torch.float32).unsqueeze(1)
-
-    if undirect_mean: 
-        edge_index, edge_attr = to_undirected(
-            edge_index,
-            edge_attr=edge_attr,
-            reduce="mean"
-        )
-
-    data = Data(edge_index=edge_index, edge_attr=edge_attr)
-    x_tensor = torch.as_tensor(x, dtype=torch.float32)
-    y_tensor = torch.as_tensor(y, dtype=torch.float32) if y is not None else None 
-    data.x = x_tensor  
-    data.y = y_tensor if y_tensor is not None else None
-       
-    return data 
-
-def induced_subgraph(
-        data: Data, 
-        node_idx, 
-        *, 
-        relabel_nodes: bool = True
-) -> Data: 
-
-    node_idx = torch.as_tensor(node_idx, dtype=torch.long) 
-
-    if hasattr(data, "edge_attr"): 
-        edge_attr  = getattr(data, "edge_attr")
+    if metric == "haversine": 
+        adj.data = adj.data.astype(np.float64, copy=False) * EARTH_RADIUS_KM 
     else: 
-        raise ValueError("data does not have attr edge_attr")
+        adj.data = adj.data.astype(np.float64, copy=False)
 
-    if hasattr(data, "edge_index"): 
-        edge_index = getattr(data, "edge_index")
-    else: 
-        raise ValueError("data does not have attr edge_index")
+    if not directed: 
+        adj = adj.maximum(adj.T) 
 
-    edge_index_sub, edge_attr_sub = subgraph(
-        node_idx, 
-        edge_index, 
-        edge_attr=edge_attr, 
-        relabel_nodes=relabel_nodes, 
-        num_nodes=data.num_nodes 
-    )
-
-    out = Data(edge_index=edge_index_sub, edge_attr=edge_attr_sub)
-
-    if not hasattr(data, "x"): 
-        raise ValueError("data is missing field: x")
-    elif data.x is None: 
-        raise ValueError("data.x is None")
-
-    if relabel_nodes:
-        out.x = data.x[node_idx]
-        if hasattr(data, "y") and data.y is not None: 
-            out.y = data.y[node_idx]
-        out.orig_idx = node_idx 
-    else: 
-        out.x = data.x 
-        if hasattr(data, "y"): 
-            out.y = data.y 
-
-    return out 
+    adj.eliminate_zeros() 
+    return adj 
 
 
 def topk_by_column(adj: sparse.csr_matrix, k: int) -> sparse.csr_matrix: 
     if k < 1: 
         raise ValueError("k must be >= 1")
     A = adj.tocsc()
+    if A.shape is None: 
+        raise ValueError("unwrapped no graph")
     for j in range(A.shape[1]): 
         start, end = A.indptr[j], A.indptr[j + 1]
         if end - start <= k: 
@@ -165,13 +100,13 @@ def topk_by_column(adj: sparse.csr_matrix, k: int) -> sparse.csr_matrix:
         mask[keep] = True 
         data[~mask] = 0.0 
     A.eliminate_zeros()
-    return A.tocsr()
+    return sparse.csr_matrix(A.tocsr())
 
 
 def build_queen_adjacency(shapefile_path: str, fips_order: list[str]): 
     '''
-    Builds A CSR adjacency list using Queen Contiguity from TIGER shapefile and 
-    some imposed ordering on FIPS 
+    Builds A CSR adjacency list using Queen Contiguity from TIGER shapefile. 
+    Nodes match fips order 
     '''
 
     fips_order = [str(f).zfill(5) for f in fips_order]
@@ -187,8 +122,7 @@ def build_queen_adjacency(shapefile_path: str, fips_order: list[str]):
         dup = gdf[gdf["FIPS"].duplicated()]["FIPS"].tolist() 
         raise ValueError(f"duplicate FIPS in shapefile. head -n 10: {dup[:10]}")
 
-    fips_set = set(fips_order)
-    gdf = gdf[gdf["FIPS"].isin(fips_set)].copy() 
+    gdf = gdf[gdf["FIPS"].isin(fips_order)].copy() 
 
     missing = [f for f in fips_order if f not in set(gdf["FIPS"])]
     if missing: 
@@ -237,7 +171,12 @@ def normalize_adjacency(
     S = D_inv_sqrt @ A @ D_inv_sqrt
     return S.tocsr() 
 
+# ---------------------------------------------------------
+# Adjacency Matrix Factories 
+# ---------------------------------------------------------
+
 AdjacencyFactory = Callable[[list[str]], sparse.csr_matrix]
+
 
 def make_queen_adjacency_factory(shapefile_path: str | None = None) -> AdjacencyFactory: 
     if shapefile_path is None: 
@@ -257,10 +196,15 @@ def make_mobility_adjacency_factory(
     k_neighbors: int | None = None
 ) -> AdjacencyFactory:
     
+    # Heuristically determined to be the best k for C+S 
     if k_neighbors is None: 
         k_neighbors = 19 
 
-    adj_parent, fips_parent = compute_adaptive_graph(mobility_path, probs_path, k_neighbors=k_neighbors)
+    adj_parent, fips_parent = compute_adaptive_graph(
+        mobility_path, 
+        probs_path, 
+        k_neighbors=k_neighbors
+    )
 
     def _factory(fips_order: list[str]) -> sparse.csr_matrix: 
         src_map = {f: i for i, f in enumerate(fips_parent)} 
@@ -271,8 +215,8 @@ def make_mobility_adjacency_factory(
             indices.append(src_map[f])
 
         indices = np.array(indices, dtype=np.int64)
-
         return adj_parent[indices][:, indices]
+
     return _factory 
 
 
@@ -287,11 +231,7 @@ def compute_probability_lag_matrix(
     Computes Probability Lag Matrix from Classifier Probabilities and 
     County adjacency Matrix. 
 
-    If multiple models exist in oof probabilities file then an 
-    optional model name can be passed 
-    
-    Method of aggregating Probabilities across multiple folds can be specified
-
+    If multiple models exist in oof probabilities file, pass model_name or agg="mean"
     '''
 
     oof   = load_oof_predictions(proba_path)
@@ -320,6 +260,7 @@ def compute_probability_lag_matrix(
 
     P_lag = W @ P 
     return P, P_lag, W, fips
+
 
 def compute_adaptive_graph(
     mobility_matrix_path: str, 
@@ -380,5 +321,4 @@ def compute_adaptive_graph(
     )
 
     adj_refined = topk_by_column(adj_refined, k_neighbors)
-
     return adj_refined, fips_mob 

@@ -1,22 +1,27 @@
 #!/usr/bin/env python3 
 # 
-# post_processing.py  Andrew Belles  Dec 25th, 2025 
+# processing.py  Andrew Belles  Dec 25th, 2025 
 # 
 # Modules that aim to post process probabilities output by Classifiers  
 # 
 
 import numpy as np 
 import pandas as pd 
+import torch 
 
-from typing import Callable
+from scipy import sparse 
 
+from typing import Callable, Optional 
 from numpy.typing import NDArray
 
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
     roc_auc_score
-)
+) 
+
+from torch_geometric.nn.models import CorrectAndSmooth 
+
 
 def make_train_mask(y, train_size=0.3, random_state=0, stratify=True): 
 
@@ -66,7 +71,7 @@ def normalized_proba(P, mask, eps=1e-12):
     return X 
 
 
-class CorrectAndSmooth: 
+class CorrectAndSmoothWrapper: 
 
     def __init__(
         self, 
@@ -79,7 +84,8 @@ class CorrectAndSmooth:
         norm: Callable = lambda x: np.linalg.norm(x), 
         relative: bool = True, 
         autoscale: bool = True, 
-        class_labels: NDArray | None = None 
+        class_labels: NDArray | None = None,
+        device: Optional[str] = None 
     ): 
 
         self.correction_alpha    = correction_alpha 
@@ -91,9 +97,17 @@ class CorrectAndSmooth:
         self.autoscale           = autoscale 
         self.class_labels        = class_labels
 
-        self._norm_tuple = (None, None)
+        self.device = self._resolve_device(device)
+        self.model_ = CorrectAndSmooth(
+            num_correction_layers=correction_max_iter,
+            correction_alpha=correction_alpha, 
+            num_smoothing_layers=smoothing_max_iter,
+            smoothing_alpha=smoothing_alpha,
+            autoscale=autoscale
+        ).to(self.device)
 
-        self._norm_fn = norm
+        self._P_smooth = None
+
 
     def evaluate(
         self, 

@@ -31,6 +31,8 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from xgboost import XGBClassifier
 from sklearn.neural_network import MLPClassifier
 
+from models.graph_utils import normalize_adjacency
+
 class MetricLearner(BaseEstimator, TransformerMixin, ABC): 
 
     @abstractmethod 
@@ -371,7 +373,7 @@ class QueenGateLearner:
     def _edge_features(self, X, src, dst): 
         Xi = X[src]
         Xj = X[dst]
-        return np.hstack([Xi, Xj, Xi - Xj])
+        return np.hstack([np.abs(Xi - Xj), (Xi - Xj)**2])
 
     def fit(self, X, y, *, adj, train_mask=None): 
         X = np.asarray(X, dtype=np.float64)
@@ -401,8 +403,9 @@ class QueenGateLearner:
     def get_graph(self, X): 
         if self.adj_ is None or self.model_ is None: 
             raise ValueError("model not fitted")
+        X_scaled = self.scaler_.transform(X)
         src, dst = self._edge_pairs(self.adj_)
-        X_edges = self._edge_features(np.asarray(X, dtype=np.float64), src, dst)
+        X_edges = self._edge_features(np.asarray(X_scaled, dtype=np.float64), src, dst)
         gate = self.model_.predict_proba(X_edges)[:, 1]
 
         W = self.adj_.copy().astype(np.float64)
@@ -410,4 +413,4 @@ class QueenGateLearner:
 
         W[src, dst] = gate 
         W[dst, src] = gate 
-        return W 
+        return normalize_adjacency(W, binarize=False) 

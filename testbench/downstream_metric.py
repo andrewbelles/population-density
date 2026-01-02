@@ -127,7 +127,7 @@ def optimize_metric(
         n_trials=n_trials,
         direction="maximize",
         sampler_type="multivariate-tpe",
-        early_stopping_rounds=100,
+        early_stopping_rounds=40,
         early_stopping_delta=1e-4
     )
 
@@ -255,7 +255,7 @@ def main():
         metric_tag   = "QG"
         base_factory = _make_qg 
         space_fn     = define_qg_space 
-        adj_factory  = make_knn_adjacency_factory(mobility_path, 50)
+        adj_factory  = make_knn_adjacency_factory(mobility_path, 20) 
     else: 
         metric_tag   = "IDML"
         base_factory = _make_idml
@@ -301,7 +301,7 @@ def main():
             dataset_loaders=dataset_loaders, 
             label_path=label_path, 
             label_loader=label_loader, 
-            n_trials=400,
+            n_trials=300,
             base_factory=base_factory, 
             param_space=space_fn,
             metric_tag=metric_tag,

@@ -87,11 +87,11 @@ models:
     reg_lambda: 59.75293637568018
     gamma: 0.3078629370840729
   CorrectAndSmooth:
-    adjacency: queen
-    correction_alpha: 0.19298884859834387
-    smoothing_alpha: 0.003024245938392855
-    correction_max_iter: 10
-    smoothing_max_iter: 22
+    adjacency: qg
+    correction_alpha: 0.9274322697215834
+    smoothing_alpha: 0.001070700511114863
+    correction_max_iter: 5
+    smoothing_max_iter: 6
     autoscale: false
   StackingOOF/IDML:
     n_neighbors_frac: 0.1701592122936776
@@ -139,7 +139,7 @@ models:
     n_neighbors: 22
     dataset: PASSTHROUGH+COORDS
   StackingOOF/QG:
-    hidden_layer_size: 128-64
-    alpha: 0.007865935076179597
-    max_iter: 2011
+    hidden_layer_size: 1024-512-512-128-64
+    alpha: 0.028169958276818466
+    max_iter: 5105
     dataset: VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH

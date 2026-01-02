@@ -8,14 +8,12 @@
 # 
 
 import numpy as np 
-# from typing import Any 
 
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier 
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression 
 
-from sklearn.utils import class_weight
 from xgboost import XGBClassifier, XGBRegressor  
 
 import torch 
@@ -25,8 +23,6 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv 
 
 from models.graph_utils import build_knn_graph_from_coords, to_pyg_data
-
-# import torch, gpytorch 
 
 # ---------------------------------------------------------
 # Regressors 
@@ -254,7 +250,8 @@ class GCNGraphRegressor(BaseEstimator, RegressorMixin):
     def fit(self, X, y, coords=None): 
 
         if coords is None: 
-            raise ValueError("GCNGraphRegressor required coords=(lat,lon) passed by CrossValidator")
+            raise ValueError("GCNGraphRegressor required coords=(lat,lon) passed "
+                             "by CrossValidator")
 
         X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
@@ -282,7 +279,7 @@ class GCNGraphRegressor(BaseEstimator, RegressorMixin):
         loss_fn = nn.MSELoss() 
 
         self.model_.train()
-        for epoch in range(int(self.epochs)): 
+        for _ in range(int(self.epochs)): 
             optimizer.zero_grad() 
 
             d_km = data.edge_attr.view(-1)
@@ -298,7 +295,8 @@ class GCNGraphRegressor(BaseEstimator, RegressorMixin):
 
     def predict(self, X, coords=None):
         if coords is None: 
-            raise ValueError("GCNGraphRegressor required coords=(lat,lon) passed by CrossValidator")
+            raise ValueError("GCNGraphRegressor required coords=(lat,lon) "
+                             "passed by CrossValidator")
 
         X = np.asarray(X, dtype=np.float64)
 

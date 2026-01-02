@@ -41,8 +41,11 @@ from preprocessing.loaders import (
 
 from preprocessing.disagreement import (
     load_pass_through_stacking,
-    DisagreementSpec
 )
+
+from preprocessing.loaders import load_concat_datasets 
+from models.metric import QueenGateLearner 
+from testbench.test_utils import _select_specs_psv
 
 from support.helpers import make_cfg_gap_factory, project_path
 
@@ -255,6 +258,7 @@ def evaluate_correct_and_smooth(
     oof = load_oof_predictions(oof_path)
     y_train = np.asarray(oof["labels"]).reshape(-1)
     class_labels = np.asarray(oof["class_labels"]).reshape(-1)
+    oof_fips = np.asarray(oof["fips_codes"]).astype("U5")
 
     train_mask = make_train_mask(
         y_train,
@@ -264,12 +268,43 @@ def evaluate_correct_and_smooth(
     )
     test_mask  = ~train_mask 
 
-    queen_factory    = make_queen_adjacency_factory(shapefile)
-    mobility_factory = make_mobility_adjacency_factory(mobility_path, oof_path)
+    if adjacency == "qg":
+        cfg = _load_yaml_config(Path(project_path("testbench", "model_config.yaml")))
+        qg_key = "StackingPassthrough/QG" if "passthrough" in oof_path else "StackingOOF/QG"
+        qg_params = cfg.get("models", {}).get(qg_key)
+        if qg_params is None:
+            raise ValueError(f"missing QG config: {qg_key}")
 
-    P, _, W_queen, _ = compute_probability_lag_matrix(oof_path, queen_factory)
-    _, _, W_mob, _   = compute_probability_lag_matrix(oof_path, mobility_factory)
-    W = W_queen if adjacency == "queen" else W_mob 
+        qg_params = dict(qg_params)
+        qg_params.pop("dataset", None)
+
+        data = load_concat_datasets(
+            specs=_select_specs_psv("VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH"),
+            labels_path=project_path("data", "datasets", "viirs_nchs_2023.mat"),
+            labels_loader=load_viirs_nchs
+        )
+        X = data["features"]
+        fips = np.asarray(data["sample_ids"], dtype="U5")
+
+        if len(fips) != len(oof_fips) or not np.array_equal(fips, oof_fips):
+            idx = _align_on_fips(oof_fips, fips)
+            X = X[idx]
+
+        base_adj = make_queen_adjacency_factory(shapefile)(list(oof_fips))
+        qg = QueenGateLearner(**qg_params)
+        qg.fit(X, y_train, adj=base_adj, train_mask=train_mask)
+        W = qg.get_graph(X)
+
+        P = np.asarray(oof["probs"], dtype=np.float64)
+        if P.ndim == 3:
+            P = P.mean(axis=1)
+    else:
+        queen_factory    = make_queen_adjacency_factory(shapefile)
+        mobility_factory = make_mobility_adjacency_factory(mobility_path, oof_path)
+
+        P, _, W_queen, _ = compute_probability_lag_matrix(oof_path, queen_factory)
+        _, _, W_mob, _   = compute_probability_lag_matrix(oof_path, mobility_factory)
+        W = W_queen if adjacency == "queen" else W_mob
 
     cs = CorrectAndSmooth(class_labels=class_labels, **params)
 
@@ -338,7 +373,9 @@ def optimize_correct_and_smooth(
     early_stopping_delta=1e-4,
     random_state: int = 0,
     config_key: str = "CorrectAndSmooth", 
-    config_path: str | None = None
+    config_path: str | None = None,
+    qg_key: str | None = None, 
+    force_qg: bool = False 
 ): 
     oof          = load_oof_predictions(oof_path)
     y_train      = np.asarray(oof["labels"]).reshape(-1)
@@ -368,6 +405,46 @@ def optimize_correct_and_smooth(
         "queen": W_queen,
         "mobility_adaptive": W_mob 
     }
+
+    if qg_key is not None: 
+        if config_path is None: 
+            raise ValueError("qg_key requires config_path")
+
+        cfg = _load_yaml_config(Path(config_path))
+        qg_params = cfg.get("models", {}).get(qg_key)
+        if qg_params is None: 
+            raise ValueError(f"missing QG config: {qg_key}")
+
+        qg_params = dict(qg_params)
+        qg_params.pop("dataset", None)
+
+        h = qg_params.get("hidden_layer_size")
+        if isinstance(h, str): 
+            qg_params["hidden_layer_size"] = tuple(int(x) for x in h.split("-") if x)
+
+        data = load_concat_datasets(
+            specs=_select_specs_psv("VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH"),
+            labels_path=project_path("data", "datasets", "viirs_nchs_2023.mat"),
+            labels_loader=load_viirs_nchs 
+        )
+
+        X    = data["features"]
+        fips = np.asarray(data["sample_ids"], dtype="U5")
+        oof_fips = np.asarray(oof["fips_codes"]).astype("U5")
+
+        if len(fips) != len(oof_fips) or not np.array_equal(fips, oof_fips): 
+            idx = _align_on_fips(oof_path, fips)
+            X = X[idx]
+
+        base_adj = make_queen_adjacency_factory(shapefile)(list(oof_fips))
+        qg = QueenGateLearner(**qg_params)
+        qg.fit(X, y_train, adj=base_adj, train_mask=train_mask)
+        W_qg = qg.get_graph(X)
+
+        if force_qg: 
+            W_by_name = {"qg": W_qg}
+        else: 
+            W_by_name["qg"] = W_qg
 
     evaluator = CorrectAndSmoothEvaluator(
         P=P,
@@ -643,7 +720,10 @@ def correct_and_smooth(config_path, args):
         mobility_path=mobility_mat,
         n_trials=150,
         random_state=0,
-        config_path=config_path
+        config_path=config_path,
+        qg_key="StackingOOF/QG",
+        force_qg=True,
+        config_key="CorrectAndSmooth"
     )
 
     print(cs_params, cs_score)

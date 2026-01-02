@@ -587,9 +587,9 @@ def define_gbm_metric_space(trial):
 
 
 def make_layer_choices(
-    sizes=(32, 64, 128, 256, 512, 1024),
+    sizes=(16, 32, 64, 128),
     min_layers=1,
-    max_layers=10
+    max_layers=3
 ): 
     choices = {}
     for L in range(min_layers, max_layers+1): 
@@ -601,10 +601,10 @@ def make_layer_choices(
     return choices 
 
 def define_qg_space(trial):
-    # layer_choices = make_layer_choices()
-    # key = trial.suggest_categorical("hidden_layer_size", list(layer_choices.keys()))
+    layer_choices = make_layer_choices()
+    key = trial.suggest_categorical("hidden_layer_size", list(layer_choices.keys()))
     return {
-        "hidden_layer_size": (512, 512, 512, 512, 512, 512, 512, 512), 
+        "hidden_layer_size": layer_choices[key], 
         "alpha": trial.suggest_float("alpha", 1e-6, 1e-1, log=True),
         "max_iter": trial.suggest_int("max_iter", 3000, 6000)
     }
