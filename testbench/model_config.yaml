@@ -86,27 +86,6 @@ models:
     reg_alpha: 26.650708709266215
     reg_lambda: 59.75293637568018
     gamma: 0.3078629370840729
-  CorrectAndSmooth:
-    adjacency: qg
-    correction_alpha: 0.9274322697215834
-    smoothing_alpha: 0.001070700511114863
-    correction_max_iter: 5
-    smoothing_max_iter: 6
-    autoscale: false
-  StackingOOF/IDML:
-    n_neighbors_frac: 0.1701592122936776
-    n_components_frac: 0.6543533664262682
-    confidence_threshold: 0.7785803926496389
-    label_spreading_alpha: 0.3595141388442166
-    max_iter: 3
-    dataset: VIIRS+OOF+COORDS
-  StackingOOF/IDML/CorrectAndSmooth:
-    adjacency: metric
-    correction_alpha: 0.02171923884369792
-    smoothing_alpha: 0.07144050826092258
-    correction_max_iter: 3
-    smoothing_max_iter: 1
-    autoscale: false
   StackingPassthrough/Logistic:
     C: 3.131060709581739
     class_weight: null
@@ -127,19 +106,3 @@ models:
     reg_alpha: 0.32645243669276236
     reg_lambda: 0.16101223053866057
     gamma: 5.794661658824768
-  StackingOOF/GBM:
-    n_estimators: 121
-    max_depth: 4
-    learning_rate: 0.04522622249893423
-    n_negatives: 10
-    hard_mining_ratio: 0.2138974010172552
-    n_pos_per_anchor: 3
-    anchors_per_class: 495
-    candidate_k: 10
-    n_neighbors: 22
-    dataset: PASSTHROUGH+COORDS
-  StackingOOF/QG:
-    hidden_layer_size: 1024-512-512-128-64
-    alpha: 0.028169958276818466
-    max_iter: 5105
-    dataset: VIIRS+TIGER+NLCD+COORDS+PASSTHROUGH
