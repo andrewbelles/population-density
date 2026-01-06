@@ -8,7 +8,7 @@
 
 from numpy.typing import NDArray
 
-import optuna, yaml, itertools, inspect 
+import optuna, yaml, itertools 
 from optuna.samplers import CmaEsSampler, TPESampler
 
 from pathlib import Path 
@@ -250,7 +250,7 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
             autoscale=params.pop("autoscale")
         )
 
-        P_cs = cs.fit(self.P, self.y_train, self.train_mask, W)
+        P_cs = cs(self.P, self.y_train, self.train_mask, W)
         pred_labels = cs.predict(P_cs)
         return accuracy_score(self.y_true, pred_labels)
 
@@ -374,7 +374,7 @@ class MetricCASEvaluator(OptunaEvaluator):
 
         model = self.factory(**params)
         model.fit(X, y, adj, train_mask=train_mask)
-        adj = model.get_graph(X, adj)
+        adj = model(X, adj)
 
         # Downstream target is to maximize correct and smooth accuracy
         cs = CorrectAndSmoothEvaluator(

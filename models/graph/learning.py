@@ -54,7 +54,7 @@ class EdgeNetwork(torch.nn.Module):
         if not hidden_dims: 
             raise ValueError("hidden_dim must have at least one layer")
 
-        input_dim = 2 * feature_dim 
+        input_dim = (2 * feature_dim) + 1 
         dims = [input_dim] + hidden_dims + [1]
 
         self.layers = torch.nn.ModuleList(
@@ -75,8 +75,7 @@ class EdgeNetwork(torch.nn.Module):
 
     def forward(self, x_i: torch.Tensor, x_j: torch.Tensor) -> torch.Tensor: 
         diff = torch.abs(x_i - x_j)
-        cos_sim = torch.dot(x_i, x_j) / (torch.abs(x_i) * torch.abs(x_j))
-
+        cos_sim = torch.nn.functional.cosine_similarity(x_i, x_j, dim=1, eps=1e-12).unsqueeze(1)
         h = torch.cat([diff, diff**2, cos_sim], dim=1)
 
         for i, layer in enumerate(self.layers): 

@@ -268,7 +268,7 @@ def evaluate_correct_and_smooth(
 
     if adjacency == "qg":
         cfg = _load_yaml_config(Path(project_path("testbench", "model_config.yaml")))
-        qg_key = "StackingPassthrough/QG" if "passthrough" in oof_path else "StackingOOF/QG"
+        qg_key = "StackingPassthrough/QG" if "passthrough" in oof_path else "Stacking/QG"
         qg_params = cfg.get("models", {}).get(qg_key)
         if qg_params is None:
             raise ValueError(f"missing QG config: {qg_key}")
@@ -719,7 +719,7 @@ def correct_and_smooth(config_path, args):
         n_trials=150,
         random_state=0,
         config_path=config_path,
-        qg_key="StackingOOF/QG",
+        qg_key="Stacking/QG",
         force_qg=True,
         config_key="CorrectAndSmooth"
     )
