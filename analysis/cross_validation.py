@@ -32,7 +32,7 @@ from sklearn.metrics import (
     log_loss 
 )
 
-from support.helpers import (
+from utils.helpers import (
     ModelFactory,
 ) 
 
@@ -251,7 +251,7 @@ class ScaledEstimator(BaseEstimator):
                 return self.estimator.predict_proba(X, coords=coords) 
             except TypeError: 
                 return self.estimator.predict_proba(X) 
-        raise AttributeError("Estimator does not support predict_proba")
+        raise AttributeError("Estimator does not utils predict_proba")
 
 # ---------------------------------------------------------
 # Cross Validator  
@@ -262,7 +262,7 @@ class CrossValidator:
     '''
     Sklearn-based cross-validation harness. 
 
-    Supports both regression and classification via TaskSpec. 
+    utilss both regression and classification via TaskSpec. 
     '''
 
     def __init__(
@@ -459,7 +459,7 @@ class CrossValidator:
             return None, None 
         transform, inverse = label_transforms.get(model_name, (None, None))
         if transform is not None and self.task.task_type != "regression":
-            raise ValueError("label_transforms only supported for regression")
+            raise ValueError("label_transforms only utilsed for regression")
         return transform, inverse 
 
     def _fit_predict(

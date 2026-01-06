@@ -28,18 +28,19 @@ from analysis.cross_validation import (
     TaskSpec,
 )
 
-from models.post_processing import (
+from models.graph.processing import (
     CorrectAndSmooth,
-    make_train_mask, 
-    normalized_proba 
 )
 
-from models.graph_utils import (
+from models.graph.construction import (
     make_mobility_adjacency_factory,
+    make_queen_adjacency_factory,
     normalize_adjacency
 )
 
 from sklearn.metrics import accuracy_score
+
+from utils.helpers import make_train_mask
 
 # ---------------------------------------------------------
 # Generalize Interface/Contract for Optimizer 
@@ -198,11 +199,7 @@ class StandardEvaluator(OptunaEvaluator):
 
 class PipelineEvaluator(OptunaEvaluator): 
     '''
-    Full optimization of pipeline with entry point at VIIRS, TIGER, NLCD Experts all 
-    the way through Correct and Smooth algorithm. 
-
-    Right now uses Travel Proxy metric space to generate graph topology but future plans 
-    include improving learned metric space. 
+    Optimization of each step of classifier pipeline 
     '''
     pass 
 
@@ -233,12 +230,13 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         return {
             "adjacency": trial.suggest_categorical(
-                "adjacency", list(self.W_by_name.keys())),
-            "correction_alpha": trial.suggest_float("correction_alpha", 0.0, 1.0), 
-            "smoothing_alpha": trial.suggest_float("smoothing_alpha", 0.0, 1.0), 
-            "correction_max_iter": trial.suggest_int("correction_max_iter", 1, 25), 
-            "smoothing_max_iter": trial.suggest_int("smoothing_max_iter", 1, 25), 
-            "autoscale": trial.suggest_categorical("autoscale", [True, False])
+                "adjacency", list(self.W_by_name.keys())
+            ),
+            "correction_layers": trial.suggest_int("correction_layers", 1, 25),
+            "correction_alpha": trial.suggest_float("correction_alpha", 0.0, 1.0),
+            "smoothing_layers": trial.suggest_int("smoothing_layers", 1, 25),
+            "smoothing_alpha": trial.suggest_float("smoothing_alpha", 0.0, 1.0),
+            "autoscale": trial.suggest_categorical("autoscale", [True, False]),
         }
 
     def evaluate(self, params: Dict[str, Any]) -> float:
@@ -246,16 +244,14 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
         W = self.W_by_name[adj_name]
 
         cs = CorrectAndSmooth(
-            class_labels=self.class_labels, 
-            **params 
+            class_labels=self.class_labels,
+            correction=(params.pop("correction_layers"), params.pop("correction_alpha")),
+            smoothing=(params.pop("smoothing_layers"), params.pop("smoothing_alpha")),
+            autoscale=params.pop("autoscale")
         )
 
-        P_cs        = cs.fit(self.P, self.y_train, W, self.train_mask)
-
-        P_norm      = normalized_proba(P_cs, self.test_mask)
-        pred_idx    = np.argmax(P_norm, axis=1)
-        pred_labels = self.class_labels[pred_idx]
-
+        P_cs = cs.fit(self.P, self.y_train, self.train_mask, W)
+        pred_labels = cs.predict(P_cs)
         return accuracy_score(self.y_true, pred_labels)
 
 # ---------------------------------------------------------
@@ -308,6 +304,9 @@ class MetricCASEvaluator(OptunaEvaluator):
         self.train_size       = train_size 
         self.passthrough_adj_fn = passthrough_adj_fn
         self.feature_transform_factory = feature_transform_factory
+
+        if adjacency_factory is None: 
+            adjacency_factory = make_queen_adjacency_factory()
         self.adjacency_factory = adjacency_factory
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
@@ -329,16 +328,6 @@ class MetricCASEvaluator(OptunaEvaluator):
         y    = np.asarray(data["labels"]).reshape(-1)
         fips = np.asarray(data["sample_ids"], dtype="U5")
 
-        max_components = max(5, min(128, X.shape[1]))
-        max_neighbors  = max(5, min(100, X.shape[0] - 1))
-
-        if "n_components_frac" in params: 
-            frac = params.pop("n_components_frac")
-            params["n_components"] = 1 + int(round(frac * (max_components - 1)))
-        if "n_neighbors_frac" in params: 
-            frac = params.pop("n_neighbors_frac")
-            params["n_neighbors"] = 1 + int(round(frac * (max_neighbors - 1)))
-
         oof = load_oof_predictions(self.proba_path)
         oof_fips = np.asarray(oof["fips_codes"]).astype("U5")
         common = [f for f in fips if f in set(oof_fips)]
@@ -352,7 +341,11 @@ class MetricCASEvaluator(OptunaEvaluator):
             fips = fips[idx]
 
         adj = None 
-        if self.adjacency_factory is not None: 
+        if self.passthrough_adj_fn is not None: 
+            adj = self.passthrough_adj_fn(list(fips))
+        elif self.adjacency_factory is not None: 
+            if not callable(self.adjacency_factory): 
+                raise TypeError("adjacency_factory must be callable")
             adj = self.adjacency_factory(list(fips))
 
         P, class_labels = _load_probs_for_fips(
@@ -376,14 +369,12 @@ class MetricCASEvaluator(OptunaEvaluator):
             if transforms: 
                 X = _apply_train_test_transforms(transforms, X, train_mask)
 
+        if adj is None: 
+            raise ValueError("EdgeLearner requires adjacency_factory to supply priori adj")
+
         model = self.factory(**params)
-        fit_kwargs = {"train_mask": train_mask}
-        if adj is not None and "adj" in inspect.signature(model.fit).parameters:
-            fit_kwargs["adj"] = adj
-
-        model.fit(X, y, **fit_kwargs)
-
-        adj = model.get_graph(X)
+        model.fit(X, y, adj, train_mask=train_mask)
+        adj = model.get_graph(X, adj)
 
         # Downstream target is to maximize correct and smooth accuracy
         cs = CorrectAndSmoothEvaluator(
@@ -557,37 +548,13 @@ def define_logistic_space(trial):
         "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]), 
     }
 
-def define_idml_space(trial): 
-    return {
-        "n_neighbors_frac": trial.suggest_float("n_neighbors_frac", 0.0, 1.0), 
-        "n_components_frac": trial.suggest_float("n_components_frac", 0.0, 1.0),
-        "confidence_threshold": trial.suggest_float("confidence_threshold", 0.60, 0.99), 
-        "label_spreading_alpha": trial.suggest_float("label_spreading_alpha", 0.1, 0.9),
-        "max_iter": trial.suggest_int("max_iter", 1, 10), 
-        "n_jobs": -1 
-    }
-
 def define_mobility_space(trial): 
     return {
-        "k_components": trial.suggest_float("k_components", 5, 100)
+        "k_neighbors": trial.suggest_int("k_neighbors", 5, 100)
     }
-
-def define_gbm_metric_space(trial):
-    return {
-        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-        "max_depth": trial.suggest_int("max_depth", 2, 8),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-        "n_negatives": trial.suggest_int("n_negatives", 2, 10),
-        "hard_mining_ratio": trial.suggest_float("hard_mining_ratio", 0.0, 1.0),
-        "n_pos_per_anchor": trial.suggest_int("n_pos_per_anchor", 1, 3),
-        "anchors_per_class": trial.suggest_int("anchors_per_class", 50, 500),
-        "candidate_k": trial.suggest_int("candidate_k", 10, 100),
-        "n_neighbors": trial.suggest_int("n_neighbors", 3, 30),   
-    }
-
 
 def make_layer_choices(
-    sizes=(16, 32, 64, 128),
+    sizes=(128, 256, 512, 1024),
     min_layers=1,
     max_layers=3
 ): 
@@ -600,13 +567,18 @@ def make_layer_choices(
             choices[key] = combo 
     return choices 
 
-def define_qg_space(trial):
+def define_gate_space(trial):
     layer_choices = make_layer_choices()
-    key = trial.suggest_categorical("hidden_layer_size", list(layer_choices.keys()))
+    key = trial.suggest_categorical("hidden_dims", list(layer_choices.keys()))
     return {
-        "hidden_layer_size": layer_choices[key], 
-        "alpha": trial.suggest_float("alpha", 1e-6, 1e-1, log=True),
-        "max_iter": trial.suggest_int("max_iter", 3000, 6000)
+        "hidden_dims": layer_choices[key], 
+        "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True), 
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True), 
+        "epochs": trial.suggest_int("epochs", 1000, 6000), 
+        "batch_size": trial.suggest_categorical("batch_size", [4096, 8192, 16384]), 
+        "dropout": trial.suggest_float("dropout", 0.0, 0.5),
+        "residual": trial.suggest_categorical("residual", [True, False]), 
+        "batch_norm": trial.suggest_categorical("batch_norm", [True, False])
     }
 
 # ---------------------------------------------------------

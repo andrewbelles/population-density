@@ -15,6 +15,8 @@ from sklearn.preprocessing import StandardScaler
 
 from abc import ABC, abstractmethod
 
+from sklearn.model_selection import StratifiedShuffleSplit, ShuffleSplit
+
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
 MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
@@ -47,6 +49,7 @@ def _as_tuple_str(x: str | Sequence[str] | None) -> tuple[str, ...]:
     if isinstance(x, str): 
         return (x,)
     return tuple(str(v) for v in x)
+
 
 # ---------------------------------------------------------
 # Dataset Manipulation  
@@ -175,6 +178,41 @@ def kfold_indices(n_samples: int, n_folds: int = 5, seed: int | None = None):
 
     return folds 
 
+def make_train_mask(
+    y,
+    *,
+    train_size: float | int = 0.3, 
+    random_state: int = 0, 
+    stratify: bool = True 
+) -> NDArray: 
+
+    y = np.asarray(y).reshape(-1)
+    n = y.shape[0] 
+    if n == 0: 
+        return np.zeros(0, dtype=bool)
+
+    if isinstance(train_size, int):
+        if train_size <= 0 or train_size >= n:
+            raise ValueError("train_size must be in [1, n-1] when int")
+        train_size = train_size / n
+    elif isinstance(train_size, float):
+        if not (0.0 < train_size < 1.0):
+            raise ValueError("train_size must be in (0, 1) when float")
+
+    if stratify:
+        splitter = StratifiedShuffleSplit(
+            n_splits=1, train_size=train_size, random_state=random_state
+        )
+        train_idx, _ = next(splitter.split(np.zeros((n, 1)), y))
+    else:
+        splitter = ShuffleSplit(
+            n_splits=1, train_size=train_size, random_state=random_state
+        )
+        train_idx, _ = next(splitter.split(np.zeros((n, 1))))
+
+    mask = np.zeros(n, dtype=bool)
+    mask[train_idx] = True
+    return mask
 
 # ---------------------------------------------------------
 # Model Interface 

@@ -231,6 +231,14 @@ class MetricAnalyzer:
     @staticmethod 
     def smoothness_gap(adj: sp.csr_matrix, y_true: NDArray, probs: NDArray) -> float: 
         y_true = np.asarray(y_true).reshape(-1)
+        if not np.issubdtype(y_true.dtype, np.integer): 
+            if np.allclose(y_true, np.round(y_true)):
+                y_true = np.round(y_true).astype(np.int64)
+            else: 
+                raise ValueError("y_true must be integer class labels")
+        else: 
+            y_true = y_true.astype(np.int64, copy=False)
+
         P = np.asarray(probs, dtype=np.float64)
 
         if P.ndim == 1: 

@@ -44,18 +44,16 @@ from preprocessing.disagreement import (
 )
 
 from preprocessing.loaders import load_concat_datasets 
-from models.metric import QueenGateLearner 
+from models.graph.learning import EdgeLearner 
 from testbench.test_utils import _select_specs_psv
 
-from support.helpers import make_cfg_gap_factory, project_path
+from utils.helpers import make_cfg_gap_factory, project_path
 
-from models.post_processing import (
+from models.graph.processing import (
     CorrectAndSmooth, 
-    normalized_proba, 
-    make_train_mask
 ) 
 
-from models.graph_utils import (
+from models.graph.construction import (
     make_queen_adjacency_factory,
     make_mobility_adjacency_factory,
     compute_probability_lag_matrix
