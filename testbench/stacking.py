@@ -144,6 +144,35 @@ def _evaluate_model(
 
     return metrics, score 
 
+def _aggregate_leaderboard(
+    dataset_key, 
+    filepath,
+    loader_func,
+    config, 
+    leaderboard 
+): 
+    rows = []
+    for mean_score, model_name, params in leaderboard: 
+        metrics, eval_score = _evaluate_model(
+            filepath,
+            loader_func,
+            model_name,
+            params,
+            config 
+        )
+        rows.append({
+            "model": model_name,
+            "mean_score": mean_score,
+            "eval_score": eval_score, 
+            "metrics": metrics, 
+            "params": params
+        })
+
+    return {
+        "dataset": dataset_key,
+        "leaderboard": rows 
+    }
+
 def _optimize_dataset(
     dataset_key, 
     filepath, 
@@ -189,7 +218,13 @@ def _optimize_dataset(
     buf.write(f"\n== {dataset_key} optimization ==\n")
     buf.write(f"Best Model: {best_model}\n")
     buf.write(f"Best Score: {best_score_val:.4f}\n")
-    return leaderboard[0]
+    return _aggregate_leaderboard( 
+        dataset_key,
+        filepath,
+        loader_func,
+        outer_config,
+        leaderboard
+    )
 
 def _evaluate_cs(
     P,
@@ -215,7 +250,7 @@ def _evaluate_cs(
     )
     P_cs    = cs(P, y, train_mask, W_by_name[adj_name])
     metrics = metrics_from_probs(y[test_mask], P_cs[test_mask], class_labels)
-    return metrics, adj_name
+    return metrics, adj_name, P_cs
 
 def _select_best_model(dataset_key, filepath, loader_func, config): 
     leaderboard = []
@@ -317,7 +352,20 @@ def test_stacking(buf: io.StringIO, passthrough: bool = False):
         proba_path=proba
     )
 
-    return {"proba_path": proba, "model": best_model, "score": best_score_val}
+    P, y, fips, class_labels = load_probs_labels_fips(proba)
+
+    return {
+        "proba_path": proba, 
+        "model": best_model, 
+        "score": best_score_val,
+        "metadata": {
+            "name": f"{name}/{best_model}",
+            "probs": P, 
+            "labels": y, 
+            "fips": fips,
+            "class_labels": class_labels
+        }
+    }
 
 def test_cs(buf: io.StringIO, passthrough: bool = False): 
 
@@ -361,7 +409,7 @@ def test_cs(buf: io.StringIO, passthrough: bool = False):
     save_model_config(CONFIG_PATH, key, best_params)
     write_model_summary(buf, key, best_value)
 
-    metrics, adj_name = _evaluate_cs(
+    metrics, adj_name, P_cs = _evaluate_cs(
         P,
         y,
         train_mask,
@@ -372,7 +420,19 @@ def test_cs(buf: io.StringIO, passthrough: bool = False):
     )
 
     write_model_metrics(buf, f"{key}/{adj_name}", metrics)
-    return {"params": best_params, "metrics": metrics}
+    return {
+        "params": best_params, 
+        "metrics": metrics,
+        "metadata": {
+            name: f"{key}/{adj_name}",
+            "probs": P, 
+            "probs_corr": P_cs, 
+            "train_mask": train_mask,
+            "labels": y, 
+            "fips": fips,
+            "class_labels": class_labels
+        }
+    }
 
 TESTS = {
     "expert_opt": test_expert_optimize,

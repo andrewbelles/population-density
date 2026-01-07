@@ -86,15 +86,30 @@ def test_knn(fips: NDArray, k: int = 12):
 
 def test_queen_metrics(P, y, fips, coords, buf: io.StringIO): 
     W = test_queen(fips)
-    write_graph_metrics(buf, "Queen", W, P, y, coords)
+    m = write_graph_metrics(buf, "Queen", W, P, y, coords)
+    return {
+        "name": "Queen", 
+        "metrics": m, 
+        "adj": W
+    }
 
 def test_mobility_metrics(P, y, fips, coords, buf: io.StringIO, k: int = 12): 
     W = test_mobility(fips, k)
-    write_graph_metrics(buf, "Mobility", W, P, y, coords)
+    m = write_graph_metrics(buf, "Mobility", W, P, y, coords)
+    return {
+        "name": "Mobility", 
+        "metrics": m, 
+        "adj": W
+    }
 
 def test_knn_metrics(P, y, fips, coords, buf: io.StringIO, k: int = 12): 
     W = test_knn(fips, k)
-    write_graph_metrics(buf, "kNN", W, P, y, coords)
+    m = write_graph_metrics(buf, "kNN", W, P, y, coords)
+    return {
+        "name": "kNN", 
+        "metrics": m, 
+        "adj": W
+    }
 
 def test_edge_gate(
     key: str, 
@@ -113,7 +128,13 @@ def test_edge_gate(
     model.fit(X, y, base_adj)
     adj = model.build_graph(X, base_adj)
     check_adj(adj, len(fips), f"{key} adjacency")
-    write_graph_metrics(buf, key, adj, P, y, coords)
+    m = write_graph_metrics(buf, key, adj, P, y, coords)
+
+    return {
+        "name": "EdgeLearner",
+        "metrics": m,
+        "adj": adj
+    }
 
 METRIC_TESTS  = {
     "/EDGE": test_edge_gate 
@@ -122,6 +143,7 @@ METRIC_TESTS  = {
 def test_learned_metrics(metric_keys: list[str], buf: io.StringIO): 
     cfg = load_yaml_config(Path(CONFIG_PATH))
     
+    results = []
     for key in metric_keys: 
         params = cfg.get("models", {}).get(key)
         if params is None: 
@@ -161,7 +183,7 @@ def test_learned_metrics(metric_keys: list[str], buf: io.StringIO):
         if handler is None: 
             raise ValueError(f"no test handler for metric key: {key}")
 
-        handler(
+        results.append(handler(
             key, 
             params, 
             X=X,
@@ -170,7 +192,9 @@ def test_learned_metrics(metric_keys: list[str], buf: io.StringIO):
             P=P,
             coords=coords,
             buf=buf
-        )
+        ))
+
+    return results 
 
 # ---------------------------------------------------------
 # Unittest Entry 

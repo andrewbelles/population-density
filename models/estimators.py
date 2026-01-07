@@ -16,14 +16,6 @@ from sklearn.linear_model import LogisticRegression
 
 from xgboost import XGBClassifier, XGBRegressor  
 
-import torch 
-import torch.nn as nn 
-import torch.nn.functional as F 
-
-from torch_geometric.nn import GCNConv 
-
-from models.graph_utils import build_knn_graph_from_coords, to_pyg_data
-
 # ---------------------------------------------------------
 # Regressors 
 # ---------------------------------------------------------
@@ -195,126 +187,6 @@ class MultiOutputRegressor(BaseEstimator, RegressorMixin):
         X = np.asarray(X, dtype=np.float64)
         preds = np.column_stack([est.predict(X) for est in self.estimators_])
         return preds if self.n_outputs_ > 1 else preds.ravel() 
-
-
-class _GCNRegressorNet(nn.Module): 
-
-    def __init__(
-        self, 
-        in_dim: int, 
-        hidden_dims: tuple[int, ...]
-    ): 
-        super().__init__() 
-        dims = (in_dim,) + tuple(hidden_dims) + (1,)
-        self.convs = nn.ModuleList([GCNConv(dims[i], dims[i + 1]) for i in range(len(dims) - 1)])
-
-    def forward(
-        self, 
-        x, 
-        edge_index, 
-        edge_weight=None 
-    ): 
-        for conv in self.convs[:-1]: 
-            x = conv(x, edge_index, edge_weight=edge_weight)
-            x = F.relu(x)
-        x = self.convs[-1](x, edge_index, edge_weight=edge_weight)
-        return x.squeeze(-1) 
-
-class GCNGraphRegressor(BaseEstimator, RegressorMixin): 
-
-    def __init__(
-        self,
-        hidden_dims: tuple[int, ...], 
-        *, 
-        k: int = 5, 
-        epochs: int = 1000, 
-        lr: float = 1e-3,
-        weight_decay: float = 0.0, 
-        dropout: float = 0.0, 
-        bandwidth_km: float = 250.0, 
-        directed: bool = False, 
-        device: str = "cpu", 
-        random_state: int = 0
-    ): 
-        self.hidden_dims = hidden_dims
-        self.k = k 
-        self.epochs = epochs 
-        self.lr = lr           
-        self.weight_decay = weight_decay
-        self.dropout = dropout
-        self.bandwidth_km = bandwidth_km
-        self.directed = directed
-        self.device = device
-        self.random_state = random_state
-
-    def fit(self, X, y, coords=None): 
-
-        if coords is None: 
-            raise ValueError("GCNGraphRegressor required coords=(lat,lon) passed "
-                             "by CrossValidator")
-
-        X = np.asarray(X, dtype=np.float64)
-        y = np.asarray(y, dtype=np.float64)
-
-        if y.ndim == 2 and y.shape[1] == 1: 
-            y = y.ravel() 
-        if y.ndim != 1: 
-            raise ValueError(f"only 1d regression supported, got shape {y.shape}")
-
-        torch.manual_seed(self.random_state)
-        graph = build_knn_graph_from_coords(coords, k=self.k, directed=self.directed)
-        data  = to_pyg_data(graph, x=X, y=y, undirect_mean=False)
-
-        device = torch.device(self.device)
-        self.model_ = _GCNRegressorNet(in_dim=X.shape[1], hidden_dims=tuple(self.hidden_dims)).to(device)
-
-        data = data.to(self.device)
-        if data is None or not hasattr(data, "edge_attr") or not hasattr(data, "edge_index"): 
-            raise ValueError("stupid fucking type check fuck you lsp")
-        if data.edge_attr is None or data.edge_index is None: 
-            raise ValueError("also a stupid fucking type check")
-        
-        optimizer = torch.optim.Adam(self.model_.parameters(), lr=float(self.lr), 
-                                     weight_decay=self.weight_decay)
-        loss_fn = nn.MSELoss() 
-
-        self.model_.train()
-        for _ in range(int(self.epochs)): 
-            optimizer.zero_grad() 
-
-            d_km = data.edge_attr.view(-1)
-            edge_weight = torch.exp(-((d_km / float(self.bandwidth_km)) ** 2))
-             
-            out = self.model_(data.x, data.edge_index, edge_weight=edge_weight)
-            loss = loss_fn(out, data.y)
-
-            loss.backward() 
-            optimizer.step() 
-
-        return self 
-
-    def predict(self, X, coords=None):
-        if coords is None: 
-            raise ValueError("GCNGraphRegressor required coords=(lat,lon) "
-                             "passed by CrossValidator")
-
-        X = np.asarray(X, dtype=np.float64)
-
-        graph = build_knn_graph_from_coords(coords, k=self.k, directed=self.directed)
-        data  = to_pyg_data(graph, x=X, undirect_mean=False)
-
-        data   = data.to(self.device)
-        if data is None or not hasattr(data, "edge_attr") or not hasattr(data, "edge_index"): 
-            raise ValueError("stupid fucking type check fuck you lsp")
-        if data.edge_attr is None or data.edge_index is None: 
-            raise ValueError("also a stupid fucking type check")
-
-        self.model_.eval() 
-        with torch.no_grad(): 
-            d_km = data.edge_attr.view(-1)
-            edge_weight = torch.exp(-((d_km / float(self.bandwidth_km)) ** 2))
-            out = self.model_(data.x, data.edge_index, edge_weight=edge_weight)
-        return out.detach().cpu().numpy() 
 
 
 # ---------------------------------------------------------
@@ -547,9 +419,6 @@ def make_xgb_regressor(
         gpu=gpu,
         **kwargs 
     )
-
-def make_gcn_regressor(**kwargs):
-    return lambda: GCNGraphRegressor(**kwargs)
 
 def make_rf_classifier(n_estimators: int = 400, **kwargs):
     return lambda: RFClassifierWrapper(n_estimators=n_estimators, **kwargs)

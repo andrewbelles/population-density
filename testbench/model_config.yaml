@@ -106,3 +106,10 @@ models:
     reg_alpha: 0.32645243669276236
     reg_lambda: 0.16101223053866057
     gamma: 5.794661658824768
+  CorrectAndSmooth/Stacking:
+    adjacency: queen
+    correction_layers: 15
+    correction_alpha: 0.7596209674876471
+    smoothing_layers: 7
+    smoothing_alpha: 0.4039051057162327
+    autoscale: false

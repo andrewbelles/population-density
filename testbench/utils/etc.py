@@ -56,7 +56,7 @@ def load_metric_params(model_key: str) -> dict:
     return dict(params)
 
 def write_model_metrics(buf: io.StringIO, title: str, metrics: dict): 
-    buf.write(f"== {title} ==")
+    buf.write(f"\n== {title} ==\n")
     for key in ("accuracy", "f1_macro", "roc_auc"): 
         if key in metrics: 
             buf.write(f"{key}: {metrics[key]:.4f}\n")
@@ -77,6 +77,8 @@ def write_graph_metrics(buf: io.StringIO, title: str, adj, P, y, coords):
     buf.write(f"\n== {title} ==\n")
     with contextlib.redirect_stdout(buf): 
         MetricAnalyzer._print_report(metrics)
+
+    return metrics 
 
 def write_model_summary(buf: io.StringIO, title: str, best_value: float): 
     buf.write(f"== {title} ==")

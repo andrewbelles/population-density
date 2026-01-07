@@ -38,10 +38,10 @@ def load_probs_labels_fips(proba_path=PROBA_PATH):
     class_labels = np.asarray(oof["class_labels"]).reshape(-1) 
     return P, y, fips, class_labels  
 
-def load_probs_for_fips(fips: NDArray[np.str_], proba_path=PROBA_PATH) -> NDArray: 
-    P, _, oof_fips, _ = load_probs_labels_fips(proba_path)
+def load_probs_for_fips(fips: NDArray[np.str_], proba_path=PROBA_PATH): 
+    P, _, oof_fips, class_labels = load_probs_labels_fips(proba_path)
     idx = align_on_fips(fips, oof_fips)
-    return P[idx]
+    return P[idx], class_labels
 
 def extract_oof_preds(oof, model_name=None): 
     preds = np.asarray(oof["preds"])
