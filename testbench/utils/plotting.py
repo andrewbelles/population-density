@@ -8,6 +8,8 @@
 
 import numpy as np 
 
+from inspect import signature, Parameter 
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt 
@@ -48,3 +50,10 @@ def save_or_show(figs, out_dir: str | None):
         for fig in figs.values(): 
             fig.tight_layout() 
         plt.show()
+
+def call_plot(fn, data, **kwargs): 
+    params = signature(fn).parameters 
+    if any(p.kind == Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(data, **kwargs)
+    filtered = {k: v for k, v in kwargs.items() if k in params} 
+    return fn(data, **filtered)

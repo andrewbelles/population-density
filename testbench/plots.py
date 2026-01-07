@@ -29,8 +29,10 @@ from testbench.utils.plotting import (
     get_pred_labels,
     get_label_indices, 
     pick_variant, 
-    save_or_show
+    save_or_show,
+    call_plot 
 )
+from utils.helpers import project_path
 
 # ---------------------------------------------------------
 # Testbench Data Fetchers 
@@ -109,7 +111,7 @@ def plot_confusion(data):
     ax.set_ylabel("True")
     return fig 
 
-def plot_class_distance(data): 
+def plot_class_distance(data, log_hist: bool = False): 
     _, data = pick_variant(data)
     figs = {}
     for key, meta in (("stacking", data["stacking"]), ("cs", data["cs"])): 
@@ -127,6 +129,8 @@ def plot_class_distance(data):
         ax.set_title(f"Signed Class Distance ({key})")
         ax.set_xlabel("pred - true")
         ax.set_ylabel("count")
+        if log_hist: 
+            ax.set_yscale("log")
         figs[f"stacking_class_distance_{key}"] = fig 
 
     return figs 
@@ -167,7 +171,7 @@ def plot_graph_metric_bars(data, metric_key="avg_degree"):
     ax.set_ylabel(metric_key)
     return fig 
 
-def plot_degree_distribution(data): 
+def plot_degree_distribution(data, log_hist: bool = False): 
     items   = data["graphs"] + data.get("learned", [])
     fig, ax = plt.subplots() 
 
@@ -179,10 +183,12 @@ def plot_degree_distribution(data):
     ax.set_title("Degree Distribution")
     ax.set_xlabel("degree")
     ax.set_ylabel("count")
+    if log_hist: 
+        ax.set_xscale("log")
     ax.legend() 
     return fig 
 
-def plot_edge_weight_distribution(data): 
+def plot_edge_weight_distribution(data, log_hist: bool = False): 
     items   = data["graphs"] + data.get("learned", [])
     fig, ax = plt.subplots() 
 
@@ -195,6 +201,8 @@ def plot_edge_weight_distribution(data):
     ax.set_title("Edge Weight Distribution")
     ax.set_xlabel("weight")
     ax.set_ylabel("count")
+    if log_hist: 
+        ax.set_xscale("log")
     ax.legend() 
     return fig 
 
@@ -231,7 +239,7 @@ def plot_edge_weight_hist(data):
     ax.legend()
     return fig 
 
-def plot_cs_distance(data): 
+def plot_cs_distance(data, log_hist: bool = False): 
     fig, ax = plt.subplots() 
     for variant, split in data.items(): 
         m      = split["cs"]["metadata"]
@@ -248,6 +256,8 @@ def plot_cs_distance(data):
     ax.set_title("Signed Class Distance (Downstream C+S)")
     ax.set_xlabel("pred - true")
     ax.set_ylabel("count")
+    if log_hist: 
+        ax.set_yscale("log")
     ax.legend() 
     return fig 
 
@@ -266,12 +276,14 @@ class Plotter:
         *, 
         cross: str, 
         out_dir: str | None, 
+        log_hist: bool = False, 
         **kwargs
     ): 
-        self.group   = group 
-        self.cross   = cross 
-        self.out_dir = out_dir 
-        self.kwargs  = kwargs 
+        self.group    = group 
+        self.cross    = cross 
+        self.out_dir  = out_dir 
+        self.log_hist = log_hist  
+        self.kwargs   = kwargs 
 
     def run(self, selected=None):
         data  = self.group.build(cross=self.cross, **self.kwargs)
@@ -279,7 +291,7 @@ class Plotter:
         
         figs = {}
         for name, fn in plots.items(): 
-            out = fn(data)
+            out = call_plot(fn, data, log_hist=self.log_hist)
             if isinstance(out, dict): 
                 figs.update(out)
             else: 
@@ -291,13 +303,6 @@ class Plotter:
 # ---------------------------------------------------------
 # Test Groups Definition 
 # ---------------------------------------------------------
-
-'''
-Corrective Edge Ratio        | 0.3086    
-Recoverable Error Rate       | 0.9070    
-Dist-Weighted RER            | 0.8549    
-Locality Ratio               | 0.8666    
-'''
 
 PLOT_GROUPS = {
     "stacking": PlotGroup(
@@ -346,13 +351,16 @@ PLOT_GROUPS = {
 # Main Entry 
 # --------------------------------------------------------- 
 
+OUT_DIR = project_path("testbench", "images") 
+
 def main(): 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--group", choices=PLOT_GROUPS.keys(), required=True)
     parser.add_argument("--plots", nargs="*", default=None)
     parser.add_argument("--cross", choices=["off", "on", "both"], default="both")
-    parser.add_argument("--out", default=None)
+    parser.add_argument("--out", default=OUT_DIR)
     parser.add_argument("--metric-keys", nargs="*", default=None)
+    parser.add_argument("--log-hist", action="store_true")
     args = parser.parse_args()
 
     group   = PLOT_GROUPS[args.group]
@@ -360,6 +368,7 @@ def main():
         group,
         cross=args.cross,
         out_dir=args.out,
+        log_hist=args.log_hist, 
         metric_keys=args.metric_keys 
     )
     plotter.run()
