@@ -6,11 +6,12 @@
 # 
 # 
 
-import os, re
+import os, re, yaml
+from pathlib import Path
 
 import numpy as np 
 from numpy.typing import ArrayLike, NDArray
-from typing import Any, Callable, Sequence 
+from typing import Any, Callable, Sequence, Dict  
 from sklearn.preprocessing import StandardScaler
 
 from abc import ABC, abstractmethod
@@ -28,6 +29,9 @@ def project_path(*args):
     root = os.environ.get("PROJECT_ROOT", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, *args)
 
+def align_on_fips(fips_order, fips_vec): 
+    idx_map = {f: i for i, f in enumerate(fips_vec)}
+    return np.array([idx_map[f] for f in fips_order], dtype=int) 
 
 def unwrap_scalar(v): 
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v 
@@ -92,6 +96,33 @@ def make_cfg_gap_factory(feature_names):
     viirs_idx = int(np.where(names == "cross__cross_viirs_log_mean")[0][0])
     return lambda: [ConfigGapTransformer(integ_idx, viirs_idx)]
 
+def load_yaml_config(path: Path) -> Dict[str, Any]: 
+    if not path.exists(): 
+        return {}
+    with path.open("r", encoding="utf-8") as handle: 
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict): 
+        raise ValueError(f"config file {path} must contain a mapping at root")
+    return data 
+
+def save_yaml_config(path: Path, data: Dict[str, Any]): 
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle: 
+        yaml.safe_dump(data, handle, sort_keys=False)
+
+def save_model_config(path: str, model_key: str, params: Dict[str, Any]): 
+    config_path = Path(path) 
+    data = load_yaml_config(config_path)
+
+    models = data.get("models")
+    if models is None: 
+        models = {}
+    elif not isinstance(models, dict): 
+        raise ValueError(f"config file {config_path} has a non-mapping 'models' entry")
+
+    models[model_key] = params 
+    data["models"] = models 
+    save_yaml_config(config_path, data)
 
 # ---------------------------------------------------------
 # Fold/Fit Functions 

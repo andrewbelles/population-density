@@ -18,6 +18,7 @@ from scipy.io import loadmat
 
 from utils.helpers import (
     _mat_str_vector,
+    align_on_fips
 )
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
@@ -618,10 +619,6 @@ class ConcatSpec(TypedDict):
     path: str 
     loader: Callable[[str], DatasetDict]
 
-def _align_on_fips(fips_order, fips_vec): 
-    idx_map = {f: i for i, f in enumerate(fips_vec)}
-    return np.array([idx_map[f] for f in fips_order], dtype=int) 
-
 def _oof_feature_names(model_names, class_labels, n_classes): 
     if class_labels.size: 
         labels = [int(c) for c in class_labels]
@@ -689,7 +686,7 @@ def load_concat_datasets(
     if not common: 
         raise ValueError("no common sample_ids across specs")
 
-    idx_label  = _align_on_fips(common, label_data["sample_ids"])
+    idx_label  = align_on_fips(common, label_data["sample_ids"])
     y = y[idx_label]
     
     coords = np.zeros((len(common), 2), dtype=np.float64)
@@ -698,7 +695,7 @@ def load_concat_datasets(
     name_blocks = []
     for s in specs: 
         d   = data[s["name"]]
-        idx = _align_on_fips(common, d["sample_ids"])
+        idx = align_on_fips(common, d["sample_ids"])
         X   = np.asarray(d["features"])[idx]
 
         names = d.get("feature_names")

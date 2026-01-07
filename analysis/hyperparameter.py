@@ -8,16 +8,14 @@
 
 from numpy.typing import NDArray
 
-import optuna, yaml, itertools 
+import optuna, itertools 
 from optuna.samplers import CmaEsSampler, TPESampler
 
-from pathlib import Path 
 import numpy as np 
 from abc import ABC, abstractmethod 
 from typing import Any, Callable, Dict, Literal 
 
 from preprocessing.loaders import (
-    _align_on_fips,
     load_oof_predictions
 )
 
@@ -40,7 +38,10 @@ from models.graph.construction import (
 
 from sklearn.metrics import accuracy_score
 
-from utils.helpers import make_train_mask
+from utils.helpers import (
+    make_train_mask,
+    align_on_fips 
+)
 
 # ---------------------------------------------------------
 # Generalize Interface/Contract for Optimizer 
@@ -335,7 +336,7 @@ class MetricCASEvaluator(OptunaEvaluator):
             raise ValueError("no common fips between dataset and oof probs")
 
         if len(common) != len(fips): 
-            idx = _align_on_fips(common, fips)
+            idx = align_on_fips(common, fips)
             X = X[idx] 
             y = y[idx]
             fips = fips[idx]
@@ -581,37 +582,9 @@ def define_gate_space(trial):
         "batch_norm": trial.suggest_categorical("batch_norm", [True, False])
     }
 
+# --------------------------------------------------------- 
+# Static Helpers 
 # ---------------------------------------------------------
-# Helper functions  
-# ---------------------------------------------------------
-
-def _load_yaml_config(path: Path) -> Dict[str, Any]: 
-    if not path.exists(): 
-        return {}
-    with path.open("r", encoding="utf-8") as handle: 
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict): 
-        raise ValueError(f"config file {path} must contain a mapping at root")
-    return data 
-
-def _save_yaml_config(path: Path, data: Dict[str, Any]): 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle: 
-        yaml.safe_dump(data, handle, sort_keys=False)
-
-def _save_model_config(path: str, model_key: str, params: Dict[str, Any]): 
-    config_path = Path(path) 
-    data = _load_yaml_config(config_path)
-
-    models = data.get("models")
-    if models is None: 
-        models = {}
-    elif not isinstance(models, dict): 
-        raise ValueError(f"config file {config_path} has a non-mapping 'models' entry")
-
-    models[model_key] = params 
-    data["models"] = models 
-    _save_yaml_config(config_path, data)
 
 def _load_probs_for_fips(
     proba_path: str, 
@@ -621,7 +594,7 @@ def _load_probs_for_fips(
 ): 
     oof  = load_oof_predictions(proba_path)
     fips = np.asarray(oof["fips_codes"]).astype("U5")
-    idx  = _align_on_fips(fips_order, fips)
+    idx  = align_on_fips(fips_order, fips)
 
     probs = np.asarray(oof["probs"], dtype=np.float64)
     if probs.ndim != 3: 

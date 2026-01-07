@@ -16,6 +16,10 @@ from preprocessing.loaders import (
         DatasetDict 
 )
 
+from utils.helpers import (
+    align_on_fips
+)
+
 class DisagreementSpec(TypedDict): 
     name: str 
     raw_path: str 
@@ -23,10 +27,6 @@ class DisagreementSpec(TypedDict):
     oof_path: str 
     oof_loader: Callable[[str], OOFDatasetDict]
 
-
-def _align_on_fips(fips_order, fips_vec): 
-    idx_map = {f: i for i, f in enumerate(fips_vec)}
-    return np.array([idx_map[f] for f in fips_order], dtype=int)
 
 def build_disagreement_dataset(specs: list[DisagreementSpec]) -> DatasetDict: 
 
@@ -53,8 +53,8 @@ def build_disagreement_dataset(specs: list[DisagreementSpec]) -> DatasetDict:
         raw  = raw_data[name]
         oof  = oof_data[name]
 
-        idx_raw = _align_on_fips(common, raw["sample_ids"])
-        idx_oof = _align_on_fips(common, oof["fips_codes"])
+        idx_raw = align_on_fips(common, raw["sample_ids"])
+        idx_oof = align_on_fips(common, oof["fips_codes"])
 
         X = raw["features"][idx_raw]
         X_blocks.append(X)
@@ -118,7 +118,7 @@ def load_pass_through_stacking(
         fips_sets.append(set(oof_data[name]["fips_codes"]))
     common = [f for f in label_fips if all(f in s for s in fips_sets)]
     
-    idx_label = _align_on_fips(common, label_data["sample_ids"])
+    idx_label = align_on_fips(common, label_data["sample_ids"])
     y = y[idx_label]
 
     prob_blocks = []
@@ -127,7 +127,7 @@ def load_pass_through_stacking(
 
         name = s["name"]
         oof  = oof_data[name]
-        idx_oof = _align_on_fips(common, oof["fips_codes"])
+        idx_oof = align_on_fips(common, oof["fips_codes"])
 
         model_names = oof["model_names"].tolist() 
         if "model_name" in s: 
@@ -163,7 +163,7 @@ def load_pass_through_stacking(
             names = list(raw["feature_names"])
             if raw_name in names: 
                 col = names.index(raw_name)
-                idx_raw = _align_on_fips(common, raw["sample_ids"])
+                idx_raw = align_on_fips(common, raw["sample_ids"])
                 pass_blocks.append(raw["features"][idx_raw, col].reshape(-1, 1))
                 pass_names.append(f"{name}__{raw_name}")
                 found = True 
