@@ -51,12 +51,14 @@ class CorrectAndSmooth:
         )
         edge_index, edge_weight = self._prepare_edges(adj)
 
+        y_train = y_true_t[train_mask_t]
+
         y_corr = self.model_.correct(
-            y_soft_t, y_true_t, train_mask_t, edge_index, edge_weight 
+            y_soft_t, y_train, train_mask_t, edge_index, edge_weight 
         )
 
         y_smooth = self.model_.smooth(
-            y_corr, y_true_t, train_mask_t, edge_index, edge_weight 
+            y_corr, y_train, train_mask_t, edge_index, edge_weight 
         )
 
         self._last_probs = y_smooth.detach().cpu().numpy()

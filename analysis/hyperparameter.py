@@ -252,7 +252,7 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
 
         P_cs = cs(self.P, self.y_train, self.train_mask, W)
         pred_labels = cs.predict(P_cs)
-        return accuracy_score(self.y_true, pred_labels)
+        return accuracy_score(self.y_true, pred_labels[self.test_mask])
 
 # ---------------------------------------------------------
 # Metric Learning Evaluator  
@@ -554,7 +554,7 @@ def define_mobility_space(trial):
     }
 
 def make_layer_choices(
-    sizes=(128, 256, 512, 1024),
+    sizes=(32, 64, 128, 256),
     min_layers=1,
     max_layers=3
 ): 

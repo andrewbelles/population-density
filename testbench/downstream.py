@@ -59,9 +59,9 @@ EDGE_PASSTHROUGH_KEY = "StackingPassthrough/EDGE"
 CS_EDGE_KEY             = "CorrectAndSmooth/Stacking_EDGE"
 CS_EDGE_PASSTHROUGH_KEY = "CorrectAndSmooth/StackingPassthrough_EDGE"
 
-METRIC_TRIALS = 300 
+METRIC_TRIALS = 250 
 CS_TRIALS     = 150 
-EARLY_STOP    = 40
+EARLY_STOP    = 25
 EARLY_STOP_EP = 1e-4 # tolerance to consider a result as improved 
 RANDOM_STATE  = 0 
 TRAIN_SIZE    = 0.3 
