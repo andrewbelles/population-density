@@ -108,8 +108,25 @@ models:
     gamma: 5.794661658824768
   CorrectAndSmooth/Stacking:
     adjacency: queen
-    correction_layers: 15
-    correction_alpha: 0.7596209674876471
+    correction_layers: 3
+    correction_alpha: 0.9309861096542291
     smoothing_layers: 7
-    smoothing_alpha: 0.4039051057162327
+    smoothing_alpha: 0.12706762254616344
     autoscale: false
+  CorrectAndSmooth/StackingPassthrough:
+    adjacency: queen
+    correction_layers: 18
+    correction_alpha: 0.5565568609541383
+    smoothing_layers: 13
+    smoothing_alpha: 0.3535515149460493
+    autoscale: false
+  Stacking/EDGE:
+    hidden_dims: 64-64-32
+    lr: 0.00012368369651954874
+    weight_decay: 0.0002812730617800568
+    epochs: 1415
+    batch_size: 16384
+    dropout: 0.20115100084568094
+    residual: false
+    batch_norm: false
+    dataset: VIIRS+TIGER+NLCD+COORDS

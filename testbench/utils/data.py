@@ -23,6 +23,7 @@ from preprocessing.loaders import (
     load_viirs_nchs,
     load_coords_from_mobility,
     load_compact_dataset,
+    load_tiger_noncore_binary,
     load_concat_datasets,
     make_oof_dataset_loader,
     load_oof_predictions, 
@@ -53,7 +54,7 @@ BASE: dict[str, ConcatSpec] = {
     "TIGER": {
         "name": "TIGER",
         "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
-        "loader": load_compact_dataset
+        "loader": load_tiger_noncore_binary 
     },
     "NLCD": {
         "name": "NLCD",

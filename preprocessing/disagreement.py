@@ -140,11 +140,17 @@ def load_pass_through_stacking(
             m_name = model_names[0] 
 
         probs = oof["probs"][idx_oof, m_idx, :]
-        prob_blocks.append(probs)
-
-        class_labels = oof["class_labels"].reshape(-1)
-        for c in class_labels: 
-            prob_names.append(f"{name}__{m_name}__p{int(c)}")
+        if probs.ndim != 2: 
+            raise ValueError(f"{name} expected 2d probs, got {probs.shape}")
+        
+        if probs.shape[1] == 2: 
+            probs = probs[:, [1]]
+            prob_names.append(f"{name}__{m_name}_p1")
+        else: 
+            prob_blocks.append(probs)
+            class_labels = oof["class_labels"].reshape(-1)
+            for c in class_labels: 
+                prob_names.append(f"{name}__{m_name}__p{int(c)}")
 
     pass_blocks = []
     pass_names  = []

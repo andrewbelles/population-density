@@ -367,7 +367,7 @@ def test_stacking(buf: io.StringIO, passthrough: bool = False):
         }
     }
 
-def test_cs(buf: io.StringIO, passthrough: bool = False): 
+def test_cs_opt(buf: io.StringIO, passthrough: bool = False): 
 
     name  = "StackingPassthrough" if passthrough else "Stacking"
     proba = PROBA_PASSTHROUGH_PATH if passthrough else PROBA_PATH
@@ -424,7 +424,7 @@ def test_cs(buf: io.StringIO, passthrough: bool = False):
         "params": best_params, 
         "metrics": metrics,
         "metadata": {
-            name: f"{key}/{adj_name}",
+            "name": f"{key}/{adj_name}",
             "probs": P, 
             "probs_corr": P_cs, 
             "train_mask": train_mask,
@@ -439,14 +439,14 @@ TESTS = {
     "expert_oof": test_expert_oof,
     "stacking_opt": test_stacking_optimize,
     "stacking": test_stacking,
-    "cs": test_cs
+    "cs_opt": test_cs_opt
 }
 
 def choice_function(name: str, cross: str, buf: io.StringIO): 
     '''
     Runs the appropriate combination of functions depending on passed opt cross 
     '''
-    CHOICE_SUBSET = {"stacking", "stacking_opt", "cs"}
+    CHOICE_SUBSET = {"stacking", "stacking_opt", "cs_opt"}
 
     if name not in CHOICE_SUBSET: 
         return False  
@@ -469,12 +469,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tests", nargs="*", default=None)
     parser.add_argument("--cross", choices=["off", "on", "both"], default="off")
+    parser.add_argument("--no-opt", action="store_true")
     args = parser.parse_args()
 
     buf = io.StringIO() 
 
     targets = args.tests or list(TESTS.keys())
     for name in targets: 
+        if args.no_opt:
+            if name.endswith("_opt"):
+                continue 
+
         fn = TESTS.get(name)
         if fn is None: 
             raise ValueError(f"unknown test: {name}")

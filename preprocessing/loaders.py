@@ -252,7 +252,45 @@ def load_viirs_nchs(filepath: str) -> DatasetDict:
         feature_names = _mat_str_vector(mat["feature_names"]).astype("U")
         feature_names = np.array([n.strip() for n in feature_names], dtype="U")
     else: 
-        feature_names = None 
+        feature_names = np.array([], dtype=np.str_) 
+
+    coords = np.zeros((X.shape[0],2), dtype=np.float64)
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": coords,
+        "feature_names": feature_names,
+        "sample_ids": fips
+    }
+
+
+def load_tiger_noncore_binary(filepath: str, *, noncore_label: int = 5) -> DatasetDict: 
+    mat = loadmat(filepath)
+
+    if "features" not in mat or "labels" not in mat: 
+        raise ValueError(f"{filepath} missing required keys 'features'/'labels'")
+
+    X = np.asarray(mat["features"], dtype=np.float64) 
+    y = np.asarray(mat["labels"], dtype=np.int64).reshape(-1)
+
+    # Collapse {0,4} into label 0, label 5 maps to 1 
+    if noncore_label not in np.unique(y): 
+        raise ValueError(f"noncore_label {noncore_label} not found in labels {np.unique(y)}")
+    y = (y == noncore_label).astype(np.int64)
+
+    if X.shape[0] != y.shape[0]: 
+        raise ValueError(f"features rows ({X.shape[0]}) != labels rows ({y.shape[0]})")
+
+    if "fips_codes" in mat: 
+        fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    else: 
+        raise ValueError(f"{filepath} missing fips_codes")
+
+    if "feature_names" in mat: 
+        feature_names = _mat_str_vector(mat["feature_names"]).astype("U")
+        feature_names = np.array([n.strip() for n in feature_names], dtype="U")
+    else: 
+        feature_names = np.array([], dtype=np.str_) 
 
     coords = np.zeros((X.shape[0],2), dtype=np.float64)
     return {
@@ -352,7 +390,16 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
 def load_stacking(filepaths: Sequence[str]) -> DatasetDict:  
     mats = [loadmat(p) for p in filepaths]
 
-    feats  = [np.asarray(m["features"], dtype=np.float64) for m in mats]
+    feats = []
+    for m in mats: 
+        X = np.asarray(m["features"], dtype=np.float64)
+        if X.ndim != 2: 
+            raise ValueError(f"expected 2d features, got {X.shape}")
+        # only yield the true probs for binary classes 
+        if X.shape[1] == 2: 
+            X = X[:, [1]] 
+        feats.append(X)
+
     labels = np.asarray(mats[0]["labels"]).reshape(-1) 
     fips_list = [_mat_str_vector(m["fips_codes"]).astype("U5") for m in mats]
 

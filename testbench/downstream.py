@@ -23,6 +23,7 @@ from models.graph.construction import make_queen_adjacency_factory
 
 from utils.helpers import (
     make_cfg_gap_factory,
+    normalize_hidden_dims,
     save_model_config,
     align_on_fips
 )
@@ -126,6 +127,7 @@ def _optimize_edge_metric(dataset_key: str, proba_path: str, model_key: str, buf
 
     base_adj = make_queen_adjacency_factory(SHAPEFILE)(list(fips))
 
+    best_params["hidden_dims"] = normalize_hidden_dims(best_params.get("hidden_dims"))
     best_params.pop("dataset")
     model = EdgeLearner(**best_params)
     model.fit(X, y, base_adj, train_mask=train_mask)
@@ -180,6 +182,7 @@ def _optimize_cs_on_metric(model_key: str, cs_key: str, proba_path: str, buf: io
     base_adj = make_queen_adjacency_factory(SHAPEFILE)(list(fips))
 
     # REPLACE W/ GENERIC FACTORY FOR OTHER METRICS 
+    params["hidden_dims"] = normalize_hidden_dims(params.get("hidden_dims"))
     model = EdgeLearner(**params)
     model.fit(X, y, base_adj, train_mask=train_mask)
     adj = model.build_graph(X, base_adj)

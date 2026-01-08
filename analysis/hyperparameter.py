@@ -500,6 +500,8 @@ def define_xgb_space(trial):
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-1, 1e2, log=True), 
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-1, 1e2, log=True),
 
+        "max_delta_step": trial.suggest_int("max_delta_step", 0, 10),
+
         "gamma": trial.suggest_float("gamma", 1e-1, 1e1, log=True), 
 
         "tree_method": "hist", 
@@ -514,6 +516,9 @@ def define_rf_space(trial):
         "min_samples_split": trial.suggest_int("min_samples_split", 10, 60), 
         "min_samples_leaf": trial.suggest_int("min_samples_leaf", 20, 100), 
         "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]), 
+
+        "class_weight": trial.suggest_categorical("class_weight", 
+                                                  [None, "balanced", "balanced_subsample"]),
 
         "criterion": trial.suggest_categorical("criterion", ["gini", "entropy", "log_loss"]),
 

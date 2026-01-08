@@ -54,6 +54,16 @@ def _as_tuple_str(x: str | Sequence[str] | None) -> tuple[str, ...]:
         return (x,)
     return tuple(str(v) for v in x)
 
+def normalize_hidden_dims(value): 
+    if value is None: 
+        return None 
+    if isinstance(value, str): 
+        return tuple(int(v) for v in value.split("-") if v)
+    if isinstance(value, (list, tuple)): 
+        return tuple(int(v) for v in value)
+    if isinstance(value, int): 
+        return (int(value),)
+    return value 
 
 # ---------------------------------------------------------
 # Dataset Manipulation  

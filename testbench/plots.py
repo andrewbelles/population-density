@@ -1,4 +1,4 @@
-#!/usr/env/python3 
+#!/usr/bin/env python3 
 # 
 # plots.py  Andrew Belles  Jan 7th, 2026 
 # 
@@ -14,7 +14,6 @@ import numpy as np
 from dataclasses import dataclass 
 from typing import Callable, Mapping
 
-from sklearn.metrics import confusion_matrix 
 
 import testbench.adjacency  as adjacency 
 import testbench.downstream as downstream
@@ -25,14 +24,22 @@ from testbench.utils.graph import coords_for_fips
 from testbench.utils.paths import MOBILITY_PATH
 
 from testbench.utils.plotting import (
+    apply_metric_ylim,
     get_labels,
     get_pred_labels,
     get_label_indices, 
     pick_variant, 
     save_or_show,
-    call_plot 
+    call_plot,
+    confusion_panel,
+    confidence_hist 
 )
 from utils.helpers import project_path
+
+# Silence-able logging 
+def _log(msg, quiet=False): 
+    if not quiet: 
+        print(msg)
 
 # ---------------------------------------------------------
 # Testbench Data Fetchers 
@@ -45,7 +52,7 @@ def build_stacking_data(*, cross: str = "off", **_):
     def _run(passthrough: bool): 
         return {
             "stacking": stacking.test_stacking(buf, passthrough)["metadata"],
-            "cs": stacking.test_cs(buf, passthrough)["metadata"]
+            "cs": stacking.test_cs_opt(buf, passthrough)["metadata"]
         }
 
     if cross == "both":
@@ -94,21 +101,17 @@ Stacking Plots
 '''
 
 def plot_confusion(data): 
-    _, data = pick_variant(data)
-    meta    = data["stacking"]
+    _, data   = pick_variant(data)
+    meta_b    = data["stacking"]
+    meta_cs   = data["cs"]
+    y_true    = np.asarray(meta_b["labels"]).reshape(-1)
+    labels    = get_labels(meta_b["class_labels"], meta_b["probs"].shape[1])
+    fig, axes = plt.subplots(1, 2, figsize=(10,7), sharey=True, constrained_layout=True)
+    im = confusion_panel(axes[0], y_true, meta_b["probs"], labels, "Base")
+    confusion_panel(axes[1], y_true, meta_cs["probs_corr"], labels, "C+S")
 
-    y_true  = np.asarray(meta["labels"]).reshape(-1)
-    P       = meta["probs"]
-    labels  = get_labels(meta["class_labels"], P.shape[1] if P.ndim > 1 else 2)
-    y_pred  = get_pred_labels(P, labels)
-
-    con_mat = confusion_matrix(y_true, y_pred, labels=labels)
-    fig, ax = plt.subplots() 
-    im = ax.imshow(con_mat, cmap="Blues")
-    fig.colorbar(im, ax=ax)
-    ax.set_title("Confusion Matrix (Stacking)")
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
+    fig.colorbar(im, ax=axes.ravel().tolist())
+    fig.suptitle("Confusion Matrices (Row %)")
     return fig 
 
 def plot_class_distance(data, log_hist: bool = False): 
@@ -136,24 +139,15 @@ def plot_class_distance(data, log_hist: bool = False):
     return figs 
 
 def plot_confidence_correctness(data): 
-    _, data = pick_variant(data)
-    meta    = data["stacking"]
+    _, data   = pick_variant(data)
+    y_true    = np.asarray(data["stacking"]["labels"]).reshape(-1)
+    labels    = get_labels(data["stacking"]["class_labels"], data["stacking"]["probs"].shape[1])
 
-    y_true  = np.asarray(meta["labels"]).reshape(-1)
-    P       = meta["probs"]
-    labels  = get_labels(meta["class_labels"], P.shape[1] if P.ndim > 1 else 2)
-    y_pred  = get_pred_labels(P, labels)
+    fig, axes = plt.subplots(1, 2, figsize=(10,7), sharey=True)
+    confidence_hist(axes[0], y_true, data["stacking"]["probs"], labels, "Base")
+    confidence_hist(axes[1], y_true, data["cs"]["probs_corr"], labels, "C+S")
 
-    conf    = P.max(axis=1) if P.ndim > 1 else P.reshape(-1)
-    correct = (y_pred == y_true)
-
-    fig, ax = plt.subplots() 
-    ax.hist(conf[correct], bins=25, alpha=0.7, label="correct")
-    ax.hist(conf[~correct], bins=25, alpha=0.7, label="incorrect")
-    ax.set_title("Confidence vs. Correctness")
-    ax.set_xlabel("max probability")
-    ax.set_ylabel("count")
-    ax.legend()
+    fig.suptitle("Confidence vs. Correctness")
     return fig 
 
 '''
@@ -169,6 +163,8 @@ def plot_graph_metric_bars(data, metric_key="avg_degree"):
     ax.set_title(f"Graph Metric: {metric_key}")
     ax.set_xlabel("adjacency")
     ax.set_ylabel(metric_key)
+
+    apply_metric_ylim(ax, values)
     return fig 
 
 def plot_degree_distribution(data, log_hist: bool = False): 
@@ -261,12 +257,15 @@ def plot_cs_distance(data, log_hist: bool = False):
     ax.legend() 
     return fig 
 
+# ---------------------------------------------------------
+# Plot interface 
+# ---------------------------------------------------------
+
 @dataclass(frozen=True)
 class PlotGroup: 
     name: str 
     build: Callable[..., dict]
     plots: Mapping[str, Callable[..., object]]
-
 
 class Plotter: 
     
@@ -277,20 +276,25 @@ class Plotter:
         cross: str, 
         out_dir: str | None, 
         log_hist: bool = False, 
+        quiet: bool = False, 
         **kwargs
     ): 
         self.group    = group 
         self.cross    = cross 
         self.out_dir  = out_dir 
-        self.log_hist = log_hist  
+        self.log_hist = log_hist
+        self.quiet    = quiet 
         self.kwargs   = kwargs 
 
     def run(self, selected=None):
+        _log(f"[{self.group.name}] build data", quiet=self.quiet)
         data  = self.group.build(cross=self.cross, **self.kwargs)
         plots = self.group.plots if not selected else {k: self.group.plots[k] for k in selected}
-        
+        _log(f"[{self.group.name}] plots: {len(plots)}", quiet=self.quiet)
+
         figs = {}
         for name, fn in plots.items(): 
+            _log(f"[{self.group.name}] plot {name}", quiet=self.quiet)
             out = call_plot(fn, data, log_hist=self.log_hist)
             if isinstance(out, dict): 
                 figs.update(out)
@@ -355,23 +359,37 @@ OUT_DIR = project_path("testbench", "images")
 
 def main(): 
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--group", choices=PLOT_GROUPS.keys(), required=True)
+    parser.add_argument("--group", choices=PLOT_GROUPS.keys(), default="all")
     parser.add_argument("--plots", nargs="*", default=None)
     parser.add_argument("--cross", choices=["off", "on", "both"], default="both")
     parser.add_argument("--out", default=OUT_DIR)
     parser.add_argument("--metric-keys", nargs="*", default=None)
     parser.add_argument("--log-hist", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    group   = PLOT_GROUPS[args.group]
-    plotter = Plotter(
-        group,
-        cross=args.cross,
-        out_dir=args.out,
-        log_hist=args.log_hist, 
-        metric_keys=args.metric_keys 
-    )
-    plotter.run()
+    if args.group == "all": 
+        for group in PLOT_GROUPS.values(): 
+            plotter = Plotter(
+                group,
+                cross=args.cross,
+                out_dir=args.out,
+                log_hist=args.log_hist, 
+                quiet=args.quiet, 
+                metric_keys=args.metric_keys 
+            )
+            plotter.run()
+    else: 
+        group   = PLOT_GROUPS[args.group]
+        plotter = Plotter(
+            group,
+            cross=args.cross,
+            out_dir=args.out,
+            log_hist=args.log_hist, 
+            quiet=args.quiet, 
+            metric_keys=args.metric_keys 
+        )
+        plotter.run()
 
 
 if __name__ == "__main__": 
