@@ -3,22 +3,24 @@ models:
     C: 88.74704576838334
     class_weight: balanced
   VIIRS/RandomForest:
-    n_estimators: 878
-    max_depth: 5
-    min_samples_split: 38
-    min_samples_leaf: 26
-    max_features: log2
+    n_estimators: 284
+    max_depth: 12
+    min_samples_split: 50
+    min_samples_leaf: 20
+    max_features: sqrt
+    class_weight: balanced_subsample
     criterion: log_loss
   VIIRS/XGBoost:
-    n_estimators: 857
-    learning_rate: 0.0114136429146054
-    max_depth: 5
-    subsample: 0.5893778835469077
-    colsample_bytree: 0.7452613937719975
-    min_child_weight: 11
-    reg_alpha: 0.1267710593233306
-    reg_lambda: 0.3650545129786881
-    gamma: 0.31940837489542023
+    n_estimators: 990
+    learning_rate: 0.00845225676576718
+    max_depth: 6
+    subsample: 0.7914229014113311
+    colsample_bytree: 0.8772934091281201
+    min_child_weight: 5
+    reg_alpha: 0.10019600081790797
+    reg_lambda: 33.67492429599059
+    max_delta_step: 0
+    gamma: 0.22414061436025323
   VIIRS/SVM:
     kernel: poly
     C: 968.3436192190226
@@ -27,98 +29,106 @@ models:
     coef0: 3.2274389635804623
     shrinking: true
   TIGER/Logistic:
-    C: 98.8997630923626
-    class_weight: null
+    C: 2.1690075737113705
+    class_weight: balanced
   TIGER/RandomForest:
-    n_estimators: 980
-    max_depth: 13
-    min_samples_split: 22
+    n_estimators: 311
+    max_depth: 14
+    min_samples_split: 15
     min_samples_leaf: 20
     max_features: log2
-    criterion: log_loss
+    class_weight: balanced
+    criterion: entropy
   TIGER/XGBoost:
-    n_estimators: 821
-    learning_rate: 0.005615104396686979
-    max_depth: 6
-    subsample: 0.5198102870984317
-    colsample_bytree: 0.7285160804048925
+    n_estimators: 434
+    learning_rate: 0.010423915185040915
+    max_depth: 5
+    subsample: 0.556197333472227
+    colsample_bytree: 0.8306788263233641
     min_child_weight: 17
-    reg_alpha: 0.8744232976636904
-    reg_lambda: 0.49835861374609747
-    gamma: 0.18897263858905256
+    reg_alpha: 4.1350500071175516
+    reg_lambda: 13.8942135833484
+    max_delta_step: 0
+    gamma: 0.4312050246203718
   NLCD/Logistic:
     C: 1.6858411657107533
     class_weight: null
   NLCD/RandomForest:
-    n_estimators: 890
-    max_depth: 7
-    min_samples_split: 28
-    min_samples_leaf: 22
+    n_estimators: 299
+    max_depth: 15
+    min_samples_split: 15
+    min_samples_leaf: 20
     max_features: log2
-    criterion: gini
+    class_weight: balanced
+    criterion: log_loss
   NLCD/XGBoost:
-    n_estimators: 857
-    learning_rate: 0.0114136429146054
-    max_depth: 5
-    subsample: 0.5893778835469077
-    colsample_bytree: 0.7452613937719975
-    min_child_weight: 11
-    reg_alpha: 0.1267710593233306
-    reg_lambda: 0.3650545129786881
-    gamma: 0.31940837489542023
+    n_estimators: 766
+    learning_rate: 0.05122751477756343
+    max_depth: 6
+    subsample: 0.8843867868056424
+    colsample_bytree: 0.5254038725892679
+    min_child_weight: 12
+    reg_alpha: 1.6597285892086697
+    reg_lambda: 52.18242710755702
+    max_delta_step: 7
+    gamma: 0.4135918961488636
   Stacking/Logistic:
-    C: 9.943748541572582
+    C: 0.011601887548027701
     class_weight: null
   Stacking/RandomForest:
-    n_estimators: 589
-    max_depth: 14
-    min_samples_split: 25
-    min_samples_leaf: 20
-    max_features: sqrt
-    criterion: entropy
+    n_estimators: 319
+    max_depth: 15
+    min_samples_split: 16
+    min_samples_leaf: 21
+    max_features: log2
+    class_weight: balanced_subsample
+    criterion: gini
   Stacking/XGBoost:
-    n_estimators: 951
-    learning_rate: 0.009575483751394718
-    max_depth: 5
-    subsample: 0.7650981624202555
-    colsample_bytree: 0.791735379765745
-    min_child_weight: 19
-    reg_alpha: 26.650708709266215
-    reg_lambda: 59.75293637568018
-    gamma: 0.3078629370840729
+    n_estimators: 387
+    learning_rate: 0.010051506084660817
+    max_depth: 3
+    subsample: 0.7865308816474262
+    colsample_bytree: 0.6157624371788805
+    min_child_weight: 7
+    reg_alpha: 5.748291778269796
+    reg_lambda: 0.114900690488732
+    max_delta_step: 9
+    gamma: 0.10218589483781253
   StackingPassthrough/Logistic:
-    C: 3.131060709581739
+    C: 91.3583297855463
     class_weight: null
   StackingPassthrough/RandomForest:
-    n_estimators: 155
-    max_depth: 8
-    min_samples_split: 43
+    n_estimators: 617
+    max_depth: 13
+    min_samples_split: 48
     min_samples_leaf: 20
-    max_features: log2
-    criterion: gini
+    max_features: sqrt
+    class_weight: balanced_subsample
+    criterion: entropy
   StackingPassthrough/XGBoost:
-    n_estimators: 893
-    learning_rate: 0.0035348446686374415
-    max_depth: 6
-    subsample: 0.6862433424195671
-    colsample_bytree: 0.6747034611430234
-    min_child_weight: 7
-    reg_alpha: 0.32645243669276236
-    reg_lambda: 0.16101223053866057
-    gamma: 5.794661658824768
+    n_estimators: 605
+    learning_rate: 0.0021163466433047787
+    max_depth: 4
+    subsample: 0.5305692011213698
+    colsample_bytree: 0.8141212394764809
+    min_child_weight: 14
+    reg_alpha: 0.6847446417457085
+    reg_lambda: 0.16035664192996582
+    max_delta_step: 1
+    gamma: 0.5657093339055935
   CorrectAndSmooth/Stacking:
     adjacency: queen
-    correction_layers: 3
-    correction_alpha: 0.9309861096542291
-    smoothing_layers: 7
-    smoothing_alpha: 0.12706762254616344
+    correction_layers: 23
+    correction_alpha: 0.5635968918884859
+    smoothing_layers: 13
+    smoothing_alpha: 0.028440899563739255
     autoscale: false
   CorrectAndSmooth/StackingPassthrough:
     adjacency: queen
-    correction_layers: 18
-    correction_alpha: 0.5565568609541383
+    correction_layers: 14
+    correction_alpha: 0.40416397155663497
     smoothing_layers: 13
-    smoothing_alpha: 0.3535515149460493
+    smoothing_alpha: 0.05831115312338367
     autoscale: false
   Stacking/EDGE:
     hidden_dims: 64-64-32
