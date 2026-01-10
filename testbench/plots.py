@@ -11,17 +11,22 @@ import matplotlib.pyplot as plt
 
 import numpy as np 
 
+import geopandas 
+
 from dataclasses import dataclass 
 from typing import Callable, Mapping
 
-
-import testbench.adjacency  as adjacency 
-import testbench.downstream as downstream
-import testbench.stacking   as stacking 
+import testbench.adjacency   as adjacency 
+import testbench.downstream  as downstream
+import testbench.stacking    as stacking 
+import testbench.round_robin as round_robin
 
 from testbench.utils.oof   import load_probs_labels_fips 
 from testbench.utils.graph import coords_for_fips 
-from testbench.utils.paths import MOBILITY_PATH
+from testbench.utils.paths import (
+    MOBILITY_PATH,
+    SHAPEFILE 
+) 
 
 from testbench.utils.plotting import (
     apply_metric_ylim,
@@ -45,9 +50,14 @@ def _log(msg, quiet=False):
 # Testbench Data Fetchers 
 # ---------------------------------------------------------
 
-def build_stacking_data(*, cross: str = "off", **_):
+def build_stacking_data(*, cross: str = "off", round_robin_stack: bool = False, **_):
 
     buf = io.StringIO() 
+
+    if round_robin_stack:
+        stack = round_robin.test_round_robin_stacking(buf, n_trials=200, quiet=True)
+        cs    = round_robin.test_round_robin_cs(buf, n_trials=200)
+        return {"base": {"stacking": stack["metadata"], "cs": cs["metadata"]}}
 
     def _run(passthrough: bool): 
         return {
@@ -139,15 +149,61 @@ def plot_class_distance(data, log_hist: bool = False):
     return figs 
 
 def plot_confidence_correctness(data): 
+    _, data    = pick_variant(data)
+    meta_b     = data["stacking"]
+    meta_cs    = data["cs"]
+
+    y_true     = np.asarray(meta_b["labels"]).reshape(-1)
+    labels     = get_labels(meta_b["class_labels"], meta_b["probs"].shape[1])
+
+    train_mask = meta_cs.get("train_mask")
+    if train_mask is not None: 
+        test_mask = ~np.asarray(train_mask)
+        y_true    = y_true[test_mask]
+        P_base    = meta_b["probs"][test_mask]
+        P_cs      = meta_cs["probs_corr"][test_mask]
+    else:
+        P_base    = meta_b["probs"]
+        P_cs      = meta_cs["probs_corr"]
+
+    fig, axes  = plt.subplots(1, 2, figsize=(10,7), sharey=True)
+    confidence_hist(axes[0], y_true, P_base, labels, "Base")
+    confidence_hist(axes[1], y_true, P_cs, labels, "C+S")
+
+    fig.suptitle("Confidence vs. Correctness (Test Samples)")
+    return fig 
+
+def plot_map_predictions(data): 
+    EXCLUDE_STATEFP = {"02", "15", "60", "66", "69", "72", "78"}
+
     _, data   = pick_variant(data)
-    y_true    = np.asarray(data["stacking"]["labels"]).reshape(-1)
-    labels    = get_labels(data["stacking"]["class_labels"], data["stacking"]["probs"].shape[1])
+    meta_b    = data["stacking"]
+    meta_cs   = data["cs"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10,7), sharey=True)
-    confidence_hist(axes[0], y_true, data["stacking"]["probs"], labels, "Base")
-    confidence_hist(axes[1], y_true, data["cs"]["probs_corr"], labels, "C+S")
+    fips      = np.asarray(meta_b["fips"]).reshape(-1)
+    y_true    = np.asarray(meta_b["labels"]).reshape(-1)
+    labels    = get_labels(meta_b["class_labels"], meta_b["probs"].shape[1]) 
+    gdf       = geopandas.read_file(SHAPEFILE)
+    gdf["GEOID"] = gdf["GEOID"].astype("U5")
+    gdf       = gdf[~gdf["STATEFP"].isin(EXCLUDE_STATEFP)]
 
-    fig.suptitle("Confidence vs. Correctness")
+    classes   = np.unique(y_true)
+    label_map = {c: l for c, l in zip(classes, labels)}
+    y_true    = np.array([label_map[v] for v in y_true], dtype=int)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 8), constrained_layout=True)
+    def _plot(ax, values, title, show_legend=False): 
+        mapping = {f: int(v) for f, v in zip(fips, values)}
+        view    = gdf.assign(pred=gdf["GEOID"].map(mapping))
+        view.plot(column="pred", categorical=True, legend=show_legend,
+                  missing_kwds={"color": "lightgrey"}, ax=ax)
+        ax.set_title(title)
+        ax.axis("off")
+
+    _plot(axes[0], get_pred_labels(meta_b["probs"], labels), "Base")
+    _plot(axes[1], get_pred_labels(meta_cs["probs_corr"], labels), "C+S")
+    _plot(axes[2], y_true, "True", show_legend=True)
+
     return fig 
 
 '''
@@ -315,7 +371,8 @@ PLOT_GROUPS = {
         plots={
             "confusion": plot_confusion,
             "class_distance": plot_class_distance,
-            "confidence": plot_confidence_correctness
+            "confidence": plot_confidence_correctness,
+            "map_confidence": plot_map_predictions
         }
     ),
     "adjacency": PlotGroup(
@@ -366,6 +423,7 @@ def main():
     parser.add_argument("--metric-keys", nargs="*", default=None)
     parser.add_argument("--log-hist", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--round-robin", action="store_true")
     args = parser.parse_args()
 
     if args.group == "all": 
@@ -376,7 +434,8 @@ def main():
                 out_dir=args.out,
                 log_hist=args.log_hist, 
                 quiet=args.quiet, 
-                metric_keys=args.metric_keys 
+                metric_keys=args.metric_keys,
+                round_robin_stack=args.round_robin
             )
             plotter.run()
     else: 
@@ -387,7 +446,8 @@ def main():
             out_dir=args.out,
             log_hist=args.log_hist, 
             quiet=args.quiet, 
-            metric_keys=args.metric_keys 
+            metric_keys=args.metric_keys,
+            round_robin_stack=args.round_robin
         )
         plotter.run()
 

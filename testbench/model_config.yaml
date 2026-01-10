@@ -1,26 +1,26 @@
 models:
   VIIRS/Logistic:
-    C: 88.74704576838334
-    class_weight: balanced
+    C: 99.52085994573153
+    class_weight: null
   VIIRS/RandomForest:
-    n_estimators: 284
+    n_estimators: 848
     max_depth: 12
-    min_samples_split: 50
-    min_samples_leaf: 20
-    max_features: sqrt
-    class_weight: balanced_subsample
-    criterion: log_loss
+    min_samples_split: 48
+    min_samples_leaf: 22
+    max_features: log2
+    class_weight: balanced
+    criterion: gini
   VIIRS/XGBoost:
-    n_estimators: 990
-    learning_rate: 0.00845225676576718
-    max_depth: 6
-    subsample: 0.7914229014113311
-    colsample_bytree: 0.8772934091281201
-    min_child_weight: 5
-    reg_alpha: 0.10019600081790797
-    reg_lambda: 33.67492429599059
-    max_delta_step: 0
-    gamma: 0.22414061436025323
+    n_estimators: 338
+    learning_rate: 0.02102330874348013
+    max_depth: 4
+    subsample: 0.7273735795474594
+    colsample_bytree: 0.5075159201745421
+    min_child_weight: 14
+    reg_alpha: 6.859416411328697
+    reg_lambda: 7.092543214735832
+    max_delta_step: 10
+    gamma: 2.3101522250182382
   VIIRS/SVM:
     kernel: poly
     C: 968.3436192190226
@@ -29,51 +29,51 @@ models:
     coef0: 3.2274389635804623
     shrinking: true
   TIGER/Logistic:
-    C: 2.1690075737113705
-    class_weight: balanced
+    C: 0.2560161525002872
+    class_weight: null
   TIGER/RandomForest:
-    n_estimators: 311
-    max_depth: 14
-    min_samples_split: 15
-    min_samples_leaf: 20
-    max_features: log2
-    class_weight: balanced
-    criterion: entropy
+    n_estimators: 989
+    max_depth: 15
+    min_samples_split: 24
+    min_samples_leaf: 22
+    max_features: sqrt
+    class_weight: null
+    criterion: log_loss
   TIGER/XGBoost:
-    n_estimators: 434
-    learning_rate: 0.010423915185040915
-    max_depth: 5
-    subsample: 0.556197333472227
-    colsample_bytree: 0.8306788263233641
-    min_child_weight: 17
-    reg_alpha: 4.1350500071175516
-    reg_lambda: 13.8942135833484
-    max_delta_step: 0
-    gamma: 0.4312050246203718
+    n_estimators: 929
+    learning_rate: 0.005521931737080449
+    max_depth: 6
+    subsample: 0.5680099293938581
+    colsample_bytree: 0.7475481870050057
+    min_child_weight: 10
+    reg_alpha: 2.9682530924124775
+    reg_lambda: 4.066509988551353
+    max_delta_step: 6
+    gamma: 1.5183959657469412
   NLCD/Logistic:
-    C: 1.6858411657107533
+    C: 11.05269144569142
     class_weight: null
   NLCD/RandomForest:
-    n_estimators: 299
-    max_depth: 15
-    min_samples_split: 15
+    n_estimators: 967
+    max_depth: 9
+    min_samples_split: 42
     min_samples_leaf: 20
     max_features: log2
-    class_weight: balanced
+    class_weight: null
     criterion: log_loss
   NLCD/XGBoost:
-    n_estimators: 766
-    learning_rate: 0.05122751477756343
-    max_depth: 6
-    subsample: 0.8843867868056424
-    colsample_bytree: 0.5254038725892679
-    min_child_weight: 12
-    reg_alpha: 1.6597285892086697
-    reg_lambda: 52.18242710755702
-    max_delta_step: 7
-    gamma: 0.4135918961488636
+    n_estimators: 981
+    learning_rate: 0.0249732861040606
+    max_depth: 4
+    subsample: 0.8122116705145822
+    colsample_bytree: 0.5473097703475733
+    min_child_weight: 15
+    reg_alpha: 0.26919058249260697
+    reg_lambda: 68.23493012435793
+    max_delta_step: 5
+    gamma: 0.6750312521595927
   Stacking/Logistic:
-    C: 0.011601887548027701
+    C: 0.19628224813442816
     class_weight: null
   Stacking/RandomForest:
     n_estimators: 319
@@ -118,17 +118,17 @@ models:
     gamma: 0.5657093339055935
   CorrectAndSmooth/Stacking:
     adjacency: queen
-    correction_layers: 23
-    correction_alpha: 0.5635968918884859
-    smoothing_layers: 13
-    smoothing_alpha: 0.028440899563739255
+    correction_layers: 8
+    correction_alpha: 0.8023780742154222
+    smoothing_layers: 7
+    smoothing_alpha: 0.10490968256143007
     autoscale: false
   CorrectAndSmooth/StackingPassthrough:
     adjacency: queen
-    correction_layers: 14
-    correction_alpha: 0.40416397155663497
+    correction_layers: 23
+    correction_alpha: 0.801809970254323
     smoothing_layers: 13
-    smoothing_alpha: 0.05831115312338367
+    smoothing_alpha: 0.15032642817532768
     autoscale: false
   Stacking/EDGE:
     hidden_dims: 64-64-32
@@ -140,3 +140,25 @@ models:
     residual: false
     batch_norm: false
     dataset: VIIRS+TIGER+NLCD+COORDS
+  RoundRobinStacking/Logistic:
+    C: 0.019982467392329464
+    class_weight: null
+  RoundRobinStacking/XGBoost:
+    n_estimators: 866
+    learning_rate: 0.008367738635708532
+    max_depth: 6
+    subsample: 0.5614807805731086
+    colsample_bytree: 0.7282794972942038
+    min_child_weight: 16
+    reg_alpha: 6.738263696848777
+    reg_lambda: 48.581395854987775
+    max_delta_step: 10
+    scale_pos_weight: 6.459879343165354
+    gamma: 0.3919782278155744
+  CorrectAndSmooth/RoundRobinStacking:
+    adjacency: queen
+    correction_layers: 4
+    correction_alpha: 0.9328461384872566
+    smoothing_layers: 10
+    smoothing_alpha: 0.09152769113230329
+    autoscale: false

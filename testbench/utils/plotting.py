@@ -35,6 +35,10 @@ def get_label_indices(y, labels):
     idx = {lbl: i for i, lbl in enumerate(labels)}
     return np.array([idx[v] for v in y], dtype=int)
 
+def get_test_mask(meta): 
+    train_mask = meta.get("train_mask")
+    return (~np.asarray(train_mask) if train_mask is not None else slice(None))
+
 def pick_variant(data): 
     for key in ("base", "passthrough"): 
         if key in data: 

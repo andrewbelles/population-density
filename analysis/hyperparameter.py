@@ -501,6 +501,7 @@ def define_xgb_space(trial):
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-1, 1e2, log=True),
 
         "max_delta_step": trial.suggest_int("max_delta_step", 0, 10),
+        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 1.0, 50.0, log=True),
 
         "gamma": trial.suggest_float("gamma", 1e-1, 1e1, log=True), 
 

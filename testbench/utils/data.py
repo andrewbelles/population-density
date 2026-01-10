@@ -19,6 +19,7 @@ from testbench.utils.paths import (
 from testbench.utils.transforms import apply_transforms
 
 from preprocessing.loaders import (
+    DatasetDict,
     load_stacking,
     load_viirs_nchs,
     load_coords_from_mobility,
@@ -51,10 +52,15 @@ BASE: dict[str, ConcatSpec] = {
         "path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
         "loader": load_viirs_nchs
     },
-    "TIGER": {
-        "name": "TIGER",
+    "TIGER_BIN": {
+        "name": "TIGER_BIN",
         "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
         "loader": load_tiger_noncore_binary 
+    },
+    "TIGER": {
+        "name": "tiger",
+        "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
+        "loader": load_compact_dataset
     },
     "NLCD": {
         "name": "NLCD",
@@ -165,3 +171,26 @@ def passthrough_loader(prob_files):
             data["features"] = apply_transforms(data["features"], transforms)
         return data 
     return _loader 
+
+def make_binary_loader(data, label: int): 
+    X     = data["features"]
+    y     = np.asarray(data["labels"]).reshape(-1)
+    y_bin = (y == label).astype(np.int64)
+
+    def _loader(_) -> DatasetDict: 
+        return {
+            "features": X, 
+            "labels": y_bin, 
+            "coords": data.get("coords"),
+            "feature_names": data.get("feature_names"),
+            "sample_ids": data.get("sample_ids")
+        }
+    return _loader 
+
+def load_dataset(dataset_key: str): 
+    spec = BASE[dataset_key] 
+    data = spec["loader"](spec["path"])
+    y    = np.asarray(data["labels"]).reshape(-1).astype(np.int64)
+    out  = dict(data)
+    out["labels"] = y 
+    return out 

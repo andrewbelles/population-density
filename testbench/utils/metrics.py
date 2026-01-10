@@ -92,3 +92,11 @@ def metrics_from_probs(y_true, probs, class_labels):
         "f1_macro": float(f1_score(y_true, preds, average="macro")),
         "roc_auc": float(roc)
     }
+
+def rank_by_label(results, labels): 
+    by_label = {label: [] for label in labels}
+    for item in results: 
+        by_label[item["label"]].append(item)
+    for _, items in by_label.items(): 
+        items.sort(key=lambda r: r.get("score", float("-inf")), reverse=True)
+    return by_label

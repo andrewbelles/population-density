@@ -7,14 +7,16 @@
 # 
 
 import contextlib
-import argparse, io 
+import argparse, io
+import sys 
 
 import numpy as np 
 
 from analysis.cross_validation import (
     CrossValidator,
     CVConfig,
-    CLASSIFICATION
+    CLASSIFICATION,
+    TaskSpec
 )
 
 from models.graph.processing import CorrectAndSmooth
@@ -102,6 +104,8 @@ EARLY_STOP      = 25
 EARLY_STOP_EPS  = 1e-4 
 RANDOM_STATE    = 0 
 TRAIN_SIZE      = 0.3 
+
+EXPERT_TEST = TaskSpec("classification", ("accuracy", "roc_auc"))
 
 # ---------------------------------------------------------
 # Helper Functions 
@@ -192,14 +196,14 @@ def _optimize_dataset(
 
     leaderboard = []
     for model_name in MODELS: 
-        with contextlib.redirect_stdout(buf): 
+        with contextlib.redirect_stdout(sys.stderr): 
             mean_score, best_params, _, _ = run_nested_cv(
                 name=f"{dataset_key}_{model_name}",
                 filepath=filepath,
                 loader_func=loader_func,
                 model_factory=get_factory(model_name),
                 param_space=get_param_space(model_name),
-                task=CLASSIFICATION,
+                task=EXPERT_TEST,
                 outer_config=outer_config,
                 inner_config=inner_config,
                 n_trials=n_trials,

@@ -34,6 +34,17 @@ def _vif_from_r2(r2: float) -> float:
     r2 = max(0.0, min(0.999, r2))
     return 1.0 / (1.0 - r2)
 
+
+@dataclass 
+class VIFResult: 
+    vif:            pd.DataFrame 
+    r2:             pd.DataFrame | None 
+    feature_names:  NDArray[np.str_] 
+    sample_ids:     NDArray[np.str_]
+    feature_groups: NDArray[np.str_] | None 
+    meta:           dict[str, object]
+
+
 @dataclass 
 class PairwiseVIF:
     '''
@@ -52,16 +63,23 @@ class PairwiseVIF:
         self, 
         filepath: str, 
         base_loader_func: Callable[[str], FeatureMatrix | dict], 
-        feature_subset: Sequence[int] | None = None 
-    ) -> pd.DataFrame:
+        feature_subset: Sequence[int] | None = None,
+        *,
+        return_r2: bool = True, 
+        feature_groups: Sequence[str] | None = None 
+    ) -> VIFResult:
 
-        data = base_loader_func(filepath)
+        data   = base_loader_func(filepath)
         matrix = self._coerce_feature_mat(data) 
         matrix = self._apply_subset(matrix, feature_subset)
 
         n_features = matrix.X.shape[1]
         vif_scores = np.full((n_features, n_features), np.nan, dtype=np.float64)
         np.fill_diagonal(vif_scores, np.inf) 
+
+        r2_scores = None 
+        if return_r2: 
+            r2_scores = np.full((n_features, n_features), np.nan, dtype=np.float64)
 
         for i in range(n_features): 
             if self.verbose: 
@@ -80,11 +98,41 @@ class PairwiseVIF:
                 vif = _vif_from_r2(r2)
                 vif_scores[i, j] = vif 
                 vif_scores[j, i] = vif
+                if r2_scores is not None: 
+                    r2_scores[i, j] = r2 
+                    r2_scores[j, i] = r2
 
-        return pd.DataFrame(
+        vif_df = pd.DataFrame(
             vif_scores, 
             index=matrix.feature_names, 
             columns=matrix.feature_names
+        )
+        r2_df  = None 
+        if r2_scores is not None: 
+            r2_df = pd.DataFrame(
+                r2_scores, 
+                index=matrix.feature_names,
+                columns=matrix.feature_names 
+            )
+
+        groups = None 
+        if feature_groups is not None: 
+            groups = np.asarray(feature_groups, dtype="U64")
+
+        meta = {
+            "name": "pairwise", 
+            "method": "cv", 
+            "n_features": int(n_features),
+            "n_samples": int(matrix.X.shape[0])
+        }
+
+        return VIFResult(
+            vif=vif_df,
+            r2=r2_df,
+            feature_names=matrix.feature_names,
+            sample_ids=matrix.sample_ids,
+            feature_groups=groups,
+            meta=meta
         )
 
     def _coerce_feature_mat(self, data: FeatureMatrix | dict) -> FeatureMatrix: 
@@ -216,7 +264,8 @@ class PairwiseReducer:
                 out_names.append(f"pca_{pair_names[0]}__{pair_names[1]}")
 
             if self.verbose:
-                print(f"[{k}/{len(pair_idx)}] {pair_names[0]} + {pair_names[1]} -> {out_names[-1]}")
+                print(f"[{k}/{len(pair_idx)}] {pair_names[0]} + {pair_names[1]} "
+                      f"-> {out_names[-1]}")
 
         X_new     = np.hstack(out_cols).astype(np.float64, copy=False)
         names_new = np.asarray(out_names, dtype="U128")
@@ -327,3 +376,67 @@ class PairwiseReducer:
 
             out.append((ia, ib))
         return out 
+
+
+@dataclass 
+class FullVIF: 
+    model_factory: Callable[[], BaseEstimator]
+    config:        CVConfig 
+    verbose:       bool = False 
+
+    def compute(
+        self,
+        filepath: str,
+        base_loader_func: Callable[[str], FeatureMatrix | dict],
+        feature_subset: Sequence[int] | None = None, 
+        *,
+        return_r2: bool = True, 
+        feature_groups: Sequence[str] | None = None 
+    ) -> VIFResult:
+        data   = base_loader_func(filepath)
+        matrix = PairwiseVIF(self.model_factory, self.config)._coerce_feature_mat(data)
+        matrix = PairwiseVIF(self.model_factory, self.config)._apply_subset(
+            matrix, 
+            feature_subset
+        )
+
+        n_features = matrix.X.shape[1]
+        vif_vals   = np.full(n_features, np.nan, dtype=np.float64)
+        r2_vals    = np.full(n_features, np.nan, dtype=np.float64) if return_r2 else None 
+
+        for i in range(n_features): 
+            if self.verbose: 
+                name = str(matrix.feature_names[i])
+                print(f"[{i+1}/{n_features}] target={name}")
+            y    = matrix.X[:, i]
+            keep = [j for j in range(n_features) if j != i]
+            X    = matrix.X[:, keep]
+            r2   = r2_cv_from_array(X, y, matrix.coords, self.model_factory, self.config)
+            vif_vals[i] = _vif_from_r2(r2)
+            if r2_vals is not None: 
+                r2_vals[i] = r2 
+
+        vif_df = pd.DataFrame({"vif": vif_vals}, index=matrix.feature_names)
+        r2_df  = None 
+        if r2_vals is not None: 
+            r2_df = pd.DataFrame({"r2": r2_vals}, index=matrix.feature_names)
+
+        groups = None 
+        if feature_groups is not None: 
+            groups = np.asarray(feature_groups, dtype="U64")
+
+        meta = {
+            "mode": "full",
+            "method": "cv", 
+            "n_features": int(n_features),
+            "n_samples": int(matrix.X.shape[0])
+        }
+
+        return VIFResult(
+            vif=vif_df,
+            r2=r2_df,
+            feature_names=matrix.feature_names,
+            sample_ids=matrix.sample_ids,
+            feature_groups=groups,
+            meta=meta
+        )
