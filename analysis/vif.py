@@ -35,6 +35,121 @@ def _vif_from_r2(r2: float) -> float:
     return 1.0 / (1.0 - r2)
 
 
+def _r2_from_corr(x: NDArray, y: NDArray) -> float: 
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    x -= x.mean() 
+    y -= y.mean() 
+    denom = np.linalg.norm(x) * np.linalg.norm(y)
+    if denom == 0.0:
+        return 0.0 
+    r = float(np.dot(x, y) / denom)
+    if np.isnan(r): 
+        return 0.0 
+    return r * r 
+
+
+def coerce_feature_mat(data: FeatureMatrix | DatasetDict) -> FeatureMatrix: 
+
+    if isinstance(data, FeatureMatrix): 
+        return data 
+
+    if "features" in data: 
+        X = np.asarray(data["features"], dtype=np.float64)
+
+    # Don't care if coords dne, stacking models agnostic to geography (FOR NOW?) 
+    coords = np.asarray(data.get("coords", np.zeros((X.shape[0], 2))), dtype=np.float64)
+    if coords.ndim == 2 and coords.shape == (2, X.shape[0]): 
+        coords = coords.T # coerce shape .mat may fuck this up occasionally 
+
+    feature_names = data.get("feature_names")
+    if feature_names is None or len(feature_names) == 0: 
+        feature_names = np.array(
+            [f"feature_{i}" for i in range(X.shape[1])], dtype="U64"
+        )
+    else: 
+        feature_names = np.asarray(feature_names, dtype="U64")
+
+    if feature_names.shape[0] != X.shape[1]: 
+        n_features = feature_names.shape[0]
+        raise ValueError(f"feature_names length ({n_features})!= X cols ({X.shape[1]})")
+
+    sample_ids = data.get("sample_ids")
+    if sample_ids is None or len(sample_ids) == 0: 
+        sample_ids = np.array(
+            [str(i) for i in range(X.shape[0])], dtype="U16"
+        )
+    else: 
+        sample_ids = np.asarray(sample_ids, dtype="U16")
+
+    return FeatureMatrix(
+        X=X, 
+        coords=coords,
+        feature_names=feature_names,
+        sample_ids=sample_ids
+    )
+
+
+def align_and_merge_features(
+    datasets: Sequence[FeatureMatrix | dict], 
+    *, 
+    prefixes: Sequence[str] | None = None, 
+    feature_groups: Sequence[str] | None = None, 
+    sample_order: Sequence[str] | None = None 
+) -> tuple[FeatureMatrix, NDArray[np.str_]]: 
+
+    if not datasets: 
+        raise ValueError("datasets cannot be empty")
+
+    matrices = [coerce_feature_mat(d) for d in datasets]
+
+    if prefixes is not None and len(prefixes) != len(matrices): 
+        raise ValueError("feature_groups must match datasets length")
+
+    id_maps = [{sid: i for i, sid in enumerate(m.sample_ids)} for m in matrices]
+
+    if sample_order is None: 
+        common = [sid for sid in matrices[0].sample_ids if all(sid in m for m in id_maps[1:])]
+    else: 
+        common = [sid for sid in sample_order if all(sid in m for m in id_maps)]
+
+    if not common: 
+        raise ValueError("no overlapping sample_ids across datasets")
+
+    idx_lists = [[m[sid] for sid in common] for m in id_maps]
+    X_list    = [mat.X[idx] for mat, idx in zip(matrices, idx_lists)]
+
+    names_list: list[NDArray[np.str_]] = []
+    groups: list[str] = []
+    for i, mat in enumerate(matrices): 
+        prefix = prefixes[i] if prefixes is not None else None 
+        if prefix: 
+            names = np.array([f"{prefix}::{n}" for n in mat.feature_names], dtype="U128")
+            group = prefix 
+        else: 
+            names = mat.feature_names.astype("U128")
+            group = feature_groups[i] if feature_groups is not None else f"set_{i}"
+        names_list.append(names)
+        groups.extend([group] * names.shape[0])
+
+    X_all         = np.hstack(X_list).astype(np.float64, copy=False)
+    feature_names = np.concatenate(names_list)
+    sample_ids    = np.asarray(common, dtype="U16")
+    coords        = matrices[0].coords[idx_lists[0]]
+
+    merged = FeatureMatrix(
+        X=X_all,
+        coords=coords,
+        feature_names=feature_names,
+        sample_ids=sample_ids 
+    )
+
+    return merged, np.asarray(groups, dtype="U64")
+
+# ---------------------------------------------------------
+# PairwiseVIF Analysis   
+# ---------------------------------------------------------
+
 @dataclass 
 class VIFResult: 
     vif:            pd.DataFrame 
@@ -43,6 +158,23 @@ class VIFResult:
     sample_ids:     NDArray[np.str_]
     feature_groups: NDArray[np.str_] | None 
     meta:           dict[str, object]
+
+    def to_dict(self) -> dict[str, object]: 
+        out: dict[str, object] = {
+            "vif": self.vif.to_numpy(), 
+            "vif_index": self.vif.index.to_numpy(dtype="U64"),
+            "vif_columns": self.vif.columns.to_numpy(dtype="U64"),
+            "feature_names": np.asarray(self.feature_names, dtype="U64"),
+            "sample_ids": np.asarray(self.sample_ids, dtype="U16"),
+            "meta": dict(self.meta)
+        }
+        if self.r2 is not None: 
+            out["r2"]         = self.r2.to_numpy()
+            out["r2_index"]   = self.r2.index.to_numpy(dtype="U64")
+            out["r2_columns"] = self.r2.columns.to_numpy(dtype="U64") 
+        if self.feature_groups is not None: 
+            out["feature_groups"] = np.asarray(self.feature_groups, dtype="U64")
+        return out 
 
 
 @dataclass 
@@ -65,12 +197,16 @@ class PairwiseVIF:
         base_loader_func: Callable[[str], FeatureMatrix | dict], 
         feature_subset: Sequence[int] | None = None,
         *,
+        method: str = "cv",
         return_r2: bool = True, 
         feature_groups: Sequence[str] | None = None 
     ) -> VIFResult:
 
+        if method not in ("cv", "corr"): 
+            raise ValueError(f"unknown method: {method}")
+
         data   = base_loader_func(filepath)
-        matrix = self._coerce_feature_mat(data) 
+        matrix = coerce_feature_mat(data) 
         matrix = self._apply_subset(matrix, feature_subset)
 
         n_features = matrix.X.shape[1]
@@ -87,14 +223,18 @@ class PairwiseVIF:
                 print(f"[{i+1}/{n_features}] target={name}")
             y = matrix.X[:, i]
             for j in range(i + 1, n_features): 
-                X = matrix.X[:, [j]]
-                r2 = r2_cv_from_array(
-                    X,
-                    y,
-                    matrix.coords,
-                    self.model_factory,
-                    self.config 
-                )
+                    
+                if method == "corr": 
+                    r2 = _r2_from_corr(matrix.X[:, j], y)
+                else: 
+                    X = matrix.X[:, [j]]
+                    r2 = r2_cv_from_array(
+                        X,
+                        y,
+                        matrix.coords,
+                        self.model_factory,
+                        self.config 
+                    )
                 vif = _vif_from_r2(r2)
                 vif_scores[i, j] = vif 
                 vif_scores[j, i] = vif
@@ -133,50 +273,6 @@ class PairwiseVIF:
             sample_ids=matrix.sample_ids,
             feature_groups=groups,
             meta=meta
-        )
-
-    def _coerce_feature_mat(self, data: FeatureMatrix | dict) -> FeatureMatrix: 
-
-        if isinstance(data, FeatureMatrix): 
-            return data 
-
-        if "features" in data: 
-            X = np.asarray(data["features"], dtype=np.float64)
-        elif "X" in data: 
-            X = np.asarray(data["X"], dtype=np.float64)
-        else: 
-            raise KeyError("loader output missing 'features' or 'X'")
-
-        # Don't care if coords dne, stacking models agnostic to geography (FOR NOW?) 
-        coords = np.asarray(data.get("coords", np.zeros((X.shape[0], 2))), dtype=np.float64)
-        if coords.ndim == 2 and coords.shape == (2, X.shape[0]): 
-            coords = coords.T # coerce shape .mat may fuck this up occasionally 
-
-        feature_names = data.get("feature_names")
-        if feature_names is None or len(feature_names) == 0: 
-            feature_names = np.array(
-                [f"feature_{i}" for i in range(X.shape[1])], dtype="U64"
-            )
-        else: 
-            feature_names = np.asarray(feature_names, dtype="U64")
-
-        if feature_names.shape[0] != X.shape[1]: 
-            n_features = feature_names.shape[0]
-            raise ValueError(f"feature_names length ({n_features})!= X cols ({X.shape[1]})")
-
-        sample_ids = data.get("sample_ids")
-        if sample_ids is None or len(sample_ids) == 0: 
-            sample_ids = np.array(
-                [str(i) for i in range(X.shape[0])], dtype="U16"
-            )
-        else: 
-            sample_ids = np.asarray(sample_ids, dtype="U16")
-
-        return FeatureMatrix(
-            X=X, 
-            coords=coords,
-            feature_names=feature_names,
-            sample_ids=sample_ids
         )
 
     def _apply_subset(
@@ -377,6 +473,9 @@ class PairwiseReducer:
             out.append((ia, ib))
         return out 
 
+# ---------------------------------------------------------
+# VIF using full feature set vs. single feature  
+# ---------------------------------------------------------
 
 @dataclass 
 class FullVIF: 
@@ -393,8 +492,9 @@ class FullVIF:
         return_r2: bool = True, 
         feature_groups: Sequence[str] | None = None 
     ) -> VIFResult:
+
         data   = base_loader_func(filepath)
-        matrix = PairwiseVIF(self.model_factory, self.config)._coerce_feature_mat(data)
+        matrix = coerce_feature_mat(data)
         matrix = PairwiseVIF(self.model_factory, self.config)._apply_subset(
             matrix, 
             feature_subset

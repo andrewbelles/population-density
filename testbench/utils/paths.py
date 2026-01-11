@@ -31,6 +31,14 @@ ROUND_ROBIN_OVR_PROBA  = {
     for label in range(1, 7)
 }
 
+EXPERT_DATA            = {
+    "VIIRS": project_path("data", "datasets", "viirs_nchs_2023.mat"),
+    "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"),
+    "NLCD":  project_path("data", "datasets", "nlcd_nchs_2023.mat")
+}
+PAIRWISE_CSV           = project_path("data", "results", "pairwise_vif.csv")
+FULL_CSV               = project_path("data", "results", "full_vif.csv")
+
 def check_paths_exist(paths, label): 
     missing = [p for p in paths if not Path(p).exists()]
     if missing: 

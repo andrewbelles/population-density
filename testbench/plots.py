@@ -16,11 +16,12 @@ import geopandas
 from dataclasses import dataclass 
 from typing import Callable, Mapping
 
-import testbench.adjacency   as adjacency 
-import testbench.downstream  as downstream
-import testbench.stacking    as stacking 
-import testbench.round_robin as round_robin
+import testbench.adjacency    as adjacency 
+import testbench.downstream   as downstream
+import testbench.stacking     as stacking 
+import testbench.round_robin  as round_robin
 
+from testbench.utils.etc import infer_groups
 from testbench.utils.oof   import load_probs_labels_fips 
 from testbench.utils.graph import coords_for_fips 
 from testbench.utils.paths import (
@@ -30,14 +31,24 @@ from testbench.utils.paths import (
 
 from testbench.utils.plotting import (
     apply_metric_ylim,
+    clean_feature,
+    format_feature,
     get_labels,
     get_pred_labels,
-    get_label_indices, 
-    pick_variant, 
+    get_label_indices,
+    group_spans,
+    ordered_groups, 
+    pick_variant,
+    reorder_by_group, 
     save_or_show,
     call_plot,
     confusion_panel,
-    confidence_hist 
+    confidence_hist,
+    pairwise_payload,
+    full_payload,
+    set_group_ticks,
+    short_group,
+    variant_items
 )
 from utils.helpers import project_path
 
@@ -106,9 +117,9 @@ def build_downstream_data(*, cross: str = "off", **_):
 # Plot Calls 
 # ---------------------------------------------------------
 
-'''
-Stacking Plots 
-'''
+# --------------------------------------------------------- 
+# Stacking  
+# ---------------------------------------------------------
 
 def plot_confusion(data): 
     _, data   = pick_variant(data)
@@ -206,9 +217,9 @@ def plot_map_predictions(data):
 
     return fig 
 
-'''
-Adjacency Plots 
-'''
+# --------------------------------------------------------- 
+# Adjacency  
+# ---------------------------------------------------------
 
 def plot_graph_metric_bars(data, metric_key="avg_degree"): 
     items   = data["graphs"] + data.get("learned", [])
@@ -258,9 +269,9 @@ def plot_edge_weight_distribution(data, log_hist: bool = False):
     ax.legend() 
     return fig 
 
-'''
-Downstream Tests 
-'''
+# --------------------------------------------------------- 
+# Downstream
+# ---------------------------------------------------------
 
 def plot_edge_keep_ratio(data): 
     names   = []

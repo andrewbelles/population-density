@@ -100,3 +100,15 @@ def rank_by_label(results, labels):
     for _, items in by_label.items(): 
         items.sort(key=lambda r: r.get("score", float("-inf")), reverse=True)
     return by_label
+
+def summarize_vif(vif_df): 
+    values = vif_df.to_numpy() 
+    finite = values[np.isfinite(values)]
+    if finite.size == 0: 
+        return "no finite vif values"
+
+    return (
+        f"median={np.median(finite):.3f}"
+        f"p95={np.percentile(finite, 95):.3f}"
+        f"max={finite.max():.3f}"
+    )

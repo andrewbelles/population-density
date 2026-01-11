@@ -9,7 +9,7 @@
 import numpy as np
 import matplotlib.pyplot as plt 
 
-from support.helpers import (
+from utils.helpers import (
     project_path,
     _as_tuple_str
 )

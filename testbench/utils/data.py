@@ -10,13 +10,19 @@ import numpy as np
 
 from typing import Sequence
 
-from utils.helpers import make_cfg_gap_factory, project_path
+from utils.helpers import (
+    make_cfg_gap_factory, 
+    project_path,
+    _mat_str_vector
+)
 
 from testbench.utils.paths import (
     LABELS_PATH
 )
 
 from testbench.utils.transforms import apply_transforms
+
+from scipy.io import loadmat 
 
 from preprocessing.loaders import (
     DatasetDict,
@@ -169,6 +175,23 @@ def passthrough_loader(prob_files):
         transforms = make_cfg_gap_factory(data.get("feature_names"))() 
         if transforms: 
             data["features"] = apply_transforms(data["features"], transforms)
+            
+            names = np.asarray(data.get("feature_names")) 
+            if names is None: 
+                names = np.array([], dtype="U64")
+            else: 
+                names = np.asarray(names, dtype="U64")
+
+            if names.size != data["features"].shape[1]: 
+                extra = data["features"].shape[1] - names.size 
+                if extra > 0: 
+                    suffix = (["cfg_gap"] if extra == 1 else 
+                    [f"cfg_gap_{i+1}" for i in range(extra)])
+
+                    data["feature_names"] = np.concatenate(
+                        [names, np.asarray(suffix, dtype="U64")]
+                    )
+
         return data 
     return _loader 
 
@@ -194,3 +217,60 @@ def load_dataset(dataset_key: str):
     out  = dict(data)
     out["labels"] = y 
     return out 
+
+
+def feature_names_from_mat(mat, prefix: str, keep_idx: list[int] | None, n_cols: int): 
+    names = None 
+    if "feature_names" in mat: 
+        names = _mat_str_vector(mat["feature_names"]).astype("U64")
+        if names.shape[0] != n_cols: 
+            names = None 
+    if names is None: 
+        names = np.array([f"p{i}" for i in range(n_cols)], dtype="U64")
+    if keep_idx is not None: 
+        names = names[keep_idx]
+    return np.array([f"{prefix}::{n}" for n in names], dtype="U128")
+
+def load_oof_features(path: str, prefix: str): 
+    mat = loadmat(path)
+    if "features" not in mat: 
+        raise ValueError(f"{path} missing 'features'")
+    if "fips_codes" not in mat: 
+        raise ValueError(f"{path} missing 'fips_codes'")
+
+    X = np.asarray(mat["features"], dtype=np.float64)
+    if X.ndim == 1: 
+        X = X.reshape(-1, 1)
+    if X.ndim != 2: 
+        raise ValueError(f"{path} expected 2d features, got {X.shape}")
+
+    keep_idx = None 
+    if X.shape[1] == 2: 
+        keep_idx = [1]
+        X = X[:, keep_idx]
+
+    fips  = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    names = feature_names_from_mat(mat, prefix, keep_idx, X.shape[1])
+
+    return {
+        "features": X, 
+        "coords": np.zeros((X.shape[0], 2), dtype=np.float64),
+        "feature_names": names, 
+        "sample_ids": fips 
+    }
+
+def load_raw(key: str) -> dict: 
+    spec  = BASE[key]
+    mat   = loadmat(spec["path"])
+
+    X     = np.asarray(mat["features"], dtype=np.float64)
+    fips  = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    names = _mat_str_vector(mat["feature_names"]).astype("U64")
+    names = np.array([n.strip() for n in names], dtype="U64")
+
+    return {
+        "features": X,
+        "coords": np.zeros((X.shape[0], 2), dtype=np.float64),
+        "feature_names": names, 
+        "sample_ids": fips  
+    }
