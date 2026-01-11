@@ -40,7 +40,8 @@ from preprocessing.loaders import (
 from preprocessing.disagreement import DisagreementSpec, load_pass_through_stacking
 
 
-DATASETS = ("VIIRS", "TIGER", "NLCD")
+DATASETS = ("VIIRS", "NLCD", "SAIPE")
+LEGACY   = ("TIGER",)
 
 PASSTHROUGH_FEATURES = [
     "cross__cross_viirs_log_mean", 
@@ -58,11 +59,6 @@ BASE: dict[str, ConcatSpec] = {
         "path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
         "loader": load_viirs_nchs
     },
-    "TIGER_BIN": {
-        "name": "TIGER_BIN",
-        "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
-        "loader": load_tiger_noncore_binary 
-    },
     "TIGER": {
         "name": "tiger",
         "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
@@ -71,6 +67,11 @@ BASE: dict[str, ConcatSpec] = {
     "NLCD": {
         "name": "NLCD",
         "path": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
+        "loader": load_compact_dataset
+    },
+    "SAIPE": {
+        "name": "SAIPE", 
+        "path": project_path("data", "datasets", "saipe_nchs_2023.mat"),
         "loader": load_compact_dataset
     },
     "COORDS": {

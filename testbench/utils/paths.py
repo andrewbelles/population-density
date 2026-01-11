@@ -23,8 +23,9 @@ ROUND_ROBIN_CONFIG     = project_path("testbench", "round_robin_config.yaml")
 ROUND_ROBIN_PROBA      = project_path("data", "results", "round_robin_stacked_probs.mat")
 ROUND_EXPERT_PROBA     = {
     "VIIRS": project_path("data", "stacking", "rr_viirs_probs.mat"),
-    "TIGER": project_path("data", "stacking", "rr_tiger_probs.mat"),
-    "NLCD":  project_path("data", "stacking", "rr_nlcd_probs.mat")
+    # "TIGER": project_path("data", "stacking", "rr_tiger_probs.mat"),
+    "NLCD":  project_path("data", "stacking", "rr_nlcd_probs.mat"),
+    "SAIPE": project_path("data", "stacking", "rr_saipe_probs.mat")
 }
 ROUND_ROBIN_OVR_PROBA  = {
     label: project_path("data", "stacking", f"rr_label_{label}_probs.mat")

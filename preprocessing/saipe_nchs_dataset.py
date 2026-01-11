@@ -65,7 +65,7 @@ class SaipeNCHS:
         fips   = (state + county).astype(str)
 
         X = data.iloc[:, col_idx].copy() 
-        X = X.replace({",", ""}, regex=True)
+        X = X.replace({",": ""}, regex=True)
         X = X.mask(X == ".")
         X = X.apply(pd.to_numeric, errors="coerce")
 
@@ -73,10 +73,16 @@ class SaipeNCHS:
         X    = X.loc[:, keep]
         feature_names = np.asarray([n for n, k in zip(feature_names, keep) if k], dtype="U64")
 
+        row_keep = X.notna().all(axis=1)
+        if not row_keep.all(): 
+            data = data[row_keep].reset_index(drop=True)
+            fips = fips[row_keep].reset_index(drop=True)
+            X    = X.loc[row_keep].reset_index(drop=True)
+
         keep_mask = fips.isin(self.labels_map)
         fips      = fips[keep_mask].to_numpy(dtype="U5")
         X         = X.loc[keep_mask].to_numpy(dtype=np.float64)
-        y         = np.array([self.labels_map[f] for f in fips], dtype=np.int64)
+        y         = np.array([self.labels_map[f] for f in fips], dtype=np.int64).reshape(-1, 1)
 
         return {
             "features": X,

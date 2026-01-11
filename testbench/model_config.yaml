@@ -11,16 +11,17 @@ models:
     class_weight: balanced
     criterion: gini
   VIIRS/XGBoost:
-    n_estimators: 338
-    learning_rate: 0.02102330874348013
+    n_estimators: 823
+    learning_rate: 0.025426938870655728
     max_depth: 4
-    subsample: 0.7273735795474594
-    colsample_bytree: 0.5075159201745421
-    min_child_weight: 14
-    reg_alpha: 6.859416411328697
-    reg_lambda: 7.092543214735832
-    max_delta_step: 10
-    gamma: 2.3101522250182382
+    subsample: 0.6385399814179793
+    colsample_bytree: 0.6826678534911693
+    min_child_weight: 5
+    reg_alpha: 0.7660450663523714
+    reg_lambda: 16.256976849298017
+    max_delta_step: 6
+    scale_pos_weight: 4.627122879329872
+    gamma: 1.1612280686225906
   VIIRS/SVM:
     kernel: poly
     C: 968.3436192190226
@@ -62,16 +63,17 @@ models:
     class_weight: null
     criterion: log_loss
   NLCD/XGBoost:
-    n_estimators: 981
-    learning_rate: 0.0249732861040606
-    max_depth: 4
-    subsample: 0.8122116705145822
-    colsample_bytree: 0.5473097703475733
-    min_child_weight: 15
-    reg_alpha: 0.26919058249260697
-    reg_lambda: 68.23493012435793
-    max_delta_step: 5
-    gamma: 0.6750312521595927
+    n_estimators: 714
+    learning_rate: 0.014037220879913838
+    max_depth: 6
+    subsample: 0.7075066315630809
+    colsample_bytree: 0.6556514332033635
+    min_child_weight: 16
+    reg_alpha: 6.449307483040326
+    reg_lambda: 29.570490481973412
+    max_delta_step: 10
+    scale_pos_weight: 7.319203235040033
+    gamma: 0.3983262467985261
   Stacking/Logistic:
     C: 0.19628224813442816
     class_weight: null
@@ -118,17 +120,17 @@ models:
     gamma: 0.5657093339055935
   CorrectAndSmooth/Stacking:
     adjacency: queen
-    correction_layers: 8
-    correction_alpha: 0.8023780742154222
-    smoothing_layers: 7
-    smoothing_alpha: 0.10490968256143007
+    correction_layers: 21
+    correction_alpha: 0.6098470496366994
+    smoothing_layers: 1
+    smoothing_alpha: 0.4077997332013208
     autoscale: false
   CorrectAndSmooth/StackingPassthrough:
     adjacency: queen
-    correction_layers: 23
-    correction_alpha: 0.801809970254323
-    smoothing_layers: 13
-    smoothing_alpha: 0.15032642817532768
+    correction_layers: 7
+    correction_alpha: 0.49542187614430827
+    smoothing_layers: 9
+    smoothing_alpha: 0.0040055116209626734
     autoscale: false
   Stacking/EDGE:
     hidden_dims: 64-64-32
@@ -162,3 +164,18 @@ models:
     smoothing_layers: 10
     smoothing_alpha: 0.09152769113230329
     autoscale: false
+  SAIPE/Logistic:
+    C: 76.82087087243589
+    class_weight: null
+  SAIPE/XGBoost:
+    n_estimators: 515
+    learning_rate: 0.02195773446539457
+    max_depth: 3
+    subsample: 0.7559684085310096
+    colsample_bytree: 0.5573413149636186
+    min_child_weight: 20
+    reg_alpha: 3.6774346621052136
+    reg_lambda: 1.7538232373118046
+    max_delta_step: 2
+    scale_pos_weight: 20.67282435468935
+    gamma: 0.8171478915115865

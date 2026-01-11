@@ -79,14 +79,16 @@ from testbench.utils.oof import load_probs_labels_fips
 
 EXPERT_DATASETS = {
     "VIIRS": project_path("data", "datasets", "viirs_nchs_2023.mat"),
-    "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"),
-    "NLCD": project_path("data", "datasets", "nlcd_nchs_2023.mat")
+    # "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"),
+    "NLCD": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
+    "SAIPE": project_path("data", "datasets", "saipe_nchs_2023.mat")
 }
 
 EXPERT_PROBA    = {
     "VIIRS": project_path("data", "stacking", "viirs_optimized_probs.mat"),
-    "TIGER": project_path("data", "stacking", "tiger_optimized_probs.mat"),
-    "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat")
+    # "TIGER": project_path("data", "stacking", "tiger_optimized_probs.mat"),
+    "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat"),
+    "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat")
 }
 
 STACKED_BASE_PROBS        = project_path("data", "results", "final_stacked_predictions.mat")
@@ -95,7 +97,7 @@ STACKED_PASSTHROUGH_PROBS = project_path("data", "results", "final_stacked_passt
 STACKING_BASE_KEY        = "Stacking"
 STACKING_PASSTHROUGH_KEY = "StackingPassthrough"
 
-MODELS = ("Logistic", "RandomForest", "XGBoost")
+MODELS = ("Logistic", "XGBoost")
 
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 
@@ -277,8 +279,11 @@ def _select_best_model(dataset_key, filepath, loader_func, config):
 # Tests 
 # ---------------------------------------------------------
 
-def test_expert_optimize(buf: io.StringIO):
-    for name in DATASETS:
+def test_expert_optimize(buf: io.StringIO, datasets: list[str] | None = None):
+    targets = datasets or list(DATASETS)
+    for name in targets:
+        if name not in BASE: 
+            raise ValueError(f"unknown dataset: {name}")
         base = BASE[name]
         _optimize_dataset(
             name, 
@@ -473,6 +478,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tests", nargs="*", default=None)
     parser.add_argument("--cross", choices=["off", "on", "both"], default="off")
+    parser.add_argument("--datasets", nargs="*", default=None)
     parser.add_argument("--no-opt", action="store_true")
     args = parser.parse_args()
 
@@ -487,6 +493,10 @@ def main():
         fn = TESTS.get(name)
         if fn is None: 
             raise ValueError(f"unknown test: {name}")
+
+        if name == "expert_opt": 
+            fn(buf, datasets=args.datasets)
+            continue 
 
         if not choice_function(name, args.cross, buf): 
             fn(buf)

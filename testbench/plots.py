@@ -16,12 +16,12 @@ import geopandas
 from dataclasses import dataclass 
 from typing import Callable, Mapping
 
+from preprocessing.loaders import load_oof_predictions
 import testbench.adjacency    as adjacency 
 import testbench.downstream   as downstream
 import testbench.stacking     as stacking 
 import testbench.round_robin  as round_robin
 
-from testbench.utils.etc import infer_groups
 from testbench.utils.oof   import load_probs_labels_fips 
 from testbench.utils.graph import coords_for_fips 
 from testbench.utils.paths import (
@@ -31,24 +31,14 @@ from testbench.utils.paths import (
 
 from testbench.utils.plotting import (
     apply_metric_ylim,
-    clean_feature,
-    format_feature,
     get_labels,
     get_pred_labels,
     get_label_indices,
-    group_spans,
-    ordered_groups, 
     pick_variant,
-    reorder_by_group, 
     save_or_show,
     call_plot,
     confusion_panel,
     confidence_hist,
-    pairwise_payload,
-    full_payload,
-    set_group_ticks,
-    short_group,
-    variant_items
 )
 from utils.helpers import project_path
 
@@ -63,7 +53,12 @@ def _log(msg, quiet=False):
 
 def build_stacking_data(*, cross: str = "off", round_robin_stack: bool = False, **_):
 
+
+
     buf = io.StringIO() 
+
+    expert_data  = stacking.test_expert_oof(buf)
+    expert_paths = expert_data["experts"] 
 
     if round_robin_stack:
         stack = round_robin.test_round_robin_stacking(buf, n_trials=200, quiet=True)
@@ -77,8 +72,9 @@ def build_stacking_data(*, cross: str = "off", round_robin_stack: bool = False, 
         }
 
     if cross == "both":
-        return {"base": _run(False), "passthrough": _run(True)}
-    return {("passthrough" if cross == "on" else "base"): _run(cross == "on")}
+        return {"base": _run(False), "passthrough": _run(True), "experts": expert_paths}
+    return {("passthrough" if cross == "on" else "base"): _run(cross == "on"),
+            "experts": expert_paths}
 
 def build_adjacency_data(*, metric_keys=None, **_): 
     
@@ -133,6 +129,44 @@ def plot_confusion(data):
 
     fig.colorbar(im, ax=axes.ravel().tolist())
     fig.suptitle("Confusion Matrices (Row %)")
+    return fig 
+
+def plot_expert_confusion(data): 
+    experts   = data.get("experts")
+    if experts is None: 
+        _, variant = pick_variant(data)
+        experts    = variant.get("experts")
+    if experts is None: 
+        raise ValueError("missing experts. build_stacking_data must include test_expert_oof")
+
+    names     = list(experts.keys())
+    paths     = [experts[n] for n in names]
+    fig, axes = plt.subplots(
+        1, len(paths),
+        figsize=(4 * len(paths), 4),
+        sharey=True,
+        constrained_layout=True
+    )
+    if len(paths) == 1: 
+        axes = [axes]
+
+    im = None 
+    for ax, name, path in zip(axes, names, paths): 
+        oof    = load_oof_predictions(path)
+        probs  = np.asarray(oof["probs"], dtype=np.float64)
+        if probs.ndim == 3: 
+            P  = probs[:, 0, :] if probs.shape[1] == 1 else probs.mean(axis=1)
+        else: 
+            P  = probs 
+        y_true = np.asarray(oof["labels"]).reshape(-1)
+        class_labels = np.asarray(oof.get("class_labels", []))
+        labels = get_labels(class_labels, P.shape[1] if P.ndim > 1 else 2)
+
+        im = confusion_panel(ax, y_true, P, labels, title=name)
+
+    if im is not None: 
+        fig.colorbar(im, ax=axes)
+    fig.suptitle("Expert Confusion Matrices (Row %)")
     return fig 
 
 def plot_class_distance(data, log_hist: bool = False): 
@@ -381,6 +415,7 @@ PLOT_GROUPS = {
         build=build_stacking_data,
         plots={
             "confusion": plot_confusion,
+            "expert_confusion": plot_expert_confusion,
             "class_distance": plot_class_distance,
             "confidence": plot_confidence_correctness,
             "map_confidence": plot_map_predictions

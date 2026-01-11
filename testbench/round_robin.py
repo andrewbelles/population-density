@@ -82,7 +82,7 @@ def _log(msg, quiet=False):
 
 RR_STACK_KEY   = "RoundRobinStacking"
 RR_CS_KEY      = f"CorrectAndSmooth/{RR_STACK_KEY}"
-MODELS         = ("Logistic", "RandomForest", "XGBoost")
+MODELS         = ("Logistic", "XGBoost")
 OPT_TASK       = TaskSpec("classification", ("accuracy",))
 TRIALS         = 200 
 EARLY_STOP     = 40
