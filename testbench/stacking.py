@@ -102,7 +102,8 @@ MODELS = ("Logistic", "XGBoost")
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 
 CS_TRIALS       = 150 
-EARLY_STOP      = 25 
+EARLY_STOP      = 25
+CS_EARLY_STOP   = 100 
 EARLY_STOP_EPS  = 1e-4 
 RANDOM_STATE    = 0 
 TRAIN_SIZE      = 0.3 
@@ -409,7 +410,7 @@ def test_cs_opt(buf: io.StringIO, passthrough: bool = False):
             evaluator=evaluator,
             n_trials=CS_TRIALS,
             direction="maximize",
-            early_stopping_rounds=EARLY_STOP,
+            early_stopping_rounds=CS_EARLY_STOP,
             early_stopping_delta=EARLY_STOP_EPS,
             sampler_type="multivariate-tpe",
             random_state=RANDOM_STATE
@@ -467,8 +468,8 @@ def choice_function(name: str, cross: str, buf: io.StringIO):
     elif cross == "on": 
         fn(buf, True)
     elif cross == "both": 
-        fn(buf, False)
         fn(buf, True)
+        fn(buf, False)
     else: 
         raise ValueError(f"unknown choice for cross-modal feature tests: {cross}")
 

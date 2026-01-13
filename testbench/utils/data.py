@@ -26,32 +26,22 @@ from scipy.io import loadmat
 
 from preprocessing.loaders import (
     DatasetDict,
+    MetaSpec,
+    PassthroughSpec,
     load_stacking,
     load_viirs_nchs,
     load_coords_from_mobility,
     load_compact_dataset,
-    load_tiger_noncore_binary,
     load_concat_datasets,
     make_oof_dataset_loader,
     load_oof_predictions, 
     ConcatSpec
 )
 
-from preprocessing.disagreement import DisagreementSpec, load_pass_through_stacking
-
+from preprocessing.loaders import load_passthrough
 
 DATASETS = ("VIIRS", "NLCD", "SAIPE")
 LEGACY   = ("TIGER",)
-
-PASSTHROUGH_FEATURES = [
-    "cross__cross_viirs_log_mean", 
-    "cross__cross_tiger_integ", 
-    "cross__cross_radiance_entropy",
-    "cross__cross_dev_intensity_gradient",
-    "cross__cross_vanui_proxy",
-    "cross__cross_effective_mesh_proxy",
-    "cross__cross_road_effect_intensity"
-]
 
 BASE: dict[str, ConcatSpec] = {
     "VIIRS": {
@@ -137,16 +127,13 @@ def load_dataset_raw(dataset_key: str, proba_path: str):
     feature_names = data.get("feature_names")
     return X, y, fips, feature_names
 
-def build_specs(prob_files) -> list[DisagreementSpec]: 
+def build_specs(prob_files) -> list[MetaSpec]: 
     specs = []
     for name, prob_path in zip(DATASETS, prob_files): 
-        base = BASE[name]
         specs.append({
             "name": name.lower(), 
-            "raw_path": base["path"],
-            "raw_loader": base["loader"],
-            "oof_path": prob_path,
-            "oof_loader": load_oof_predictions
+            "proba_path": prob_path,
+            "proba_loader": load_oof_predictions
         })
     return specs 
 
@@ -157,7 +144,7 @@ def stacking_loader(prob_files):
 
 def passthrough_loader(prob_files):
     passthrough_base  = BASE["PASSTHROUGH"]
-    passthrough_specs = [
+    passthrough_specs: list[PassthroughSpec] = [
         {
             "name": "cross", 
             "raw_path": passthrough_base["path"],
@@ -166,12 +153,12 @@ def passthrough_loader(prob_files):
     ] 
 
     def _loader(_): 
-        data = load_pass_through_stacking(
+        data = load_passthrough(
             build_specs(prob_files),
             label_path=LABELS_PATH,
             label_loader=BASE["VIIRS"]["loader"],
-            passthrough_features=PASSTHROUGH_FEATURES,
-            passthrough_specs=passthrough_specs 
+            passthrough_specs=passthrough_specs,
+            passthrough_features=None 
         )
         transforms = make_cfg_gap_factory(data.get("feature_names"))() 
         if transforms: 

@@ -657,6 +657,126 @@ def load_oof_errors(
         "Class_Distance": y_true - y_pred
     })
 
+# ---------------------------------------------------------
+# Meta-Learner Dataset Loader  
+# ---------------------------------------------------------
+
+class MetaSpec(TypedDict): 
+    name:         str 
+    proba_path:   str 
+    proba_loader: Callable[[str], OOFDatasetDict] 
+    model_name:   str | None 
+
+class PassthroughSpec(TypedDict): 
+    name:       str 
+    raw_path:   str 
+    raw_loader: DatasetLoader
+
+def load_passthrough(
+    meta_specs: Sequence[MetaSpec],
+    *,
+    label_path: str,
+    label_loader: DatasetLoader, 
+    passthrough_specs: Sequence[PassthroughSpec] | None = None, 
+    passthrough_features: Sequence[str] | None 
+) -> DatasetDict: 
+
+    passthrough_specs = list(passthrough_specs or [])
+
+    label_data = label_loader(label_path)
+    label_fips = list(label_data["sample_ids"])
+    y          = np.asarray(label_data["labels"]).reshape(-1)
+
+    proba_data = {s["name"]: s["proba_loader"](s["proba_path"]) for s in meta_specs}
+    raw_data   = {s["name"]: s["raw_loader"](s["raw_path"]) for s in passthrough_specs}
+
+    fips_sets  = [set(label_fips)]
+    for d in proba_data.values(): 
+        fips_sets.append(set(d["fips_codes"]))
+    for d in raw_data.values(): 
+        fips_sets.append(set(d["sample_ids"]))
+
+    common = [f for f in label_fips if all(f in s for s in fips_sets)]
+    if not common: 
+        raise ValueError("no common sample_ids across labels/probs/passthrough")
+
+    idx_label   = align_on_fips(common, label_data["sample_ids"])
+    y           = y[idx_label]
+    prob_blocks = []
+    prob_names  = []
+    for s in meta_specs: 
+        prob_ds     = proba_data[s["name"]]
+        idx_probs   = align_on_fips(common, prob_ds["fips_codes"])
+        model_names = prob_ds["model_names"].tolist() 
+        model_name  = s.get("model_name")
+        if model_name is None: 
+            if len(model_names) != 1: 
+                raise ValueError(f"{s['name']} probs has multiple models")
+            m_idx  = 0 
+            m_name = model_names[0]
+        else: 
+            if model_name not in model_names: 
+                raise ValueError(f"{s['name']} model_name not in {model_names}")
+            m_idx  = model_names.index(model_name)
+            m_name = model_name 
+
+        probs = prob_ds["probs"][idx_probs, m_idx, :]
+        if probs.ndim != 2: 
+            raise ValueError(f"{s['name']} expected 2d probs, got {probs.shape}")
+
+        if probs.shape[1] == 2: 
+            probs = probs[:, [1]]
+            prob_names.append(f"{s['name']}__{m_name}_p1")
+        else: 
+            prob_blocks.append(probs)
+            class_labels = prob_ds["class_labels"].reshape(-1)
+            for c in class_labels: 
+                prob_names.append(f"{s['name']}__{m_name}__p{int(c)}")
+
+    if passthrough_features is None: 
+        passthrough_features = []
+        for name, raw in raw_data.items(): 
+            names = raw.get("feature_names")
+            if names is None or len(names) == 0: 
+                raise ValueError(f"passthrough dataset {name} missing feature_names")
+            for feat in names: 
+                passthrough_features.append(f"{name}__{feat}")
+
+    pass_blocks = []
+    pass_names  = []
+    for feat in passthrough_features: 
+        if "__" in feat: 
+            ds_name, raw_name = feat.split("__", 1)
+        else: 
+            ds_name, raw_name = None, feat 
+
+        found = False 
+        for name, raw in raw_data.items(): 
+            if ds_name is not None and name != ds_name: 
+                continue 
+            names = list(raw["feature_names"])
+            if raw_name in names: 
+                col     = names.index(raw_name)
+                idx_raw = align_on_fips(common, raw["sample_ids"])
+                pass_blocks.append(raw["features"][idx_raw, col].reshape(-1, 1))
+                pass_names.append(f"{name}__{raw_name}")
+                found = True 
+                break 
+
+        if not found: 
+            raise ValueError(f"passthrough feature not found: {feat}")
+
+    X             = np.hstack(prob_blocks + pass_blocks)
+    feature_names = np.array(prob_names + pass_names, dtype="U64")
+
+    return {
+        "features": X, 
+        "labels": y,
+        "coords": np.zeros((X.shape[0], 2), dtype=np.float64),
+        "feature_names": feature_names, 
+        "sample_ids": np.array(common, dtype="U5")
+    }
+
 # --------------------------------------------------------- 
 # Datasets that work specifically with Metric Learners 
 # --------------------------------------------------------- 

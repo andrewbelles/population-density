@@ -494,7 +494,7 @@ def define_xgb_space(trial):
         "max_depth": trial.suggest_int("max_depth", 3, 6), 
         "subsample": trial.suggest_float("subsample", 0.5, 0.9),
 
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 0.9), 
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0), 
         "min_child_weight": trial.suggest_int("min_child_weight", 5, 20),
 
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-1, 1e2, log=True), 

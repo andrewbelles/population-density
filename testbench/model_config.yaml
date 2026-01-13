@@ -75,7 +75,7 @@ models:
     scale_pos_weight: 7.319203235040033
     gamma: 0.3983262467985261
   Stacking/Logistic:
-    C: 0.19628224813442816
+    C: 0.04074732214047432
     class_weight: null
   Stacking/RandomForest:
     n_estimators: 319
@@ -86,18 +86,19 @@ models:
     class_weight: balanced_subsample
     criterion: gini
   Stacking/XGBoost:
-    n_estimators: 387
-    learning_rate: 0.010051506084660817
-    max_depth: 3
-    subsample: 0.7865308816474262
-    colsample_bytree: 0.6157624371788805
-    min_child_weight: 7
-    reg_alpha: 5.748291778269796
-    reg_lambda: 0.114900690488732
-    max_delta_step: 9
-    gamma: 0.10218589483781253
+    n_estimators: 231
+    learning_rate: 0.006239107807454235
+    max_depth: 4
+    subsample: 0.6557661383913885
+    colsample_bytree: 0.744338626759784
+    min_child_weight: 6
+    reg_alpha: 2.1809963135026305
+    reg_lambda: 1.0179898535840186
+    max_delta_step: 1
+    scale_pos_weight: 2.5924101181695387
+    gamma: 1.1980818788488594
   StackingPassthrough/Logistic:
-    C: 91.3583297855463
+    C: 73.10116549429843
     class_weight: null
   StackingPassthrough/RandomForest:
     n_estimators: 617
@@ -108,29 +109,30 @@ models:
     class_weight: balanced_subsample
     criterion: entropy
   StackingPassthrough/XGBoost:
-    n_estimators: 605
-    learning_rate: 0.0021163466433047787
-    max_depth: 4
-    subsample: 0.5305692011213698
-    colsample_bytree: 0.8141212394764809
-    min_child_weight: 14
-    reg_alpha: 0.6847446417457085
-    reg_lambda: 0.16035664192996582
-    max_delta_step: 1
-    gamma: 0.5657093339055935
+    n_estimators: 740
+    learning_rate: 0.0029309016812090554
+    max_depth: 3
+    subsample: 0.5279350926009896
+    colsample_bytree: 0.722804880919197
+    min_child_weight: 12
+    reg_alpha: 0.8305324843522852
+    reg_lambda: 0.5407508632835727
+    max_delta_step: 7
+    scale_pos_weight: 1.0486471071592947
+    gamma: 0.1719900730521118
   CorrectAndSmooth/Stacking:
     adjacency: queen
-    correction_layers: 21
-    correction_alpha: 0.6098470496366994
-    smoothing_layers: 1
-    smoothing_alpha: 0.4077997332013208
+    correction_layers: 2
+    correction_alpha: 0.9706350176275583
+    smoothing_layers: 20
+    smoothing_alpha: 0.2485710243079611
     autoscale: false
   CorrectAndSmooth/StackingPassthrough:
     adjacency: queen
-    correction_layers: 7
-    correction_alpha: 0.49542187614430827
-    smoothing_layers: 9
-    smoothing_alpha: 0.0040055116209626734
+    correction_layers: 8
+    correction_alpha: 0.6267987495531161
+    smoothing_layers: 2
+    smoothing_alpha: 0.09958231755315948
     autoscale: false
   Stacking/EDGE:
     hidden_dims: 64-64-32

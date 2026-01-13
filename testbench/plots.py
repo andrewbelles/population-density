@@ -123,7 +123,7 @@ def plot_confusion(data):
     meta_cs   = data["cs"]
     y_true    = np.asarray(meta_b["labels"]).reshape(-1)
     labels    = get_labels(meta_b["class_labels"], meta_b["probs"].shape[1])
-    fig, axes = plt.subplots(1, 2, figsize=(10,7), sharey=True, constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10,4), sharey=True, constrained_layout=True)
     im = confusion_panel(axes[0], y_true, meta_b["probs"], labels, "Base")
     confusion_panel(axes[1], y_true, meta_cs["probs_corr"], labels, "C+S")
 
