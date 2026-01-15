@@ -24,14 +24,16 @@ from analysis.hyperparameter import (
     define_xgb_space,
     define_rf_space,
     define_svm_space,
-    define_logistic_space
+    define_logistic_space,
+    define_cnn_space
 )
 
 from models.estimators import (
     make_xgb_classifier,
     make_rf_classifier,
     make_svm_classifier,
-    make_logistic
+    make_logistic,
+    make_image_cnn
 )
 
 def get_param_space(model_type: str): 
@@ -39,7 +41,8 @@ def get_param_space(model_type: str):
         "XGBoost": define_xgb_space,
         "RandomForest": define_rf_space,
         "SVM": define_svm_space, 
-        "Logistic": define_logistic_space
+        "Logistic": define_logistic_space,
+        "CNN": define_cnn_space 
     }
     return mapping[model_type]
 
@@ -48,7 +51,8 @@ def get_factory(model_type: str):
         "XGBoost": make_xgb_classifier,
         "RandomForest": make_rf_classifier,
         "SVM": make_svm_classifier,
-        "Logistic": make_logistic
+        "Logistic": make_logistic,
+        "CNN": make_image_cnn
     }
     return mapping[model_type]
 
@@ -231,3 +235,13 @@ def write_boruta_splits(df: pd.DataFrame, out_dir: str) -> str:
         g_rej["feature_name"].to_csv(rej_path, index=False, header=False)
 
     return str(split_csv)
+
+def flatten_imaging(spatial, mask, gaf, mode): 
+    n = spatial.shape[0]
+    if mode == "spatial": 
+        return np.hstack([spatial.reshape(n, -1), mask.reshape(n, -1)])
+    if mode == "gaf": 
+        return gaf.reshape(n, -1)
+    if mode == "dual": 
+        return np.hstack([spatial.reshape(n, -1), mask.reshape(n, -1), gaf.reshape(n, -1)])
+    raise ValueError("mode must be spatial/gaf/dual")

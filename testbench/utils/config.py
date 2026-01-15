@@ -30,6 +30,14 @@ def normalize_params(model_type: str, params: dict) -> dict:
     if model_type != "SVM": 
         return params 
     cleaned = dict(params)
+
+    if model_type == "CNN" and "conv_channels" in params: 
+        v = params["conv_channels"]
+        if isinstance(v, str): 
+            params["conv_channels"] = tuple(int(x) for x in v.split("-") if x)
+        elif isinstance(v, list): 
+            params["conv_channels"] = tuple(v)
+
     if "gamma" not in cleaned: 
         for key in ("gamma_poly", "gamma_sigmoid", "gamma_rbf", "gamma_custom"):
             if key in cleaned: 

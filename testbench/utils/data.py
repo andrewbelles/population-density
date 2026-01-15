@@ -25,6 +25,8 @@ from pathlib import Path
 
 from testbench.utils.transforms import apply_transforms
 
+from testbench.utils.etc        import flatten_imaging
+
 from scipy.io import loadmat 
 
 from preprocessing.loaders import (
@@ -32,6 +34,7 @@ from preprocessing.loaders import (
     MetaSpec,
     PassthroughSpec,
     load_stacking,
+    load_tensor_data,
     load_viirs_nchs,
     load_coords_from_mobility,
     load_compact_dataset,
@@ -313,3 +316,45 @@ def make_filtered_loader(base_loader, keep_list: list[str] | None):
         data = base_loader(path)
         return filter_features(data, keep_list)
     return _loader 
+
+def make_tensor_loader(mode, canvas_h, canvas_w, gaf_size): 
+    def _loader(filepath): 
+        spatial, mask, gaf, labels, fips = load_tensor_data(filepath)
+        X = flatten_imaging(spatial, mask, gaf, mode)
+        
+        coords = np.zeros((X.shape[0], 2), dtype=np.float64)
+        return {
+            "features": X, 
+            "labels": labels, 
+            "coords": coords, 
+            "feature_names": np.array([], dtype="U"),
+            "sample_ids": fips 
+        }
+    return _loader 
+
+def make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size): 
+    n_pix = canvas_h * canvas_w 
+    g_pix = gaf_size * gaf_size 
+
+    def _adapter(X): 
+        X = np.asarray(X, dtype=np.float32)
+        n = X.shape[0]
+
+        if mode == "spatial": 
+            spatial = X[:, :n_pix].reshape(n, 1, canvas_h, canvas_w)
+            mask    = X[:, n_pix:2*n_pix].reshape(n, 1, canvas_h, canvas_w)
+            return np.concatenate([spatial, mask], axis=1)
+
+        if mode == "gaf": 
+            return X[:, :g_pix].reshape(n, 1, gaf_size, gaf_size)
+
+        if mode == "dual": 
+            spatial = X[:, :n_pix].reshape(n, 1, canvas_h, canvas_w)
+            mask    = X[:, n_pix:2*n_pix].reshape(n, 1, canvas_h, canvas_w)
+            x_main  = np.concatenate([spatial, mask], axis=1)
+            x_aux   = X[:, 2*n_pix:2*n_pix + g_pix].reshape(n, 1, gaf_size, gaf_size)
+            return x_main, x_aux 
+
+        raise ValueError("mode must be spatial/gaf/dual")
+
+    return _adapter 

@@ -447,6 +447,27 @@ def load_coords_from_mobility(filepath: str) -> DatasetDict:
         "sample_ids": fips
     }
 
+
+def load_tensor_data(path): 
+    mat = loadmat(path)
+    required = {"spatial", "mask", "gaf", "labels"}
+    if not required.issubset(mat): 
+        raise ValueError(f"{path} missing required keys: {sorted(required)}")
+
+    spatial = np.asarray(mat["spatial"], dtype=np.float32)
+    mask    = np.asarray(mat["mask"], dtype=np.float32)
+    gaf     = np.asarray(mat["gaf"], dtype=np.float32)
+    labels  = np.asarray(mat["labels"], dtype=np.int64).reshape(-1)
+
+    if "fips" in mat: 
+        fips = _mat_str_vector(mat["fips"]).astype("U5")
+    elif "fips_codes" in mat: 
+        fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+    else: 
+        fips = np.asarray([f"{i:05d}" for i in range(labels.shape[0])], dtype="U5")
+
+    return spatial, mask, gaf, labels, fips
+
 # ---------------------------------------------------------
 # Unsupervised Loader Interface 
 # ---------------------------------------------------------

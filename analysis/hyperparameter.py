@@ -208,6 +208,55 @@ class PipelineEvaluator(OptunaEvaluator):
     '''
     pass 
 
+class CNNEvaluator(OptunaEvaluator): 
+
+    def __init__(
+        self, 
+        filepath, 
+        loader_func,
+        model_factory, 
+        param_space, 
+        task,
+        config
+    ): 
+        self.filepath       = filepath 
+        self.loader         = loader_func 
+        self.factory        = model_factory 
+        self.param_space_fn = param_space 
+        self.task           = task 
+        self.config         = config 
+        self.config.verbose = False 
+
+        data   = self.loader(filepath)
+        self.X = np.asarray(data["features"], dtype=np.float32)
+        self.y = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+        self.coords = data.get("coords")
+
+    def suggest_params(self, trial): 
+        return self.param_space_fn(trial)
+
+    def evaluate(self, params): 
+        splitter    = self.config.get_splitter(self.task)
+        y_for_split = self.y 
+        scores      = []
+
+        for train_idx, test_idx in splitter.split(self.X, y_for_split): 
+            model = self.factory(**params)
+            model.fit(self.X[train_idx], self.y[train_idx])
+
+            y_pred = model.predict(self.X[test_idx])
+            y_prob = None 
+            if hasattr(model, "predict_proba"): 
+                y_prob = model.predict_proba(self.X[test_idx])
+
+            metrics = self.task.compute_metrics(self.y[test_idx], y_pred, y_prob)
+            score   = metrics.get("f1_macro", np.nan)
+            if np.isnan(score): 
+                score = metrics.get("accuracy", np.nan)
+            scores.append(score)
+
+        return float(np.mean(scores))
+
 # ---------------------------------------------------------
 # Correct and Smooth Model 
 # ---------------------------------------------------------
@@ -592,6 +641,25 @@ def define_gate_space(trial):
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
         "residual": trial.suggest_categorical("residual", [True, False]), 
         "batch_norm": trial.suggest_categorical("batch_norm", [True, False])
+    }
+
+def define_cnn_space(trial): 
+    conv_choices = {
+        "32-64-128": (32, 64, 128),
+        "64-128": (64, 128)
+    }
+    key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
+    return {
+        "conv_channels": conv_choices[key],
+        "kernel_size": trial.suggest_categorical("kernel_size", [3, 5]),
+        "pool_size": 2, 
+        "fc_dim": trial.suggest_categorical("fc_dim", [64, 128, 256]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.5),
+        "epochs": trial.suggest_int("epochs", 5, 30), 
+        "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+        "lr": trial.suggest_float("lr", 1e-4, 3e-3, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+        "use_bn": trial.suggest_categorical("use_bn", [True, False])
     }
 
 # --------------------------------------------------------- 

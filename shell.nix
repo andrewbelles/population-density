@@ -1,6 +1,9 @@
 { pkgs ? import <nixpkgs> { config.allowUnfree = true; } }:
 
-pkgs.mkShell {
+let 
+  torch = pkgs.python312Packages.torch.override { cudaSupport = true; }; 
+  torchvision = pkgs.python312Packages.torchvision; 
+in pkgs.mkShell {
   packages = with pkgs; [
     python312
     gcc
@@ -29,10 +32,11 @@ pkgs.mkShell {
     python312Packages.optuna
 
     # PyTorch with CUDA
-    python312Packages.torch
-    python312Packages.torchvision
+    torch
+    torchvision
 
     cudaPackages.cudatoolkit  
+    cudaPackages.cudnn
     cudaPackages.nccl 
   ];
 
@@ -42,6 +46,7 @@ pkgs.mkShell {
     pkgs.zlib
     pkgs.libffi
     pkgs.cudaPackages.cudatoolkit
+    pkgs.cudaPackages.cudnn
   ] + ":/run/opengl-driver/lib";
 
   shellHook = ''

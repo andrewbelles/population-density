@@ -7,14 +7,27 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
+from typing import Callable
+from joblib import pool
 import numpy as np 
 
+from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier 
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression 
 
 from xgboost import XGBClassifier, XGBRegressor  
+
+from utils.loss_funcs import focal_loss_obj, focal_mlogloss_eval 
+
+import torch 
+
+from torch import Tensor, from_numpy, nn 
+
+from torch.utils.data import DataLoader, TensorDataset 
+
+from models.networks import ConvBackbone
 
 # ---------------------------------------------------------
 # Regressors 
@@ -109,17 +122,17 @@ class XGBRegressorWrapper(BaseEstimator, RegressorMixin):
         n_jobs: int = -1,  
         **kwargs,
     ):
-        self.n_estimators = n_estimators
-        self.max_depth = max_depth
-        self.learning_rate = learning_rate
-        self.subsample = subsample
-        self.colsample_bytree = colsample_bytree
+        self.n_estimators          = n_estimators
+        self.max_depth             = max_depth
+        self.learning_rate         = learning_rate
+        self.subsample             = subsample
+        self.colsample_bytree      = colsample_bytree
         self.early_stopping_rounds = early_stopping_rounds
-        self.eval_fraction = eval_fraction
-        self.gpu = gpu
-        self.random_state = random_state
-        self.n_jobs = n_jobs 
-        self.kwargs = kwargs
+        self.eval_fraction         = eval_fraction
+        self.gpu                   = gpu
+        self.random_state          = random_state
+        self.n_jobs                = n_jobs 
+        self.kwargs                = kwargs
 
     def fit(self, X, y): 
         X = np.asarray(X, dtype=np.float64)
@@ -255,6 +268,7 @@ class XGBClassifierWrapper(BaseEstimator, RegressorMixin):
         gpu: bool = False,
         random_state: int | None = None,
         n_jobs: int = -1,  
+        focal_gamma: float = 2.0, 
         **kwargs,
     ):
         self.n_estimators = n_estimators
@@ -267,6 +281,7 @@ class XGBClassifierWrapper(BaseEstimator, RegressorMixin):
         self.gpu = gpu
         self.random_state = random_state
         self.n_jobs = n_jobs 
+        self.focal_gamma = focal_gamma
         self.kwargs = kwargs
 
     def fit(self, X, y): 
@@ -275,8 +290,18 @@ class XGBClassifierWrapper(BaseEstimator, RegressorMixin):
 
         device = "cuda" if self.gpu else "cpu"
 
-        n_classes = len(np.unique(y))
+        n_classes = int(np.max(y)) + 1 if y.size else 0  
         is_multi  = n_classes > 2 
+
+        if is_multi:
+            alpha     = _alpha_from_counts(y, n_classes)
+            objective = focal_loss_obj(n_classes, alpha, self.focal_gamma)
+            metric    = focal_mlogloss_eval(n_classes)
+            disable_default_eval_metric = True 
+        else: 
+            objective = "binary:logistic"
+            metric    = "logloss"
+            disable_default_eval_metric = False  
 
         self.model_ = XGBClassifier(
             n_estimators=self.n_estimators,
@@ -288,8 +313,9 @@ class XGBClassifierWrapper(BaseEstimator, RegressorMixin):
             device=device,
             random_state=self.random_state,
             n_jobs=self.n_jobs,
-            eval_metric="mlogloss" if is_multi else "logloss",
-            objective="multi:softprob" if is_multi else "binary:logistic", 
+            eval_metric=metric,
+            objective=objective, 
+            disable_default_eval_metric=disable_default_eval_metric,
             num_class=n_classes if is_multi else None, 
             **self.kwargs
         )
@@ -396,6 +422,249 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
             raise AttributeError("SVMClassifier was instantiated with probability=False")
         return self.model_.predict_proba(X)
 
+# ---------------------------------------------------------
+# CNN, Supervised Feature Extraction  
+# ---------------------------------------------------------
+
+class CNNClassifier(BaseEstimator, ClassifierMixin): 
+
+    def __init__(
+        self, 
+        *,
+        input_shape: tuple[int, int, int] | None = None, 
+        aux_input_shape: tuple[int, int, int] | None = None, 
+        conv_channels: tuple[int, ...] = (32, 64, 128), 
+        kernel_size: int = 3, 
+        pool_size: int = 2, 
+        fc_dim: int = 128, 
+        dropout: float = 0.2, 
+        use_bn: bool = True, 
+        epochs: int = 10, 
+        batch_size: int = 32, 
+        lr: float = 1e-3, 
+        weight_decay: float = 0.0, 
+        random_state: int = 0,
+        device: str | None = None, 
+        normalize: bool = True, 
+        input_adapter: Callable | None = None, 
+        merge_fn: Callable | None = None 
+    ): 
+        self.input_shape     = input_shape
+        self.aux_input_shape = aux_input_shape
+        self.conv_channels   = conv_channels
+        self.kernel_size     = kernel_size
+        self.pool_size       = pool_size
+        self.fc_dim          = fc_dim
+        self.dropout         = dropout
+        self.use_bn          = use_bn
+        self.epochs          = epochs
+        self.batch_size      = batch_size
+        self.lr              = lr
+        self.weight_decay    = weight_decay
+        self.random_state    = random_state 
+        self.device          = device
+        self.normalize       = normalize
+        self.input_adapter   = input_adapter
+        self.merge_fn        = merge_fn
+
+    def _resolve_device(self): 
+        if self.device is not None: 
+            return torch.device(self.device)
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _adapt_inputs(self, X: NDArray): 
+        if self.input_adapter is not None: 
+            return self.input_adapter(X)
+
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim == 4: 
+            return X 
+
+        if self.input_shape is None: 
+            raise ValueError("input_shape required when X is flat")
+
+        n = X.shape[0]
+        c, h, w = self.input_shape 
+        return X.reshape(n, c, h, w)
+
+    def _fit_norm_stats(self, x_main, x_aux): 
+        if not self.normalize: 
+            self._norm_main = None 
+            self._norm_aux  = None 
+            return 
+        self._norm_main = (float(x_main.mean()), float(x_main.std()) + 1e-6)
+        if x_aux is not None: 
+            self._norm_aux = (float(x_aux.mean()), float(x_aux.std()) + 1e-6)
+        else: 
+            self._norm_aux = None 
+
+    def _apply_norm(self, x: NDArray, stats): 
+        if stats is None: 
+            return x 
+        mu, sd = stats 
+        return (x - mu) / sd 
+
+    def _prepare_inputs(self, X, training: bool): 
+        adapted = self._adapt_inputs(X)
+        if isinstance(adapted, tuple): 
+            x_main, x_aux = adapted 
+        else: 
+            x_main, x_aux = adapted, None 
+
+        if training: 
+            self._fit_norm_stats(x_main, x_aux)
+
+        x_main = self._apply_norm(x_main, self._norm_main)
+        if x_aux is not None: 
+            x_aux = self._apply_norm(x_aux, self._norm_aux)
+
+        return x_main, x_aux 
+
+    def _make_dataset(self, x_main, x_aux, y_idx=None): 
+        if y_idx is None: 
+            return (TensorDataset(torch.from_numpy(x_main)) if x_aux is None else 
+                    TensorDataset(torch.from_numpy(x_main), torch.from_numpy(x_aux)))
+        return (TensorDataset(
+                    torch.from_numpy(x_main), 
+                    torch.from_numpy(y_idx)
+                ) if x_aux is None else 
+                TensorDataset(
+                    torch.from_numpy(x_main), 
+                    torch.from_numpy(x_aux), 
+                    torch.from_numpy(y_idx)
+                ))
+    
+    def _make_loader(self, ds, shuffle: bool): 
+        return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle, drop_last=False)
+
+    def _forward_features(self, xb, xa=None): 
+        f_main = self.model_.backbone_main(xb)
+        if xa is None: 
+            return f_main 
+        f_aux = self.model_.backbone_aux(xa)
+        return (self.merge_fn(f_main, f_aux) 
+                if self.merge_fn else torch.cat([f_main, f_aux], dim=1)) 
+
+    def fit(self, X, y, coords=None): 
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.int64).reshape(-1)
+
+        self.classes_, y_idx = np.unique(y, return_inverse=True)
+        self.n_classes_      = len(self.classes_)
+
+        torch.manual_seed(self.random_state)
+        self.device_ = self._resolve_device()
+
+        x_main, x_aux = self._prepare_inputs(X, training=True)
+
+        self.backbone_main_ = ConvBackbone(
+            in_channels=x_main.shape[1],
+            conv_channels=self.conv_channels,
+            kernel_size=self.kernel_size,
+            pool_size=self.pool_size,
+            use_bn=self.use_bn
+        )
+
+        self.backbone_aux_  = None 
+        if x_aux is not None: 
+            self.backbone_aux_ = ConvBackbone(
+                in_channels=x_aux.shape[1],
+                conv_channels=self.conv_channels,
+                kernel_size=self.kernel_size,
+                pool_size=self.pool_size,
+                use_bn=self.use_bn
+            )
+            feat_dim = self.backbone_main_.out_dim + self.backbone_aux_.out_dim 
+        else: 
+            feat_dim = self.backbone_main_.out_dim
+
+        self.head_ = nn.Sequential(
+            nn.Linear(feat_dim, self.fc_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.fc_dim, self.n_classes_)
+        )
+
+        self.model_ = nn.Module() 
+        self.model_.backbone_main = self.backbone_main_ 
+        self.model_.backbone_aux  = self.backbone_aux_ 
+        self.model_.head          = self.head_ 
+        self.model_.to(self.device)
+
+        ds      = self._make_dataset(x_main, x_aux, y_idx)
+        dl      = self._make_loader(ds, shuffle=True)
+        opt     = torch.optim.AdamW(
+            self.model_.parameters(), 
+            lr=self.lr, 
+            weight_decay=self.weight_decay
+        )
+        loss_fn = nn.CrossEntropyLoss()
+
+        self.model_.train() 
+        for _ in range(self.epochs): 
+            for batch in dl: 
+                if x_aux is None: 
+                    xb, yb = batch 
+                    feats  = self._forward_features(xb.to(self.device_))
+                else: 
+                    xb, xa, yb = batch 
+                    feats  = self._forward_features(xb.to(self.device_), xa.to(self.device_))
+
+                logits = self.model_.head(feats)
+                loss   = loss_fn(logits, yb.to(self.device_))
+                opt.zero_grad() 
+                loss.backward() 
+                opt.step() 
+
+        return self
+
+    def predict_proba(self, X, coords=None): 
+        X = np.asarray(X, dtype=np.float32)
+
+        x_main, x_aux = self._prepare_inputs(X, training=False)
+        ds = self._make_dataset(x_main, x_aux)
+        dl = self._make_loader(ds, shuffle=False)
+
+        self.model_.eval() 
+        probs = []
+        with torch.no_grad(): 
+            for batch in dl: 
+                if x_aux is None: 
+                    xb     = batch[0]
+                    feats  = self._forward_features(xb.to(self.device_))
+                else: 
+                    xb, xa = batch 
+                    feats  = self._forward_features(xb.to(self.device_), xa.to(self.device_))
+
+                logits = self.model_.head(feats)
+                probs.append(torch.softmax(logits, dim=1).cpu().numpy())
+
+        return np.vstack(probs)
+
+    def predict(self, X, coords=None): 
+        proba = self.predict_proba(X, coords=coords)
+        idx   = np.argmax(proba, axis=1)
+        return self.classes_[idx]
+
+    def extract_features(self, X, coords=None): 
+        X = np.asarray(X, dtype=np.float32)
+        x_main, x_aux = self._prepare_inputs(X, training=False)
+        ds = self._make_dataset(x_main, x_aux)
+        dl = self._make_loader(ds, shuffle=False)
+
+        self.model_.eval() 
+        feats = []
+        with torch.no_grad(): 
+            for batch in dl: 
+                if x_aux is None: 
+                    xb = batch[0]
+                    f  = self._forward_features(xb.to(self.device_))
+                else: 
+                    xb, xa = batch 
+                    f = self._forward_features(xb.to(self.device_), xa.to(self.device_))
+                feats.append(f.cpu().numpy())
+
+        return np.vstack(feats)
 
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)
@@ -442,3 +711,34 @@ def make_logistic(C: float = 1.0, **kwargs):
 
 def make_svm_classifier(probability=True, **kwargs): 
     return lambda: SVMClassifier(probability=probability, **kwargs)
+
+def make_image_cnn(
+    *,
+    input_shape=None, 
+    aux_input_shape=None,
+    input_adapter=None,
+    merge_fn=None,
+    **fixed 
+): 
+    def _factory(**params): 
+        merged = dict(fixed)
+        merged.update(params)
+        return CNNClassifier(
+            input_shape=input_shape,
+            aux_input_shape=aux_input_shape,
+            input_adapter=input_adapter,
+            merge_fn=merge_fn,
+            **merged 
+        )
+    return _factory 
+
+# ---------------------------------------------------------
+# Helpers 
+# ---------------------------------------------------------
+
+def _alpha_from_counts(y, n_classes): 
+    counts = np.bincount(y, minlength=n_classes).astype(np.float64)
+    counts = np.maximum(counts, 1.0)
+    inv    = (counts.sum() / (n_classes * counts))
+    alpha  = inv / inv.mean()
+    return alpha 

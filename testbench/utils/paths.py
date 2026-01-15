@@ -49,6 +49,8 @@ DEFAULT_PROB_PATHS     = {
 }
 
 DEFAULT_CSV            = project_path("data", "results", "boruta_summary.csv")
+DEFAULT_DATA           = project_path("data", "datasets", "viirs_nchs_tensor_2023.mat")
+DEFAULT_OUT            = project_path("data", "results", "viirs_cnn_features.mat")
 
 def check_paths_exist(paths, label): 
     missing = [p for p in paths if not Path(p).exists()]
