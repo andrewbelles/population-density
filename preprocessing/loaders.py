@@ -373,6 +373,12 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
     else:
         coords = np.zeros((y.shape[0], 2), dtype=np.float64)
 
+    if "feature_names" in mat: 
+        feature_names = _mat_str_vector(mat["feature_names"]).astype("U")
+        feature_names = np.array([n.strip() for n in feature_names], dtype="U")
+    else: 
+        feature_names = np.array([], dtype=np.str_)
+
     if "fips_codes" in mat: 
         fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
     else: 
@@ -382,7 +388,7 @@ def load_compact_dataset(filepath: str) -> DatasetDict:
         "features": X, 
         "labels": y, 
         "coords": coords,
-        "feature_names": np.array([]), 
+        "feature_names": feature_names, 
         "sample_ids": fips 
     }
 
@@ -726,6 +732,7 @@ def load_passthrough(
 
         if probs.shape[1] == 2: 
             probs = probs[:, [1]]
+            prob_blocks.append(probs)
             prob_names.append(f"{s['name']}__{m_name}_p1")
         else: 
             prob_blocks.append(probs)

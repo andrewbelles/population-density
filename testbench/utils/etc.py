@@ -175,3 +175,59 @@ def write_csv(df: pd.DataFrame, path: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     return str(out)
+
+def parse_max_features(value: str | None): 
+    if value is None: 
+        return None 
+    s = str(value).strip().lower() 
+    if s in ("none", "null"): 
+        return None 
+    try: 
+        if "." in s: 
+            return float(s)
+        return int(s)
+    except ValueError: 
+        return value 
+
+def to_prefixed_name(group: str, feature: str) -> str: 
+    g      = str(group).strip().lower()
+    f      = str(feature).strip() 
+    prefix = f"{g}/"
+    if f.startswith(prefix): 
+        f = f[len(prefix):]
+    f = f.replace("/", "__")
+    return f"{g}__{f}"
+
+def split_boruta(df: pd.DataFrame) -> pd.DataFrame: 
+    df = df.copy() 
+    df["group"] = df["group"].astype(str).str.lower() 
+    df["feature_name"] = [
+        to_prefixed_name(g, f) for g, f in zip(df["group"], df["feature"])
+    ]
+    return df 
+
+def write_boruta_splits(df: pd.DataFrame, out_dir: str) -> str: 
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    split_csv = out / "boruta_split.csv"
+    df.to_csv(split_csv, index=False)
+
+    keep_mask = df["status"].isin(["confirmed", "tentative"])
+    keep_df   = df[keep_mask]
+    rej_df    = df[~keep_mask]
+
+    keep_df.to_csv(out / "boruta_keep.csv", index=False)
+    rej_df.to_csv(out / "boruta_reject.csv", index=False)
+
+    for group, gdf in df.groupby("group"): 
+        g_keep    = gdf[gdf["status"].isin(["confirmed", "tentative"])]
+        g_rej     = gdf[~gdf["status"].isin(["confirmed", "tentative"])]
+
+        keep_path = out / f"boruta_keep_{group}.txt"
+        rej_path  = out / f"boruta_reject_{group}.txt"
+
+        g_keep["feature_name"].to_csv(keep_path, index=False, header=False)
+        g_rej["feature_name"].to_csv(rej_path, index=False, header=False)
+
+    return str(split_csv)

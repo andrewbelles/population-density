@@ -19,7 +19,7 @@ from scipy.stats import entropy, kurtosis, skew
 from rasterstats import zonal_stats 
 import fiona 
 
-from support.helpers import project_path
+from utils.helpers import project_path
 
 GLCM_WINDOW = 7 
 GLCM_STRIDE = 7 
@@ -28,7 +28,7 @@ VREI_BINS   = 64
 GLCM_MIN_VALID = 0.5
 
 class ViirsDataset: 
-    STATS = ["min", "max", "mean"]
+    STATS = ["max", "mean"]
     EXTRA = ["variance", "vrei", "skew", "kurtosis"]
 
 

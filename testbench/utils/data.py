@@ -17,8 +17,11 @@ from utils.helpers import (
 )
 
 from testbench.utils.paths import (
-    LABELS_PATH
+    LABELS_PATH,
+    DATASETS
 )
+
+from pathlib import Path
 
 from testbench.utils.transforms import apply_transforms
 
@@ -40,8 +43,18 @@ from preprocessing.loaders import (
 
 from preprocessing.loaders import load_passthrough
 
-DATASETS = ("VIIRS", "NLCD", "SAIPE")
 LEGACY   = ("TIGER",)
+
+PREFIXES = (
+    "viirs__",
+    "nlcd__",
+    "saipe__",
+    "tiger__",
+    "cross__",
+    "coords__",
+    "oof__",
+    "passthrough__"
+)
 
 BASE: dict[str, ConcatSpec] = {
     "VIIRS": {
@@ -142,7 +155,7 @@ def stacking_loader(prob_files):
         return load_stacking(prob_files)
     return _loader 
 
-def passthrough_loader(prob_files):
+def passthrough_loader(prob_files, passthrough_features = None):
     passthrough_base  = BASE["PASSTHROUGH"]
     passthrough_specs: list[PassthroughSpec] = [
         {
@@ -262,3 +275,41 @@ def load_raw(key: str) -> dict:
         "feature_names": names, 
         "sample_ids": fips  
     }
+
+def read_feature_list(path: str | None): 
+    if not path: 
+        return None 
+    lines = Path(path).read_text().splitlines() 
+    return [l.strip() for l in lines if l.strip()]
+
+def norm_name(name: str) -> str: 
+    s = str(name).strip().lower() 
+    for prefix in PREFIXES: 
+        if s.startswith(prefix): 
+            return s[len(prefix):]
+    return s
+
+def filter_features(data: dict, keep_list: list[str] | None) -> dict: 
+    if not keep_list: 
+        return data 
+    names = np.asarray(data.get("feature_names"))
+    if names is None or names.size == 0: 
+        raise ValueError("feature_names missing for filtering")
+
+    keep_norm = {norm_name(n) for n in keep_list}
+    cols      = [i for i, n in enumerate(names) if norm_name(n) in keep_norm]
+    if not cols: 
+        raise ValueError("no features kept after boruta filtering")
+
+    out = dict(data)
+    out["features"] = np.asarray(out["features"])[:, cols]
+    out["feature_names"] = names[cols]
+    return out 
+
+def make_filtered_loader(base_loader, keep_list: list[str] | None): 
+    if not keep_list: 
+        return base_loader 
+    def _loader(path): 
+        data = base_loader(path)
+        return filter_features(data, keep_list)
+    return _loader 

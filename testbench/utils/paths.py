@@ -10,6 +10,7 @@ from pathlib import Path
 
 from utils.helpers import project_path
 
+DATASETS               = ("SAIPE", "VIIRS", "NLCD")
 MOBILITY_PATH          = project_path("data", "datasets", "travel_proxy.mat")
 SHAPEFILE              = project_path("data", "geography", "county_shapefile", 
                                       "tl_2020_us_county.shp")
@@ -34,13 +35,26 @@ ROUND_ROBIN_OVR_PROBA  = {
 
 EXPERT_DATA            = {
     "VIIRS": project_path("data", "datasets", "viirs_nchs_2023.mat"),
-    "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"),
-    "NLCD":  project_path("data", "datasets", "nlcd_nchs_2023.mat")
+    # "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"),
+    "NLCD":  project_path("data", "datasets", "nlcd_nchs_2023.mat"),
+    "SAIPE": project_path("data", "datasets", "saipe_nchs_2023.mat")
 }
 PAIRWISE_CSV           = project_path("data", "results", "pairwise_vif.csv")
 FULL_CSV               = project_path("data", "results", "full_vif.csv")
+
+DEFAULT_PROB_PATHS     = {
+    "VIIRS": project_path("data", "stacking", "viirs_optimized_probs.mat"),
+    "NLCD":  project_path("data", "stacking", "nlcd_optimized_probs.mat"),
+    "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat")
+}
+
+DEFAULT_CSV            = project_path("data", "results", "boruta_summary.csv")
 
 def check_paths_exist(paths, label): 
     missing = [p for p in paths if not Path(p).exists()]
     if missing: 
         raise FileNotFoundError(f"{label} missing: {missing}")
+
+def resolve_prob_files(prob_paths: dict | None = None): 
+    paths = prob_paths or DEFAULT_PROB_PATHS 
+    return [paths[n] for n in DATASETS]

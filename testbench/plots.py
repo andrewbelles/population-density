@@ -53,8 +53,6 @@ def _log(msg, quiet=False):
 
 def build_stacking_data(*, cross: str = "off", round_robin_stack: bool = False, **_):
 
-
-
     buf = io.StringIO() 
 
     expert_data  = stacking.test_expert_oof(buf)

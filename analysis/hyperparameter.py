@@ -190,6 +190,10 @@ class StandardEvaluator(OptunaEvaluator):
             config=self.config,
         )
 
+        if "error" in results.columns and results["error"].notna().any(): 
+            err_msgs = results.loc[results["error"].notna(), "error"].unique().tolist() 
+            raise RuntimeError(f"cross-val fold errors: {err_msgs}")
+
         summary = cv.summarize(results)
 
         for metric in ["f1_macro_mean", "accuracy_mean", "r2_mean"]: 
@@ -497,11 +501,13 @@ def define_xgb_space(trial):
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0), 
         "min_child_weight": trial.suggest_int("min_child_weight", 5, 20),
 
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-1, 1e2, log=True), 
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-1, 1e2, log=True),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-2, 1e2, log=True), 
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 1e2, log=True),
 
-        "max_delta_step": trial.suggest_int("max_delta_step", 0, 10),
-        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 1.0, 50.0, log=True),
+        "max_delta_step": trial.suggest_int("max_delta_step", 1, 10),
+        # "scale_pos_weight": trial.suggest_float("scale_pos_weight", 1.0, 50.0, log=True),
+
+        "focal_gamma": trial.suggest_float("focal_gamma", 0.0, 5.0),
 
         "gamma": trial.suggest_float("gamma", 1e-1, 1e1, log=True), 
 

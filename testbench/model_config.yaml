@@ -122,17 +122,17 @@ models:
     gamma: 0.1719900730521118
   CorrectAndSmooth/Stacking:
     adjacency: queen
-    correction_layers: 2
-    correction_alpha: 0.9706350176275583
-    smoothing_layers: 20
-    smoothing_alpha: 0.2485710243079611
+    correction_layers: 24
+    correction_alpha: 0.04814434057151187
+    smoothing_layers: 3
+    smoothing_alpha: 0.4652685064053682
     autoscale: false
   CorrectAndSmooth/StackingPassthrough:
     adjacency: queen
-    correction_layers: 8
-    correction_alpha: 0.6267987495531161
-    smoothing_layers: 2
-    smoothing_alpha: 0.09958231755315948
+    correction_layers: 15
+    correction_alpha: 0.5088911868087393
+    smoothing_layers: 3
+    smoothing_alpha: 0.3176178861381537
     autoscale: false
   Stacking/EDGE:
     hidden_dims: 64-64-32

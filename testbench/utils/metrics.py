@@ -8,6 +8,8 @@
 
 import numpy as np 
 
+import pandas as pd 
+
 from numpy.typing import NDArray
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
@@ -112,3 +114,11 @@ def summarize_vif(vif_df):
         f"p95={np.percentile(finite, 95):.3f}"
         f"max={finite.max():.3f}"
     )
+
+def summarize_boruta(path: str) -> pd.DataFrame: 
+    df       = pd.read_csv(path)
+    required = {"status", "group", "feature"}
+    missing  = required - set(df.columns)
+    if missing: 
+        raise ValueError(f"boruta summary missing columns: {sorted(missing)}")
+    return df 
