@@ -9,11 +9,22 @@ Most estimators follow `support.helpers.ModelInterface`:
 `fit_and_predict((X_train, X_test), (y_train, y_test), (coords_train, coords_test), **kwargs) ->
 y_hat_scaled`
 
+Neural models expose sklearn-like `fit` / `predict_proba` in `models/estimators.py`. 
+
 ## Estimators
 
-Classification/regression estimators live in `models/estimators.py`:
-- Logistic, RandomForest, XGBoost, SVM (classification).
-- Linear / RF / XGB / (regression).
+`models/estimators.py`: 
+- Classical ML: Logistic, RandomForest, XGBoost, SVM. 
+- CNN estimator that wraps backbone from `models/networks.py`
+- Implements optimizer/CV contracts used by `analysis/` and `testbench/`
+
+## CNN Backbones 
+
+`models/networks.py` defines reusable image backbones: 
+- `ConvBackbone` for generic image inputs. 
+- Configurable channels, kernel size, pooling, dropout, and FC head. 
+
+The estimator selects the backbone and handles training, evaluation, and prediction 
 
 ## Graph Post‑Processing
 

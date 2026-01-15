@@ -1,39 +1,22 @@
 # Population Density Prediction
 
-County-level population density modeling with multi‑modal features, stacking, and graph
-post‑processing.
+County-level population regression using a two-stage, hierarchical mixture of experts model, with label propagation and smoothing. 
 
-## Current Model Performance 
+The first stage targets the NCHS 6-class urban-rural classification scheme using multi-modal geospatial features. 
 
-The below table shows performance results for each stage of the model architecture of the classifier. Queen adjacency in this instance refers to two counties having an edge in the graph topology iff they share an explicit edge (or vertex). 
+## Current Focus 
 
-| Stage | Model | accuracy | f1_macro | roc_auc |
-| --- | --- | --- | --- | --- |
-| VIIRS | XGBoost | 0.5853 | 0.4641 | 0.8198 |
-| TIGER | XGBoost | 0.5167 | 0.4195 | 0.7805 |
-| NLCD | XGBoost | 0.6065 | 0.5039 | 0.8399 |
-| Stacking | Logistic | 0.6268 | 0.5358 | 0.8455 |
-| CorrectAndSmooth | queen | 0.6433 | 0.5679 | 0.8772 |
-
-## Current Status
-
-The project now spans three primary feature sources (VIIRS nighttime lights, TIGER roads, NLCD land
-cover) and a late‑fusion pipeline:
-- Expert models per dataset (VIIRS/TIGER/NLCD).
-- A stacked classifier over OOF probabilities.
-- Correct‑and‑Smooth graph post‑processing on stacked outputs (Queen or mobility adjacency).
-
-Hyperparameter search uses Optuna with early stopping and YAML config caching (`analysis/
-model_config.yaml`, `testbench/model_config.yaml`).
+- Improving performance of expert models on scalar datasets (NLCD, SAIPE)
+- Shifting satellite based data into spatial, and frequency based imaging for use in CNN (VIIRS)
+- Correct-and-Smooth improvement through learned graph topologies. 
 
 ## Data Processing Pipeline
 
 Dataset compilers live in `preprocessing/` and emit `.mat` files under `data/`:
-- VIIRS nighttime lights texture/entropy features.
+- VIIRS nighttime lights into images for use in convolutional neural networks.
 - TIGER road topology statistics.
 - NLCD land cover configuration metrics.
-- Mobility / travel‑time adjacency sources.
-- Optional climate and SAIPE baselines.
+- SAIPE socioeconomic (specifically poverty) information. 
 
 See `preprocessing/README.md` for the per‑dataset build steps.
 
@@ -44,10 +27,10 @@ Core tools:
 - `analysis/hyperparameter.py` for Optuna optimization and nested CV.
 - `testbench/stacking.py` for the full stacking + C+S pipeline.
 
-Quick start (stacking pipeline):
+For the analysis of the full pipeline: 
 ```bash
 nix-shell
-python testbench/stacking.py --resume
+python testbench/stacking.py --tests pipeline --cross both
 ```
 
 ## Repository Layout
@@ -55,13 +38,7 @@ python testbench/stacking.py --resume
 - `analysis/`: CV harness, Optuna, graph metrics, diagnostics.
 - `preprocessing/`: dataset compilation and loaders.
 - `models/`: estimators, metric learning, graph utilities, post‑processing.
-- `testbench/`: stacking, downstream metric tests, graph evaluation.
-- `support/`: C++ geospatial backend and helpers.
+- `testbench/`: end-to-end testing and visualization. 
 - `scripts/`: data fetch and parsing scripts.
-
-## Supporting Modules
-
-The C++ geospatial backend (support/) provides fast graph construction and distance utilities used by
-graph models and post‑processing.
-
-Build instructions are in `support/README.md`.
+- `utils/`: shared helpers (paths  metrics, interfaces).
+- `data/`: datasets and outputs. 

@@ -11,15 +11,7 @@ Key properties:
 - `kfold` or repeated random splits (`CVConfig`).
 - Supports classification and regression tasks.
 
-Example:
-```bash
-python analysis/cross_validation.py --decade 2020 --folds 5 --repeats 20 --models xgb rf linear
-```
-
-Outputs:
-
-- `data/models/raw/cv_results_*.csv`
-- `data/models/raw/cv_summary_*.csv`
+The module's intended usage is through the `CrossValidator` class wrapped over a model/loader pairing.
 
 ## Hyperparameter Optimization
 
@@ -28,6 +20,8 @@ Outputs:
 - Standard evaluator (single model).
 - Nested CV helper (run_nested_cv).
 - Early stopping by stagnation.
+
+Provides support for config caching to user-defined paths. 
 
 ## Graph Metrics
 
@@ -48,13 +42,7 @@ Outputs:
 
 For quantifying and understanding Correct‑and‑Smooth behavior.
 
-## Benchmarks
+## Feature Diagnostics 
 
-Specialized benchmarks and diagnostics:
-
-- `climate_benchmarks.py`
-- `saipe_benchmarks.py`
-- `gating_benchmarks.py`
-- `optimizer.py`
-
-Although `testbench/` includes more comprehensive tests and in the future will be where all benchmakrs. 
+- `analyis/boruta.py`: feature relevance, noise determination. 
+- `analysis/vif.py`: multicollinearity checks. 

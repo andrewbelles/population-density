@@ -8,7 +8,7 @@ Run from the repo root inside `nix-shell` (sets `PROJECT_ROOT`, installs deps, c
 
 ## Datasets
 
-### `viirs_nchs_dataset.py` to `data/datasets/viirs_nchs_2023.mat`
+### `viirs_nchs_dataset.py` -> `data/datasets/viirs_nchs_2023.mat`
 
 Nighttime lights with NCHS labels. Feature set includes:
 - Radiance summary stats: min, max, mean, variance, skew, kurtosis.
@@ -17,7 +17,24 @@ Nighttime lights with NCHS labels. Feature set includes:
 - GLCM texture: contrast and homogeneity.
 - Gradient magnitude (local radiance boundaries).
 
-### `tiger_nchs_dataset.py` to `--out <path>`
+### `viirs_nchs_tensor_dataset.py` -> `data/datasets/viirs_nchs_tensor_2023.mat`
+
+Tensor VIIRS dataset for CNNS: 
+- Spatial canvas (fixed size).
+- Binary geometry mask. 
+- Gramian angular field imaging (GAF) from resampled intensity sequence. 
+
+Optional flags: 
+- `--all-touched` 
+- `--log-scale`
+- `--debug-png-dir <path>` for per-county PNGs. 
+
+### `saipe_nchs_dataset.py` -> `data/datasets/saipe_nchs_2023.mat`
+
+SAIPE socioeconomic features: 
+- primary scalar expert model 
+
+### `tiger_nchs_dataset.py` -> `data/datasets/tiger_nchs_2023.mat`
 
 Road network topology with NCHS labels. Feature set includes:
 - Road density (highway/local) and average segment length (highway/local).
@@ -28,7 +45,7 @@ Road network topology with NCHS labels. Feature set includes:
 - Orientation entropy (bearing diversity).
 - Integration at radius 3 (space syntax).
 
-### `nlcd_nchs_dataset.py` to `data/datasets/nlcd_nchs_2023.mat`
+### `nlcd_nchs_dataset.py` -> `data/datasets/nlcd_nchs_2023.mat`
 
 Land cover configuration with NCHS labels. Feature set includes:
 - Class proportions: developed (open/low/med/high), agriculture (pasture/crops), nature.
@@ -40,11 +57,8 @@ Land cover configuration with NCHS labels. Feature set includes:
 - Largest patch index for developed high.
 
 ### Mobility / Travel Time
-`travel_times_dataset.py` to `data/travel_times.mat`
+`travel_times_dataset.py` -> `data/travel_times.mat`
 - Distance / mobility adjacency sources.
-
-### SAIPE / Climate Baselines
-`saippe_population_dataset.py`, `climate_*_dataset.py` provide baseline datasets.
 
 ## Loaders
 
