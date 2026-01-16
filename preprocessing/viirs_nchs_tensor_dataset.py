@@ -20,7 +20,8 @@ from rasterio.warp import transform_geom
 
 from utils.helpers import project_path
 
-from scipy.io import savemat 
+from scipy.io      import savemat 
+from scipy.ndimage import zoom 
 
 
 class ViirsTensorDataset: 
@@ -211,38 +212,35 @@ class ViirsTensorDataset:
     def _recanvas(data, valid_mask, out_h, out_w): 
         out      = np.zeros((out_h, out_w), dtype=np.float32)
         out_mask = np.zeros((out_h, out_w), dtype=np.uint8)
-
         ys, xs   = np.nonzero(valid_mask)
         if ys.size == 0: 
             return out, out_mask 
 
-        cy     = ys.mean() 
-        cx     = xs.mean() 
-        out_cy = (out_h - 1) / 2.0 
-        out_cx = (out_w - 1) / 2.0 
+        y0, y1 = ys.min(), ys.max() + 1 
+        x0, x1 = xs.min(), xs.max() + 1 
 
-        dy     = int(round(out_cy - cy))
-        dx     = int(round(out_cx - cx))
+        crop_data = data[y0:y1, x0:x1]
+        crop_mask = valid_mask[y0:y1, x0:x1].astype(np.uint8)
 
-        h, w   = data.shape 
-        y0_in  = max(0, -dy)
-        x0_in  = max(0, -dx)
-        y1_in  = min(h, out_h - dy)
-        x1_in  = min(w, out_w - dx)
+        h, w   = crop_data.shape 
+        scale  = min(out_h / h, out_w / w) 
+        new_h  = max(1, int(round(h * scale)))
+        new_w  = max(1, int(round(w * scale)))
+        zoom_h = new_h / h 
+        zoom_w = new_w / w
 
-        if y1_in <= y0_in or x1_in <= x0_in: 
-            return out, out_mask 
+        resized_data = zoom(crop_data, (zoom_h, zoom_w), order=1)
+        resized_mask = zoom(crop_mask, (zoom_h, zoom_w), order=0)
 
-        y0_out = y0_in + dy 
-        x0_out = x0_in + dx 
+        out      = np.zeros((out_h, out_w), dtype=np.float32)
+        out_mask = np.zeros((out_h, out_w), dtype=np.uint8)
 
-        src    = data[y0_in:y1_in, x0_in:x1_in]
-        msk    = valid_mask[y0_in:y1_in, x0_in:x1_in]
-
-        out[y0_out:y0_out + src.shape[0], x0_out:x0_out + src.shape[1]]      = src 
-        out_mask[y0_out:y0_out + src.shape[0], x0_out:x0_out + src.shape[1]] = msk.astype(
-            np.uint8)
-
+        y_off = (out_h - new_h) // 2 
+        x_off = (out_w - new_w) // 2 
+        
+        out[y_off:y_off + new_h, x_off:x_off + new_w] = resized_data
+        out_mask[y_off:y_off + new_h, x_off:x_off + new_w] = resized_mask
+ 
         return out, out_mask 
 
     @staticmethod 

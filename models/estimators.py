@@ -447,8 +447,10 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         weight_decay: float = 0.0, 
         random_state: int = 0,
         device: str | None = None, 
-        normalize: bool = False, 
+        normalize_main: bool = True,
+        normalize_aux: bool = False, 
         input_adapter: Callable | None = None, 
+        mask_channel: int | None = 1, 
         merge_fn: Callable | None = None 
     ): 
         self.input_shape     = input_shape
@@ -465,8 +467,10 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         self.weight_decay    = weight_decay
         self.random_state    = random_state 
         self.device          = device
-        self.normalize       = normalize
+        self.normalize_main  = normalize_main 
+        self.normalize_aux   = normalize_aux 
         self.input_adapter   = input_adapter
+        self.mask_channel    = mask_channel
         self.merge_fn        = merge_fn
 
     def _resolve_device(self): 
@@ -490,15 +494,16 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         return X.reshape(n, c, h, w)
 
     def _fit_norm_stats(self, x_main, x_aux): 
-        if not self.normalize: 
-            self._norm_main = None 
-            self._norm_aux  = None 
-            return 
-        self._norm_main = (float(x_main.mean()), float(x_main.std()) + 1e-6)
-        if x_aux is not None: 
-            self._norm_aux = (float(x_aux.mean()), float(x_aux.std()) + 1e-6)
-        else: 
-            self._norm_aux = None 
+        def _stats(x): 
+            mu = x.mean(axis=(0,2,3), keepdims=True)
+            sd = x.std(axis=(0,2,3), keepdims=True) + 1e-6 
+            if self.mask_channel is not None and x.shape[1] > self.mask_channel: 
+                mu[:, self.mask_channel, :, :] = 0.0 
+                sd[:, self.mask_channel, :, :] = 1.0 
+            return (mu, sd)
+
+        self._norm_main = _stats(x_main) if self.normalize_main else None 
+        self._norm_aux  = _stats(x_aux) if (self.normalize_aux and x_aux is not None) else None
 
     def _apply_norm(self, x: NDArray, stats): 
         if stats is None: 

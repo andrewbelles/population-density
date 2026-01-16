@@ -54,7 +54,7 @@ def test_viirs(
 ): 
     loader  = make_tensor_loader(mode, canvas_h, canvas_w, gaf_size) 
     adapter = make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size) 
-    factory = make_image_cnn(input_adapter=adapter)
+    factory = make_image_cnn(input_adapter=adapter, normalize_main=True, normalize_aux=False)
 
     config  = CVConfig(
         n_splits=folds, 
