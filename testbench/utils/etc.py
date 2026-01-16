@@ -92,7 +92,7 @@ def write_model_summary(buf: io.StringIO, title: str, best_value: float):
     buf.write(f"\n== {title} ==\n")
     buf.write(f"Best value: {best_value:.6f}\n")
 
-def _format_metric(value): 
+def format_metric(value): 
     if value is None or np.isnan(value): 
         return "nan"
     return f"{value:.3f}"
@@ -100,9 +100,9 @@ def _format_metric(value):
 def format_cell(item): 
     m    = item["metrics"]
     name = f"{item['dataset']}/{item['model']}"
-    acc  = _format_metric(m.get("accuracy"))
-    f1   = _format_metric(m.get("f1_macro"))
-    roc  = _format_metric(m.get("roc_auc"))
+    acc  = format_metric(m.get("accuracy"))
+    f1   = format_metric(m.get("f1_macro"))
+    roc  = format_metric(m.get("roc_auc"))
     return f"{name} Acc={acc} f1={f1} roc_auc={roc}"
 
 def render_table(header, rows): 
@@ -232,3 +232,100 @@ def flatten_imaging(spatial, mask, gaf, mode):
     if mode == "dual": 
         return np.hstack([spatial.reshape(n, -1), mask.reshape(n, -1), gaf.reshape(n, -1)])
     raise ValueError("mode must be spatial/gaf/dual")
+
+# ---------------------------------------------------------
+# Test Harness + Pretty Print 
+# ---------------------------------------------------------
+
+def collect_rows(result): 
+    if not isinstance(result, dict): 
+        return None, []
+    header = result.get("header")
+    rows   = []
+    if result.get("rows"): 
+        rows.extend(result["rows"])
+    elif result.get("row"): 
+        rows.append(result["row"])
+    return header, rows 
+
+def merge_results(*results): 
+    header = None 
+    rows   = []
+    for result in results: 
+        h, r = collect_rows(result)
+        if not r: 
+            continue 
+        if header is None: 
+            header = h 
+        if h == header: 
+            rows.extend(r)
+    return {"header": header, "rows": rows} if header and rows else {}
+
+def run_tests_table(
+    buf, 
+    tests: dict, 
+    targets: list[str] | None = None, 
+    *,
+    caller=None,
+    **kwargs
+):
+
+    header_rows  = {} 
+    header_order = []
+    targets = targets or list(tests.keys())
+
+    # Lambda to handle pushing row into list for each test header 
+    def _coerce_row(row, header): 
+        if isinstance(row, dict): 
+            return [row.get(h, "") for h in header]
+        return list(row)
+
+    def _handle(row, header): 
+        if not header: 
+            if isinstance(row, dict): 
+                header = list(row.keys())
+            else: 
+                return  
+
+        key = tuple(header)
+        if key not in header_rows: 
+            header_rows[key] = []
+            header_order.append(key)
+
+        header_rows[key].append(_coerce_row(row, header))
+
+    for name in targets: 
+        fn = tests.get(name)
+        if fn is None: 
+            raise ValueError(f"unknown test: {name}")
+
+        result = caller(fn, name, **kwargs) if caller else fn(buf, **kwargs)
+
+        if not isinstance(result, dict): 
+            continue 
+    
+        rows   = result.get("rows")
+        header = result.get("header")
+
+        if rows: 
+            for row in rows: 
+                _handle(row, header)
+        else: 
+            row = result.get("row")
+            if not row: 
+                continue 
+
+            _handle(row, header)
+
+    for key in header_order:
+        rows = header_rows.get(key, [])
+        if not rows: 
+            continue 
+        buf.write(render_table(list(key), rows) + "\n")
+
+    return {
+        "tables": [
+            {"header": list(key), "rows": header_rows[key]}
+            for key in header_order if header_rows[key]
+        ]
+    }

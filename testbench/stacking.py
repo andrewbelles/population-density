@@ -12,8 +12,6 @@ import sys
 
 import numpy as np 
 
-from pathlib import Path 
-
 from analysis.cross_validation import (
     CrossValidator,
     CVConfig,
@@ -37,9 +35,9 @@ from utils.helpers import (
 
 from testbench.utils.paths import (
     CONFIG_PATH,
-    PROBA_PASSTHROUGH_PATH, 
-    PROBA_PATH,
-    check_paths_exist
+    check_paths_exist,
+    expert_prob_files,
+    stacking_context
 )
 
 from testbench.utils.config import (
@@ -56,26 +54,26 @@ from testbench.utils.metrics import (
     metrics_from_probs,
     metrics_from_summary,
     score_from_summary,
-    best_score
+    best_score,
+    OPT_TASK
 )
 
 from testbench.utils.etc import (
     get_factory,
     get_param_space,
-    write_model_metrics,
-    write_model_summary
+    format_metric,
+    merge_results,
+    run_tests_table,
 )
 
 from testbench.utils.data import (
     DATASETS,
     BASE,
-    make_filtered_loader,
-    passthrough_loader,
-    read_feature_list,
-    stacking_loader
+    resolve_expert_loader,
+    resolve_stacking_loader,
 )
 
-from testbench.utils.oof import load_probs_labels_fips
+from testbench.utils.oof import load_probs_labels_fips, stacking_metadata
     
 # ---------------------------------------------------------
 # Global Variables 
@@ -111,8 +109,6 @@ CS_EARLY_STOP   = 100
 EARLY_STOP_EPS  = 1e-4 
 RANDOM_STATE    = 0 
 TRAIN_SIZE      = 0.3 
-
-OPT_TASK = TaskSpec("classification", ("f1_macro",))
 
 # ---------------------------------------------------------
 # Helper Functions 
@@ -189,7 +185,6 @@ def _optimize_dataset(
     filepath, 
     loader_func, 
     n_trials,
-    buf,
     *,
     config_path: str = CONFIG_PATH
 ): 
@@ -227,10 +222,7 @@ def _optimize_dataset(
         leaderboard.append((mean_score, model_name, best_params))
         
     leaderboard.sort(key=lambda x: x[0], reverse=True)
-    best_score_val, best_model, _ = leaderboard[0]
-    buf.write(f"\n== {dataset_key} optimization ==\n")
-    buf.write(f"Best Model: {best_model}\n")
-    buf.write(f"Best Score: {best_score_val:.4f}\n")
+
     return _aggregate_leaderboard( 
         dataset_key,
         filepath,
@@ -240,7 +232,6 @@ def _optimize_dataset(
     )
 
 def _optimize_cs(
-    buf: io.StringIO,
     *,
     name: str, 
     proba: str,
@@ -269,7 +260,7 @@ def _optimize_cs(
         class_labels=class_labels
     )
 
-    with contextlib.redirect_stdout(buf):
+    with contextlib.redirect_stdout(sys.stderr):
         best_params, best_value = run_optimization(
             name=key,
             evaluator=evaluator,
@@ -282,7 +273,7 @@ def _optimize_cs(
         )
 
     save_model_config(config_path, key, best_params)
-    write_model_summary(buf, key, best_value)
+
     return best_params, best_value, {
         "key": key,
         "P": P,
@@ -320,7 +311,14 @@ def _evaluate_cs(
     metrics = metrics_from_probs(y[test_mask], P_cs[test_mask], class_labels)
     return metrics, adj_name, P_cs
 
-def _select_best_model(dataset_key, filepath, loader_func, config, *, config_path: str = CONFIG_PATH): 
+def _select_best_model(
+    dataset_key, 
+    filepath, 
+    loader_func, 
+    config, 
+    *, 
+    config_path: str = CONFIG_PATH
+): 
     leaderboard = []
     for model_name in MODELS: 
         params = load_model_params(config_path, f"{dataset_key}/{model_name}")
@@ -337,56 +335,66 @@ def _select_best_model(dataset_key, filepath, loader_func, config, *, config_pat
     best = max(leaderboard, key=lambda x: x[0])
     return best 
 
+def _row_metrics(name: str, metrics: dict): 
+    return {
+        "Name":    name, 
+        "Acc":     format_metric(metrics.get("accuracy")),
+        "F1":      format_metric(metrics.get("f1_macro")),
+        "ROC_AUC": format_metric(metrics.get("roc_auc"))
+    }
+
+def _row_opt(name: str, model: str, score: float): 
+    return {
+        "Name":  name, 
+        "Model": model, 
+        "F1":    format_metric(score)
+    }
+
 # ---------------------------------------------------------
 # Tests 
 # ---------------------------------------------------------
 
 def test_expert_optimize(
-    buf: io.StringIO, 
     datasets: list[str] | None = None, 
     filter_dir: str | None = None,
     config_path: str = CONFIG_PATH,
     **_
 ):
-    targets = datasets or list(DATASETS)
+    rows    = []
+    targets = datasets or list(DATASETS) 
+
     for name in targets:
         if name not in BASE: 
             raise ValueError(f"unknown dataset: {name}")
-        base = BASE[name]
 
-        if filter_dir: 
-            keep_path = str(Path(filter_dir) / f"boruta_keep_{name.lower()}.txt")
-        else: 
-            keep_path = None 
-        keep_list = read_feature_list(keep_path)
+        base, loader = resolve_expert_loader(name, filter_dir)
 
-        loader = make_filtered_loader(base["loader"], keep_list)
-
-        _optimize_dataset(
+        results = _optimize_dataset(
             name, 
             base["path"],
             loader, 
             n_trials=EXPERT_TRIALS,
-            buf=buf,
             config_path=config_path 
         )
 
+        best = max(results["leaderboard"], key=lambda r: r["mean_score"])
+        rows.append(_row_opt(name, best["model"], best["mean_score"]))
+        
+    return {
+        "header": ["Name", "Model", "F1"],
+        "rows": rows 
+    }
+
 def test_expert_oof(
-    buf: io.StringIO, 
     filter_dir: str | None = None, 
     config_path: str = CONFIG_PATH, 
     **_
 ):
+    rows   = []
     config = eval_config() 
-    for name in DATASETS: 
-        base = BASE[name]
 
-        if filter_dir: 
-            keep_path = str(Path(filter_dir) / f"boruta_keep_{name.lower()}.txt")
-        else: 
-            keep_path = None 
-        keep_list = read_feature_list(keep_path)
-        loader    = make_filtered_loader(base["loader"], keep_list)
+    for name in DATASETS: 
+        base, loader = resolve_expert_loader(name, filter_dir)
 
         _, best_model, best_params, metrics = _select_best_model(
             name, 
@@ -396,7 +404,6 @@ def test_expert_oof(
             config_path=config_path
         )
 
-        write_model_metrics(buf, f"{name}/{best_model}", metrics)
         _evaluate_model(
             base["path"],
             loader,
@@ -406,66 +413,54 @@ def test_expert_oof(
             proba_path=EXPERT_PROBA[name]
         )
 
+        rows.append(_row_metrics(f"{name}/{best_model}", metrics))
+
     return {
+        "header": ["Name", "Acc", "F1", "ROC_AUC"],
+        "rows": rows,
         "experts": {k: EXPERT_PROBA[k] for k in DATASETS}
     }
 
 def test_stacking_optimize(
-    buf: io.StringIO, 
     passthrough: bool = False, 
     filter_dir: str | None = None,
     config_path: str = CONFIG_PATH,
     **_
 ):
-    prob_files = [EXPERT_PROBA[n] for n in DATASETS]
+    prob_files = expert_prob_files(DATASETS, EXPERT_PROBA)
     check_paths_exist(prob_files, "expert OOF files")
 
-    if passthrough: 
-        if filter_dir: 
-            keep_path = str(Path(filter_dir) / "boruta_keep_cross.txt")
-            keep_list = read_feature_list(keep_path)
-            loader    = passthrough_loader(prob_files, keep_list)
-        else: 
-            loader = passthrough_loader(prob_files)
-    else: 
-        loader = stacking_loader(prob_files) 
-    
-    key    = STACKING_PASSTHROUGH_KEY if passthrough else STACKING_BASE_KEY 
+    loader       = resolve_stacking_loader(prob_files, passthrough, filter_dir)
+    key, _, name = stacking_context(passthrough)
 
-    _optimize_dataset(
+    results = _optimize_dataset(
         key,
         "virtual",
         loader,
         n_trials=STACKING_TRIALS,
-        buf=buf,
         config_path=config_path
     )
 
+    best = max(results["leaderboard"], key=lambda r: r["mean_score"])
+
+    return {
+        "header": ["Name", "Model", "F1"],
+        "row": _row_opt(name, best["model"], best["mean_score"])
+    }
+
 def test_stacking(
-    buf: io.StringIO, 
     passthrough: bool = False,
     filter_dir: str | None = None,
     config_path: str = CONFIG_PATH,
     **_
 ): 
-    prob_files = [EXPERT_PROBA[n] for n in DATASETS]
+    prob_files = expert_prob_files(DATASETS, EXPERT_PROBA)
     check_paths_exist(prob_files, "expert OOF files")
 
-    key    = STACKING_PASSTHROUGH_KEY if passthrough else STACKING_BASE_KEY 
-    proba  = PROBA_PASSTHROUGH_PATH   if passthrough else PROBA_PATH
-    name   = "StackingPassthrough"    if passthrough else "Stacking"
+    loader           = resolve_stacking_loader(prob_files, passthrough, filter_dir)
+    key, proba, name = stacking_context(passthrough)
+    config           = eval_config()
 
-    if passthrough: 
-        if filter_dir: 
-            keep_path = str(Path(filter_dir) / "boruta_keep_cross.txt")
-            keep_list = read_feature_list(keep_path)
-            loader    = passthrough_loader(prob_files, keep_list)
-        else: 
-            loader = passthrough_loader(prob_files)
-    else: 
-        loader = stacking_loader(prob_files) 
-
-    config = eval_config()
     best_score_val, best_model, best_params, metrics = _select_best_model(
         key,
         "virtual",
@@ -473,8 +468,6 @@ def test_stacking(
         config,
         config_path=config_path
     )
-
-    write_model_metrics(buf, f"{name}/{best_model}", metrics)
 
     _evaluate_model(
         "virtual",
@@ -485,28 +478,29 @@ def test_stacking(
         proba_path=proba
     )
 
-    P, y, fips, class_labels = load_probs_labels_fips(proba)
+    meta = stacking_metadata(proba)
 
     return {
+        "header": ["Name", "Acc", "F1", "ROC_AUC"],
+        "row": _row_metrics(f"{name}/{best_model}", metrics),
         "proba_path": proba, 
         "model": best_model, 
         "score": best_score_val,
         "metadata": {
             "name": f"{name}/{best_model}",
-            "probs": P, 
-            "labels": y, 
-            "fips": fips,
-            "class_labels": class_labels
+            **meta
         }
     }
 
-def test_cs_opt(buf: io.StringIO, passthrough: bool = False, config_path: str = CONFIG_PATH): 
+def test_cs_opt(
+    passthrough: bool = False, 
+    config_path: str = CONFIG_PATH,
+    **_
+): 
 
-    name  = "StackingPassthrough" if passthrough else "Stacking"
-    proba = PROBA_PASSTHROUGH_PATH if passthrough else PROBA_PATH 
+    _, proba, name = stacking_context(passthrough)
 
     best_params, _, context = _optimize_cs(
-        buf,
         name=name,
         proba=proba,
         config_path=config_path
@@ -522,11 +516,15 @@ def test_cs_opt(buf: io.StringIO, passthrough: bool = False, config_path: str = 
         best_params 
     )
 
+    name = f"{context['key']}/{adj_name}"
+
     return {
+        "header": ["Name", "Acc", "F1", "ROC_AUC"],
+        "row": _row_metrics(name, metrics), 
         "params": best_params, 
         "metrics": metrics,
         "metadata": {
-            "name": f"{context['key']}/{adj_name}",
+            "name": name,
             "probs": context["P"], 
             "probs_corr": P_cs, 
             "train_mask": context["train_mask"],
@@ -536,82 +534,39 @@ def test_cs_opt(buf: io.StringIO, passthrough: bool = False, config_path: str = 
         }
     }
 
-def test_pipeline(
-    buf: io.StringIO, 
-    passthrough: bool = False,
-    datasets: list[str] | None = None, 
-    filter_dir: str | None = None, 
-    config_path: str = CONFIG_PATH,
-    **_
-): 
-    expert_opt   = test_expert_optimize(
-        buf,
-        datasets=datasets,
-        filter_dir=filter_dir,
-        config_path=config_path
-    )
-    expert_oof   = test_expert_oof(
-        buf,
-        filter_dir=filter_dir,
-        config_path=config_path
-    )
-    stacking_opt = test_stacking_optimize(
-        buf,
-        passthrough=passthrough,
-        filter_dir=filter_dir,
-        config_path=config_path
-    )
-    stacking     = test_stacking(
-        buf,
-        passthrough=passthrough,
-        filter_dir=filter_dir,
-        config_path=config_path
-    )
-    cs           = test_cs_opt(
-        buf,
-        passthrough=passthrough,
-        config_path=config_path
-    )
+# ---------------------------------------------------------
+# Test Creation and Callers 
+# ---------------------------------------------------------
 
-    return {
-        "expert_opt": expert_opt,
-        "expert_oof": expert_oof,
-        "stacking_opt": stacking_opt,
-        "stacking": stacking,
-        "cs": cs
-    }
-
-
-CROSS_TESTS = {"stacking", "stacking_opt", "cs_opt", "pipeline"}
-
+CROSS_TESTS = {"stacking", "stacking_opt", "cs_opt"}
+OPT_TESTS   = {"expert_opt", "stacking_opt"} # cs_opt is so inexpensive it might as well not be an opt test 
 TESTS = {
     "expert_opt": test_expert_optimize,
     "expert_oof": test_expert_oof,
     "stacking_opt": test_stacking_optimize,
     "stacking": test_stacking,
     "cs_opt": test_cs_opt,
-    "pipeline": test_pipeline
 }
 
-def run_test(name: str, buf: io.StringIO, *, cross: str = "off", **kwargs): 
-
-    fn = TESTS.get(name)
-    if fn is None: 
-        raise ValueError(f"unknown test: {name}")
-
+def _call_test(fn, name, *, cross, **kwargs): 
+    print(f"[{name}] starting...")
     if name in CROSS_TESTS: 
         if cross == "off": 
-            fn(buf, passthrough=False, **kwargs)
+            return fn(passthrough=False, **kwargs)
         elif cross == "on": 
-            fn(buf, passthrough=True, **kwargs)
+            return fn(passthrough=True, **kwargs)
         elif cross == "both": 
-            fn(buf, passthrough=False, **kwargs)
-            fn(buf, passthrough=True, **kwargs)
+            r1 = fn(passthrough=False, **kwargs)
+            r2 = fn(passthrough=True, **kwargs)
+            return merge_results(r1, r2)
         else: 
-            raise ValueError(f"unknown choice for cross-modal feature set: {cross}")
-        return 
-    fn(buf, **kwargs)
-    
+            raise ValueError(f"unknown choice for cross-modal feature set {cross}")
+    return fn(**kwargs)
+
+# ---------------------------------------------------------
+# Test Entry 
+# ---------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tests", nargs="*", default=None)
@@ -630,19 +585,23 @@ def main():
 
     buf = io.StringIO() 
 
-    kw     = vars(args).copy() 
-    kw.pop("tests", None)
-    cross  = kw.pop("cross", "off") 
-    no_opt = kw.pop("no_opt", False) 
-
     targets = args.tests or list(TESTS.keys())
-    for name in targets: 
-        if no_opt and name.endswith("_opt"): 
-            continue 
-        run_test(name, buf, cross=cross, config_path=config_path, filter_dir=filter_dir, **kw)
+    if args.no_opt: 
+        targets = [t for t in targets if t not in OPT_TESTS]
+
+    run_tests_table(
+        buf, 
+        TESTS,
+        targets=targets,
+        caller=lambda fn, name, **kw: _call_test(
+            fn, name, cross=args.cross, **kw
+        ),
+        datasets=args.datasets,
+        filter_dir=filter_dir,
+        config_path=config_path
+    )
 
     print(buf.getvalue().strip())
-
 
 if __name__ == "__main__": 
     main()

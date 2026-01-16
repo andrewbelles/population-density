@@ -12,11 +12,9 @@ import numpy as np
 
 from scipy.io import savemat 
 
-from analysis.cross_validation import CLASSIFICATION
-
 from testbench.utils.paths     import (
-    DEFAULT_DATA,
-    DEFAULT_OUT
+    TENSOR_DATA,
+    TENSOR_POOLED_OUT
 )
 
 from testbench.utils.data      import (
@@ -24,7 +22,9 @@ from testbench.utils.data      import (
     make_tensor_adapter
 )
 
-from analysis.cross_validation import CVConfig, TaskSpec 
+from testbench.utils.metrics   import OPT_TASK
+
+from analysis.cross_validation import CVConfig 
 
 from analysis.hyperparameter   import run_optimization, define_cnn_space, CNNEvaluator 
 
@@ -35,13 +35,12 @@ from utils.helpers import (
 )
 
 DEFAULT_MODEL_KEY = "ImageCNN/VIIRS_TENSOR"
-EXPERT_TEST       = TaskSpec("classification", ("f1_macro",))
 
 
 def test_viirs(
     *,
-    data_path: str = DEFAULT_DATA,
-    out_path: str = DEFAULT_OUT,
+    data_path: str = TENSOR_DATA,
+    out_path: str = TENSOR_POOLED_OUT,
     model_key: str = DEFAULT_MODEL_KEY,
     mode: str = "dual",
     canvas_h: int = 128, 
@@ -74,7 +73,7 @@ def test_viirs(
         loader_func=loader,
         model_factory=factory,
         param_space=define_cnn_space,
-        task=EXPERT_TEST,
+        task=OPT_TASK,
         config=config
     )
 

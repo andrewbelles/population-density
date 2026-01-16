@@ -22,7 +22,8 @@ def _conv_block(in_ch, out_ch, kernel_size=3, pool_size=2, use_bn=True):
     ]
     
     if use_bn: 
-        layers.append(nn.BatchNorm2d(out_ch))
+        num_groups = 8 if out_ch < 32 else 32 
+        layers.append(nn.GroupNorm(num_groups, out_ch))
     layers += [
         nn.ReLU(inplace=True),
         nn.MaxPool2d(kernel_size=pool_size)

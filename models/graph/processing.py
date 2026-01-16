@@ -66,7 +66,7 @@ class CorrectAndSmooth:
 
     def _resolve_device(self, device: Optional[str]) -> torch.device: 
         if device is None: 
-            device = "cude" if torch.cuda.is_available() else "cpu"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         if str(device).startswith("cuda") and not torch.cuda.is_available(): 
             device = "cpu"
         return torch.device(device)

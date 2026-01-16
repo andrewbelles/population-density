@@ -27,6 +27,8 @@ from testbench.utils.transforms import apply_transforms
 
 from testbench.utils.etc        import flatten_imaging
 
+from testbench.utils.paths      import keep_list
+
 from scipy.io import loadmat 
 
 from preprocessing.loaders import (
@@ -148,6 +150,18 @@ def build_specs(prob_files) -> list[MetaSpec]:
         })
     return specs 
 
+def resolve_expert_loader(dataset_key: str, filter_dir: str | None): 
+    base   = BASE[dataset_key]
+    klist  = keep_list(filter_dir, dataset_key)
+    loader = make_filtered_loader(base["loader"], klist)
+    return base, loader 
+
+def resolve_stacking_loader(prob_files, passthrough: bool, filter_dir: str | None): 
+    if passthrough: 
+        klist = keep_list(filter_dir, "cross")
+        return passthrough_loader(prob_files, klist)
+    return stacking_loader(prob_files)
+
 def stacking_loader(prob_files): 
     def _loader(_): 
         return load_stacking(prob_files)
@@ -232,12 +246,6 @@ def load_raw(key: str) -> dict:
         "feature_names": names, 
         "sample_ids": fips  
     }
-
-def read_feature_list(path: str | None): 
-    if not path: 
-        return None 
-    lines = Path(path).read_text().splitlines() 
-    return [l.strip() for l in lines if l.strip()]
 
 def norm_name(name: str) -> str: 
     s = str(name).strip().lower() 

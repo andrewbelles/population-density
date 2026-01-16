@@ -48,11 +48,32 @@ DEFAULT_PROB_PATHS     = {
     "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat")
 }
 
-DEFAULT_CSV            = project_path("data", "results", "boruta_summary.csv")
-DEFAULT_DATA           = project_path("data", "datasets", "viirs_nchs_tensor_2023.mat")
-DEFAULT_OUT            = project_path("data", "results", "viirs_cnn_features.mat")
+BORUTA_CSV            = project_path("data", "results", "boruta_summary.csv")
+TENSOR_DATA           = project_path("data", "datasets", "viirs_nchs_tensor_2023.mat")
+TENSOR_POOLED_OUT     = project_path("data", "results", "viirs_cnn_features.mat")
 
 def check_paths_exist(paths, label): 
     missing = [p for p in paths if not Path(p).exists()]
     if missing: 
         raise FileNotFoundError(f"{label} missing: {missing}")
+
+def read_feature_list(path: str | None): 
+    if not path: 
+        return None 
+    lines = Path(path).read_text().splitlines() 
+    return [l.strip() for l in lines if l.strip()]
+
+def keep_list(filter_dir: str | None, name: str) -> list[str] | None: 
+    if not filter_dir: 
+        return None 
+    keep_path = Path(filter_dir) / f"boruta_keep_{name.lower()}.txt"
+    return read_feature_list(str(keep_path))
+
+def stacking_context(passthrough: bool): 
+    key   = "StackingPassthrough"  if passthrough else "Stacking"
+    proba = PROBA_PASSTHROUGH_PATH if passthrough else PROBA_PATH 
+    name  = "StackingPassthrough"  if passthrough else "Stacking"
+    return key, proba, name 
+
+def expert_prob_files(datasets=DATASETS, prob_map=DEFAULT_PROB_PATHS): 
+    return [prob_map[d] for d in datasets]

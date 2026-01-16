@@ -42,3 +42,12 @@ def load_probs_for_fips(fips: NDArray[np.str_], proba_path=PROBA_PATH):
     P, _, oof_fips, class_labels = load_probs_labels_fips(proba_path)
     idx = align_on_fips(fips, oof_fips)
     return P[idx], class_labels
+
+def stacking_metadata(proba_path: str):
+    P, y, fips, class_labels = load_probs_labels_fips(proba_path)
+    return {
+        "probs": P, 
+        "labels": y,
+        "fips": fips,
+        "class_labels": class_labels 
+    }

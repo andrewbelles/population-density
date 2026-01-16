@@ -24,7 +24,7 @@ from testbench.utils.data  import (
 )
 
 from testbench.utils.paths import (
-    DEFAULT_CSV,
+    BORUTA_CSV,
     LABELS_PATH,
 )
 
@@ -132,7 +132,7 @@ def test_boruta(
     min_samples_leaf: int = 1, 
     alpha: float = 0.05, 
     top_k: int = 30, 
-    out_csv: str | None = DEFAULT_CSV,
+    out_csv: str | None = BORUTA_CSV,
     **_
 ): 
     loader     = build_candidate_loader()
@@ -166,7 +166,7 @@ def test_boruta(
 def export_boruta(
     buf: io.StringIO, 
     *,
-    filter_csv: str = DEFAULT_CSV,
+    filter_csv: str = BORUTA_CSV,
     out_dir: str | None = None, 
     **_
 ): 
@@ -194,9 +194,9 @@ TESTS = {
 def main(): 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--tests", nargs="*", default=None)
-    parser.add_argument("--out-csv", default=DEFAULT_CSV)
+    parser.add_argument("--out-csv", default=BORUTA_CSV)
     parser.add_argument("--top-k", default=30)
-    parser.add_argument("--filter-csv", default=DEFAULT_CSV)
+    parser.add_argument("--filter-csv", default=BORUTA_CSV)
     parser.add_argument("--out-dir", default=None)
     args = parser.parse_args()
 

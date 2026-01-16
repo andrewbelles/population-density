@@ -122,10 +122,10 @@ models:
     gamma: 0.19163884536273662
   CorrectAndSmooth/Stacking:
     adjacency: mobility
-    correction_layers: 12
-    correction_alpha: 0.0028689051952821565
-    smoothing_layers: 9
-    smoothing_alpha: 0.02685363682633773
+    correction_layers: 8
+    correction_alpha: 0.006992956392083721
+    smoothing_layers: 6
+    smoothing_alpha: 0.6011694833853859
     autoscale: false
   CorrectAndSmooth/StackingPassthrough:
     adjacency: queen

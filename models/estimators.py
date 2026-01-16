@@ -8,7 +8,7 @@
 # 
 
 from typing import Callable
-from joblib import pool
+
 import numpy as np 
 
 from numpy.typing import NDArray
@@ -25,15 +25,14 @@ from utils.loss_funcs import (
     WassersteinLoss
 )
 
-import torch 
+import torch, copy 
 
-from torch import Tensor, from_numpy, nn 
+from torch import nn 
 
-from torch.utils.data import DataLoader, TensorDataset 
+from torch.utils.data import DataLoader, TensorDataset, random_split 
 
 from models.networks import ConvBackbone
 
-from torch.utils.data import WeightedRandomSampler
 
 # ---------------------------------------------------------
 # Regressors 
@@ -258,7 +257,7 @@ class RFClassifierWrapper(BaseEstimator, ClassifierMixin):
         return self.model_.feature_importances_
 
 
-class XGBClassifierWrapper(BaseEstimator, RegressorMixin): 
+class XGBClassifierWrapper(BaseEstimator, ClassifierMixin): 
 
     '''XGBoost classifier with early stopping support'''
 
@@ -446,7 +445,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         fc_dim: int = 128, 
         dropout: float = 0.2, 
         use_bn: bool = True, 
-        epochs: int = 10, 
+        epochs: int = 100, 
         batch_size: int = 32, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
@@ -456,7 +455,9 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         normalize_aux: bool = False, 
         input_adapter: Callable | None = None, 
         mask_channel: int | None = 1, 
-        merge_fn: Callable | None = None 
+        merge_fn: Callable | None = None,
+        early_stopping_rounds: int | None = None, 
+        eval_fraction: float = 0.1
     ): 
         self.input_shape     = input_shape
         self.aux_input_shape = aux_input_shape
@@ -478,6 +479,10 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         self.input_adapter   = input_adapter
         self.mask_channel    = mask_channel
         self.merge_fn        = merge_fn
+
+        # Early stopping 
+        self.early_stopping_rounds = early_stopping_rounds 
+        self.eval_fraction         = eval_fraction
 
     def _resolve_device(self): 
         if self.device is not None: 
@@ -569,6 +574,9 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         torch.manual_seed(self.random_state)
         self.device_ = self._resolve_device()
 
+        run_early_stopping = (self.early_stopping_rounds is not None and self.eval_fraction > 0 
+                              and self.epochs > self.early_stopping_rounds)
+
         x_main, x_aux = self._prepare_inputs(X, training=True)
 
         self.backbone_main_ = ConvBackbone(
@@ -612,7 +620,19 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         class_weights = class_weights / class_weights.mean()
 
         ds      = self._make_dataset(x_main, x_aux, y_idx)
-        dl      = self._make_loader(ds, shuffle=True)
+
+        if run_early_stopping: 
+            n_total = len(ds)
+            n_val   = max(1, int(n_total * self.eval_fraction)) 
+            n_train = n_total - n_val 
+            gen     = torch.Generator().manual_seed(self.random_state)
+            train_ds, val_ds = random_split(ds, [n_train, n_val], generator=gen)
+            dl      = self._make_loader(train_ds, shuffle=True)
+            val_dl  = self._make_loader(val_ds, shuffle=False)
+        else: 
+            dl      = self._make_loader(ds, shuffle=True)
+            val_dl  = None 
+
         opt     = torch.optim.AdamW(
             self.model_.parameters(), 
             lr=self.lr, 
@@ -624,8 +644,12 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
             class_weights=class_weights
         ).to(self.device_)
 
-        self.model_.train() 
+        best_state = None 
+        best_val   = float("inf")
+        patience   = 0
+
         for _ in range(self.epochs): 
+            self.model_.train() 
             for batch in dl: 
                 if x_aux is None: 
                     xb, yb = batch 
@@ -639,6 +663,42 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
                 opt.zero_grad() 
                 loss.backward() 
                 opt.step() 
+
+            if run_early_stopping: 
+                self.model_.eval() 
+                val_loss_sum = 0.0 
+                val_count    = 0 
+                with torch.no_grad(): 
+                    for batch in val_dl: 
+                        if x_aux is None: 
+                            xb, yb = batch 
+                            feats  = self._forward_features(xb.to(self.device_))
+                        else: 
+                            xb, xa, yb = batch 
+                            feats  = self._forward_features(
+                                xb.to(self.device_), 
+                                xa.to(self.device_)
+                            )
+
+                        logits = self.model_.head(feats)
+                        loss   = loss_fn(logits, yb.to(self.device_))
+                        bsz    = yb.size(0) 
+                        
+                        val_loss_sum += loss.item() * bsz 
+                        val_count    += bsz 
+
+                avg_val = val_loss_sum / max(val_count, 1) 
+                if avg_val < best_val - 1e-6: 
+                    best_val   = avg_val 
+                    best_state = copy.deepcopy(self.model_.state_dict())
+                    patience   = 0 
+                else: 
+                    patience += 1 
+                    if patience >= self.early_stopping_rounds: 
+                        break
+
+        if best_state is not None: 
+            self.model_.load_state_dict(best_state)
 
         return self
 

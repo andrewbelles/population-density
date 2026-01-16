@@ -13,6 +13,10 @@ import pandas as pd
 from numpy.typing import NDArray
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
+from analysis.cross_validation import TaskSpec
+
+OPT_TASK = TaskSpec("classification", ("f1_macro",))
+
 def _softmax_rows(probs: NDArray) -> NDArray: 
     probs   = np.asarray(probs, dtype=np.float64)
     row_max = probs.max(axis=1, keepdims=True)
