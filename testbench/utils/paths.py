@@ -56,7 +56,3 @@ def check_paths_exist(paths, label):
     missing = [p for p in paths if not Path(p).exists()]
     if missing: 
         raise FileNotFoundError(f"{label} missing: {missing}")
-
-def resolve_prob_files(prob_paths: dict | None = None): 
-    paths = prob_paths or DEFAULT_PROB_PATHS 
-    return [paths[n] for n in DATASETS]

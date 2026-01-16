@@ -42,14 +42,3 @@ def load_probs_for_fips(fips: NDArray[np.str_], proba_path=PROBA_PATH):
     P, _, oof_fips, class_labels = load_probs_labels_fips(proba_path)
     idx = align_on_fips(fips, oof_fips)
     return P[idx], class_labels
-
-def extract_oof_preds(oof, model_name=None): 
-    preds = np.asarray(oof["preds"])
-    model_names = oof["model_names"]
-    if preds.ndim == 2: 
-        if model_name and model_name in model_names: 
-            m_idx = int(np.where(model_names == model_name)[0][0])
-        else: 
-            m_idx = 0
-        return preds[:, m_idx]
-    return preds.reshape(-1)

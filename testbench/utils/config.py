@@ -20,12 +20,6 @@ def load_model_params(config_path: str, key: str) -> dict:
         raise ValueError(f"missing model config for key: {key}")
     return dict(params)
 
-def get_cached_params(cache: dict, key: str): 
-    models = cache.get("models", {})
-    if isinstance(models, dict): 
-        return models.get(key)
-    return None
-
 def normalize_params(model_type: str, params: dict) -> dict: 
     if model_type != "SVM": 
         return params 

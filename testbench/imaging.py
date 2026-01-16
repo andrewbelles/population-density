@@ -35,7 +35,7 @@ from utils.helpers import (
 )
 
 DEFAULT_MODEL_KEY = "ImageCNN/VIIRS_TENSOR"
-EXPERT_TEST       = TaskSpec("classification", ("accuracy",))
+EXPERT_TEST       = TaskSpec("classification", ("f1_macro",))
 
 
 def test_viirs(
@@ -54,7 +54,12 @@ def test_viirs(
 ): 
     loader  = make_tensor_loader(mode, canvas_h, canvas_w, gaf_size) 
     adapter = make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size) 
-    factory = make_image_cnn(input_adapter=adapter, normalize_main=True, normalize_aux=False)
+    factory = make_image_cnn(
+        input_adapter=adapter, 
+        normalize_main=True, 
+        normalize_aux=False,
+        pool_mode="avgmax"
+    )
 
     config  = CVConfig(
         n_splits=folds, 
@@ -109,8 +114,8 @@ def test_viirs(
 
 def main(): 
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--mode", choices=["spatial", "gaf", "dual"], default="dual")
-    parser.add_argument("--trials", default=50)
+    parser.add_argument("--mode", choices=["spatial", "gaf", "dual"], default="spatial")
+    parser.add_argument("--trials", default=80)
     parser.add_argument("--folds", default=2)
     parser.add_argument("--random-state", default=0)
     args = parser.parse_args()

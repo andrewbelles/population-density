@@ -101,11 +101,6 @@ def select_specs_psv(dataset_key: str) -> Sequence[ConcatSpec]:
     names = dataset_key.split("+")
     return [BASE[n] for n in names]
 
-def select_specs_csv(sources_csv: str) -> Sequence[ConcatSpec]:
-    wanted = {s.strip().lower() for s in sources_csv.split(",") if s.strip()}
-    return [s for s in BASE.values() if s["name"].lower() in wanted]
-
-# Specifically when we need to load passthrough instead of raw probability matrices 
 def override_proba_path(specs, proba_path: str) -> Sequence[ConcatSpec]:
     out = []
     for s in specs: 
@@ -221,47 +216,6 @@ def load_dataset(dataset_key: str):
     out  = dict(data)
     out["labels"] = y 
     return out 
-
-
-def feature_names_from_mat(mat, prefix: str, keep_idx: list[int] | None, n_cols: int): 
-    names = None 
-    if "feature_names" in mat: 
-        names = _mat_str_vector(mat["feature_names"]).astype("U64")
-        if names.shape[0] != n_cols: 
-            names = None 
-    if names is None: 
-        names = np.array([f"p{i}" for i in range(n_cols)], dtype="U64")
-    if keep_idx is not None: 
-        names = names[keep_idx]
-    return np.array([f"{prefix}::{n}" for n in names], dtype="U128")
-
-def load_oof_features(path: str, prefix: str): 
-    mat = loadmat(path)
-    if "features" not in mat: 
-        raise ValueError(f"{path} missing 'features'")
-    if "fips_codes" not in mat: 
-        raise ValueError(f"{path} missing 'fips_codes'")
-
-    X = np.asarray(mat["features"], dtype=np.float64)
-    if X.ndim == 1: 
-        X = X.reshape(-1, 1)
-    if X.ndim != 2: 
-        raise ValueError(f"{path} expected 2d features, got {X.shape}")
-
-    keep_idx = None 
-    if X.shape[1] == 2: 
-        keep_idx = [1]
-        X = X[:, keep_idx]
-
-    fips  = _mat_str_vector(mat["fips_codes"]).astype("U5")
-    names = feature_names_from_mat(mat, prefix, keep_idx, X.shape[1])
-
-    return {
-        "features": X, 
-        "coords": np.zeros((X.shape[0], 2), dtype=np.float64),
-        "feature_names": names, 
-        "sample_ids": fips 
-    }
 
 def load_raw(key: str) -> dict: 
     spec  = BASE[key]

@@ -19,7 +19,11 @@ from sklearn.linear_model import LogisticRegression
 
 from xgboost import XGBClassifier, XGBRegressor  
 
-from utils.loss_funcs import focal_loss_obj, focal_mlogloss_eval 
+from utils.loss_funcs import (
+    focal_loss_obj, 
+    focal_mlogloss_eval, 
+    WassersteinLoss
+)
 
 import torch 
 
@@ -438,6 +442,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         conv_channels: tuple[int, ...] = (32, 64, 128), 
         kernel_size: int = 3, 
         pool_size: int = 2, 
+        pool_mode: str = "avgmax",
         fc_dim: int = 128, 
         dropout: float = 0.2, 
         use_bn: bool = True, 
@@ -458,6 +463,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         self.conv_channels   = conv_channels
         self.kernel_size     = kernel_size
         self.pool_size       = pool_size
+        self.pool_mode       = pool_mode
         self.fc_dim          = fc_dim
         self.dropout         = dropout
         self.use_bn          = use_bn
@@ -494,16 +500,15 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         return X.reshape(n, c, h, w)
 
     def _fit_norm_stats(self, x_main, x_aux): 
-        def _stats(x): 
-            mu = x.mean(axis=(0,2,3), keepdims=True)
-            sd = x.std(axis=(0,2,3), keepdims=True) + 1e-6 
-            if self.mask_channel is not None and x.shape[1] > self.mask_channel: 
-                mu[:, self.mask_channel, :, :] = 0.0 
-                sd[:, self.mask_channel, :, :] = 1.0 
-            return (mu, sd)
+        data = x_main[:, 0, :, :]
+        mask = x_main[:, self.mask_channel, :, :] > 0.5 
 
-        self._norm_main = _stats(x_main) if self.normalize_main else None 
-        self._norm_aux  = _stats(x_aux) if (self.normalize_aux and x_aux is not None) else None
+        valid = data[mask]
+
+        if valid.size == 0: 
+            self._norm_main = (0.0, 1.0)
+        else: 
+            self._norm_main = (float(valid.mean()), float(valid.std() + 1e-6))
 
     def _apply_norm(self, x: NDArray, stats): 
         if stats is None: 
@@ -541,24 +546,8 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
                     torch.from_numpy(y_idx)
                 ))
     
-    def _make_loader(self, ds, shuffle: bool, sample_weights=None): 
+    def _make_loader(self, ds, shuffle: bool): 
         pin = (self.device_ is not None and self.device_.type == "cuda")
-        if sample_weights is not None: 
-            weights = torch.as_tensor(sample_weights, dtype=torch.double)
-            sampler = WeightedRandomSampler(
-                weights=weights,
-                num_samples=len(weights),
-                replacement=True
-            )
-            return DataLoader(
-                ds, 
-                batch_size=self.batch_size,
-                sampler=sampler,
-                shuffle=False,
-                drop_last=False,
-                num_workers=2,
-                pin_memory=pin
-            )
         return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle, drop_last=False,
                           num_workers=2, pin_memory=pin)
 
@@ -587,6 +576,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
             conv_channels=self.conv_channels,
             kernel_size=self.kernel_size,
             pool_size=self.pool_size,
+            pool_mode=self.pool_mode,
             use_bn=self.use_bn
         )
 
@@ -597,6 +587,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
                 conv_channels=self.conv_channels,
                 kernel_size=self.kernel_size,
                 pool_size=self.pool_size,
+                pool_mode=self.pool_mode,
                 use_bn=self.use_bn
             )
             feat_dim = self.backbone_main_.out_dim + self.backbone_aux_.out_dim 
@@ -616,21 +607,22 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         self.model_.head          = self.head_ 
         self.model_.to(self.device_)
 
-        class_counts   = np.bincount(y_idx, minlength=self.n_classes_).astype(np.float32)
-        class_weights  = class_counts.sum() / np.maximum(class_counts, 1.0)
-        class_weights  = class_weights / class_weights.mean()
-
-        sample_weights = class_weights[y_idx] 
+        class_counts  = np.bincount(y_idx, minlength=self.n_classes_).astype(np.float32)
+        class_weights = class_counts.sum() / np.maximum(class_counts, 1.0)
+        class_weights = class_weights / class_weights.mean()
 
         ds      = self._make_dataset(x_main, x_aux, y_idx)
-        dl      = self._make_loader(ds, sample_weights=sample_weights, shuffle=False)
+        dl      = self._make_loader(ds, shuffle=True)
         opt     = torch.optim.AdamW(
             self.model_.parameters(), 
             lr=self.lr, 
             weight_decay=self.weight_decay
         )
 
-        loss_fn = nn.CrossEntropyLoss()
+        loss_fn = WassersteinLoss(
+            n_classes=self.n_classes_, 
+            class_weights=class_weights
+        ).to(self.device_)
 
         self.model_.train() 
         for _ in range(self.epochs): 

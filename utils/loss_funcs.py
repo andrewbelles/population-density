@@ -9,6 +9,10 @@
 import numpy as np
 from scipy.special import softmax 
 
+import torch 
+
+import torch.nn as nn 
+
 def _resolve_n_classes(preds, y, n_classes): 
     if preds.size % n_classes == 0: 
         return n_classes 
@@ -79,3 +83,33 @@ def focal_mlogloss_eval(n_classes):
         ll = -np.log(p[np.arange(y.size), y]).mean()
         return ("mlogloss", float(ll)) if is_dmatrix else float(ll) 
     return _eval
+
+
+class WassersteinLoss(nn.Module): 
+    '''
+    Efficient and Stable loss for ordinal classification with imbalance 
+    '''
+
+    def __init__(self, n_classes: int = 6, class_weights=None): 
+        super().__init__() 
+        self.n_classes = n_classes 
+        if class_weights is not None: 
+            self.register_buffer(
+                "class_weights", 
+                torch.as_tensor(class_weights, dtype=torch.float32)
+            )
+        else: 
+            self.class_weights = None 
+
+    def forward(self, logits, y): 
+        probs    = torch.softmax(logits, dim=1)
+        prob_cum = torch.cumsum(probs, dim=1)
+        
+        y_onehot = nn.functional.one_hot(y, num_classes=self.n_classes).float() 
+        y_cum    = torch.cumsum(y_onehot, dim=1)
+
+        loss     = torch.sum((prob_cum - y_cum)**2, dim=1)
+        if self.class_weights is not None: 
+            weights = self.class_weights.to(logits.device)
+            loss    = loss * weights.gather(0, y)
+        return loss.mean()

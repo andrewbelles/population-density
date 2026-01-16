@@ -112,7 +112,7 @@ EARLY_STOP_EPS  = 1e-4
 RANDOM_STATE    = 0 
 TRAIN_SIZE      = 0.3 
 
-EXPERT_TEST = TaskSpec("classification", ("accuracy",))
+OPT_TASK = TaskSpec("classification", ("f1_macro",))
 
 # ---------------------------------------------------------
 # Helper Functions 
@@ -212,7 +212,7 @@ def _optimize_dataset(
                 loader_func=loader_func,
                 model_factory=get_factory(model_name),
                 param_space=get_param_space(model_name),
-                task=EXPERT_TEST,
+                task=OPT_TASK,
                 outer_config=outer_config,
                 inner_config=inner_config,
                 n_trials=n_trials,

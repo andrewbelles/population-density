@@ -37,24 +37,6 @@ def check_adj(adj, n: int, name: str):
     if not np.isfinite(adj.data).all(): 
         raise ValueError(f"{name} has non-finite edge weights")
 
-def make_knn_adjacency_factory(coords_path: str, k_neighbors: int):
-    data   = load_coords_from_mobility(coords_path)
-    fips   = np.asarray(data["sample_ids"], dtype="U5")
-    coords = np.asarray(data["coords"], dtype=np.float64)
-
-    A = kneighbors_graph(
-        coords, 
-        n_neighbors=max(1, int(k_neighbors)),
-        mode="connectivity", 
-        include_self=False
-    )
-    A = A.maximum(A.T)
-
-    def _factory(fips_order: list[str]):
-        idx = align_on_fips(fips_order, fips)
-        return A[idx][:, idx]
-    return _factory
-
 def coords_for_fips(coords_path: str, fips_order):
     data = load_coords_from_mobility(coords_path)
     idx  = align_on_fips(fips_order, data["sample_ids"])

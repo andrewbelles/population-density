@@ -653,7 +653,7 @@ def define_cnn_space(trial):
         "pool_size": 2, 
         "fc_dim": trial.suggest_categorical("fc_dim", [64, 128, 256]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
-        "epochs": trial.suggest_int("epochs", 12, 24), 
+        "epochs": trial.suggest_int("epochs", 30, 150), 
         "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
         "lr": trial.suggest_float("lr", 1e-4, 3e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),

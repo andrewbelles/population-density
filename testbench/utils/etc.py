@@ -180,19 +180,6 @@ def write_csv(df: pd.DataFrame, path: str) -> str:
     df.to_csv(out, index=False)
     return str(out)
 
-def parse_max_features(value: str | None): 
-    if value is None: 
-        return None 
-    s = str(value).strip().lower() 
-    if s in ("none", "null"): 
-        return None 
-    try: 
-        if "." in s: 
-            return float(s)
-        return int(s)
-    except ValueError: 
-        return value 
-
 def to_prefixed_name(group: str, feature: str) -> str: 
     g      = str(group).strip().lower()
     f      = str(feature).strip() 

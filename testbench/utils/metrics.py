@@ -35,13 +35,6 @@ def score_from_summary(summary):
             return float(row[key])
     return float("nan")
 
-def majority_vote(pred_matrix): 
-    out = np.empty(pred_matrix.shape[0], dtype=pred_matrix.dtype)
-    for i, row in enumerate(pred_matrix):
-        vals, counts = np.unique(row, return_counts=True)
-        out[i] = vals[np.argmax(counts)]
-    return out 
-
 def metrics_from_summary(summary): 
     row = summary.iloc[0]
     return {
@@ -49,23 +42,6 @@ def metrics_from_summary(summary):
         "f1_macro": float(row["f1_macro_mean"]) if "f1_macro_mean" in row else np.nan,
         "roc_auc": float(row["roc_auc_mean"]) if "roc_auc_mean" in row else np.nan
     }
-
-def metrics_from_preds(y_true, y_pred, class_labels=None):
-    y_true = np.asarray(y_true).reshape(-1)
-    y_pred = np.asarray(y_pred).reshape(-1)
-
-    acc = float(accuracy_score(y_true, y_pred))
-    f1  = float(f1_score(y_true, y_pred, average="macro"))
-
-    labels = (np.asarray(class_labels).reshape(-1) if class_labels is not None and 
-        len(class_labels) else np.unique(y_true))
-    labels = np.array(sorted(labels.tolist()))
-    scores = np.zeros((y_pred.shape[0], labels.size), dtype=np.float64)
-    for i, lbl in enumerate(labels): 
-        scores[y_pred == lbl, i] = 1.0 
-    roc = float(roc_auc_score(y_true, scores, multi_class="ovr", average="macro", labels=labels))
-
-    return {"accuracy": acc, "f1_macro": f1, "roc_auc": roc}
 
 def metrics_from_probs(y_true, probs, class_labels): 
     y_true = np.asarray(y_true).reshape(-1)
@@ -102,18 +78,6 @@ def rank_by_label(results, labels):
     for _, items in by_label.items(): 
         items.sort(key=lambda r: r.get("score", float("-inf")), reverse=True)
     return by_label
-
-def summarize_vif(vif_df): 
-    values = vif_df.to_numpy() 
-    finite = values[np.isfinite(values)]
-    if finite.size == 0: 
-        return "no finite vif values"
-
-    return (
-        f"median={np.median(finite):.3f}"
-        f"p95={np.percentile(finite, 95):.3f}"
-        f"max={finite.max():.3f}"
-    )
 
 def summarize_boruta(path: str) -> pd.DataFrame: 
     df       = pd.read_csv(path)
