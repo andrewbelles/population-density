@@ -17,7 +17,7 @@ def _conv_block(in_ch, out_ch, kernel_size=3, pool_size=2, use_bn=True):
             out_ch,
             kernel_size=kernel_size,
             padding=kernel_size // 2, 
-            bias=False 
+            bias=not use_bn 
         )
     ]
     

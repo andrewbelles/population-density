@@ -29,6 +29,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from models.networks import ConvBackbone
 
+from torch.utils.data import WeightedRandomSampler
+
 # ---------------------------------------------------------
 # Regressors 
 # ---------------------------------------------------------
@@ -445,7 +447,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         weight_decay: float = 0.0, 
         random_state: int = 0,
         device: str | None = None, 
-        normalize: bool = True, 
+        normalize: bool = False, 
         input_adapter: Callable | None = None, 
         merge_fn: Callable | None = None 
     ): 
@@ -534,8 +536,26 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
                     torch.from_numpy(y_idx)
                 ))
     
-    def _make_loader(self, ds, shuffle: bool): 
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle, drop_last=False)
+    def _make_loader(self, ds, shuffle: bool, sample_weights=None): 
+        pin = (self.device_ is not None and self.device_.type == "cuda")
+        if sample_weights is not None: 
+            weights = torch.as_tensor(sample_weights, dtype=torch.double)
+            sampler = WeightedRandomSampler(
+                weights=weights,
+                num_samples=len(weights),
+                replacement=True
+            )
+            return DataLoader(
+                ds, 
+                batch_size=self.batch_size,
+                sampler=sampler,
+                shuffle=False,
+                drop_last=False,
+                num_workers=2,
+                pin_memory=pin
+            )
+        return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle, drop_last=False,
+                          num_workers=2, pin_memory=pin)
 
     def _forward_features(self, xb, xa=None): 
         f_main = self.model_.backbone_main(xb)
@@ -589,15 +609,22 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
         self.model_.backbone_main = self.backbone_main_ 
         self.model_.backbone_aux  = self.backbone_aux_ 
         self.model_.head          = self.head_ 
-        self.model_.to(self.device)
+        self.model_.to(self.device_)
+
+        class_counts   = np.bincount(y_idx, minlength=self.n_classes_).astype(np.float32)
+        class_weights  = class_counts.sum() / np.maximum(class_counts, 1.0)
+        class_weights  = class_weights / class_weights.mean()
+
+        sample_weights = class_weights[y_idx] 
 
         ds      = self._make_dataset(x_main, x_aux, y_idx)
-        dl      = self._make_loader(ds, shuffle=True)
+        dl      = self._make_loader(ds, sample_weights=sample_weights, shuffle=False)
         opt     = torch.optim.AdamW(
             self.model_.parameters(), 
             lr=self.lr, 
             weight_decay=self.weight_decay
         )
+
         loss_fn = nn.CrossEntropyLoss()
 
         self.model_.train() 

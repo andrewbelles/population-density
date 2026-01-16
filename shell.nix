@@ -1,18 +1,13 @@
 { pkgs ? import <nixpkgs> { config.allowUnfree = true; } }:
 
-let 
-  torch = pkgs.python312Packages.torch.override { cudaSupport = true; }; 
-  torchvision = pkgs.python312Packages.torchvision; 
-in pkgs.mkShell {
+pkgs.mkShell {
   packages = with pkgs; [
     python312
     gcc
     gnumake
-    swayimg
     gdal 
     proj 
     geos 
-    cloc 
 
     # Python packages from nixpkgs
     python312Packages.numpy
@@ -26,17 +21,11 @@ in pkgs.mkShell {
     python312Packages.xarray
     python312Packages.rasterio
     python312Packages.pybind11
-    python312Packages.torch-geometric
     python312Packages.fiona
     python312Packages.libpysal
     python312Packages.optuna
 
-    # PyTorch with CUDA
-    torch
-    torchvision
-
     cudaPackages.cudatoolkit  
-    cudaPackages.cudnn
     cudaPackages.nccl 
   ];
 
@@ -46,7 +35,6 @@ in pkgs.mkShell {
     pkgs.zlib
     pkgs.libffi
     pkgs.cudaPackages.cudatoolkit
-    pkgs.cudaPackages.cudnn
   ] + ":/run/opengl-driver/lib";
 
   shellHook = ''
@@ -72,14 +60,21 @@ in pkgs.mkShell {
     
     echo "[NIX-SHELL] Installing remaining packages via pip"
     pip install --upgrade pip
-    
-    # Only install packages not available in nixpkgs
+
+    python -m pip install torch torchvision torchaudio torch-sparse \
+      torch-sparse torch-cluster torch-spline-conv \
+      --index-url https://download.pytorch.org/whl/cu121
+
+    python -m pip install torch-geometric 
+
     pip install rasterstats pyrosm networkit imageio 
     
     echo "[NIX-SHELL] Installing CUDA XGBoost"
     pip install --upgrade pip
     pip install --no-cache-dir 'xgboost>=2.0.0' --config-settings=use_cuda=ON --config-settings=use_nccl=ON
     pip install -e .
+
+    mkdir -p data/climate data/census data/geography 
 
     echo "[NIX-SHELL] creating project directories outside git repo"
     mkdir -p data/climate data/census data/geography 

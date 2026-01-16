@@ -244,10 +244,8 @@ class CNNEvaluator(OptunaEvaluator):
             model = self.factory(**params)
             model.fit(self.X[train_idx], self.y[train_idx])
 
-            y_pred = model.predict(self.X[test_idx])
-            y_prob = None 
-            if hasattr(model, "predict_proba"): 
-                y_prob = model.predict_proba(self.X[test_idx])
+            y_prob = model.predict_proba(self.X[test_idx])
+            y_pred = np.argmax(y_prob, axis=1)
 
             metrics = self.task.compute_metrics(self.y[test_idx], y_pred, y_prob)
             score   = metrics.get("f1_macro", np.nan)
@@ -655,7 +653,7 @@ def define_cnn_space(trial):
         "pool_size": 2, 
         "fc_dim": trial.suggest_categorical("fc_dim", [64, 128, 256]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
-        "epochs": trial.suggest_int("epochs", 5, 30), 
+        "epochs": trial.suggest_int("epochs", 12, 24), 
         "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
         "lr": trial.suggest_float("lr", 1e-4, 3e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),

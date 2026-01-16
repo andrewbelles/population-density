@@ -112,7 +112,7 @@ EARLY_STOP_EPS  = 1e-4
 RANDOM_STATE    = 0 
 TRAIN_SIZE      = 0.3 
 
-EXPERT_TEST = TaskSpec("classification", ("accuracy", "roc_auc"))
+EXPERT_TEST = TaskSpec("classification", ("accuracy",))
 
 # ---------------------------------------------------------
 # Helper Functions 

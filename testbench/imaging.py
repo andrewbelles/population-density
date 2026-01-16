@@ -24,7 +24,7 @@ from testbench.utils.data      import (
     make_tensor_adapter
 )
 
-from analysis.cross_validation import CVConfig 
+from analysis.cross_validation import CVConfig, TaskSpec 
 
 from analysis.hyperparameter   import run_optimization, define_cnn_space, CNNEvaluator 
 
@@ -35,6 +35,7 @@ from utils.helpers import (
 )
 
 DEFAULT_MODEL_KEY = "ImageCNN/VIIRS_TENSOR"
+EXPERT_TEST       = TaskSpec("classification", ("accuracy",))
 
 
 def test_viirs(
@@ -68,7 +69,7 @@ def test_viirs(
         loader_func=loader,
         model_factory=factory,
         param_space=define_cnn_space,
-        task=CLASSIFICATION,
+        task=EXPERT_TEST,
         config=config
     )
 
@@ -109,8 +110,8 @@ def test_viirs(
 def main(): 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--mode", choices=["spatial", "gaf", "dual"], default="dual")
-    parser.add_argument("--trials", default=150)
-    parser.add_argument("--folds", default=3)
+    parser.add_argument("--trials", default=50)
+    parser.add_argument("--folds", default=2)
     parser.add_argument("--random-state", default=0)
     args = parser.parse_args()
 
