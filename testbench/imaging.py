@@ -13,6 +13,7 @@ import numpy as np
 from scipy.io import savemat 
 
 from testbench.utils.paths     import (
+    CONFIG_PATH,
     TENSOR_DATA,
     TENSOR_POOLED_OUT
 )
@@ -123,7 +124,8 @@ def main():
         mode=args.mode,
         trials=args.trials,
         folds=args.folds,
-        random_state=args.random_state
+        random_state=args.random_state,
+        config_path=CONFIG_PATH
     )
 
 

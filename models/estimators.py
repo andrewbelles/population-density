@@ -641,7 +641,7 @@ class CNNClassifier(BaseEstimator, ClassifierMixin):
 
         loss_fn = WassersteinLoss(
             n_classes=self.n_classes_, 
-            class_weights=class_weights
+            class_weights=None
         ).to(self.device_)
 
         best_state = None 

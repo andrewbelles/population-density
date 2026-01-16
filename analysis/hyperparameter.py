@@ -652,7 +652,7 @@ def define_cnn_space(trial):
         "fc_dim": trial.suggest_categorical("fc_dim", [256, 512]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
         "batch_size": trial.suggest_categorical("batch_size", [64, 128]),
-        "lr": trial.suggest_float("lr", 1e-5, 3e-2, log=True),
+        "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
         # hardcoded 
