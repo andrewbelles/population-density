@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd 
 
 from numpy.typing import NDArray
-from typing import Callable, Sequence, TypedDict, List 
+from typing import Callable, Sequence, TypedDict, List, Any 
 
 from scipy.io import loadmat
 
@@ -20,6 +20,8 @@ from utils.helpers import (
     _mat_str_vector,
     align_on_fips
 )
+
+from preprocessing.viirs_nchs_tensor_dataset import ViirsLazyLoader
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -914,4 +916,40 @@ def load_concat_datasets(
         "coords": coords, 
         "feature_names": feature_names, 
         "sample_ids": np.array(common, dtype="U5")
+    }
+
+# ---------------------------------------------------------
+# CNN Specific Datasets (include a collate function)
+# ---------------------------------------------------------
+
+class SpatialDatasetDict(TypedDict): 
+    dataset: Any 
+    labels: NDArray 
+    coords: NDArray
+    sample_ids: NDArray[np.str_]
+    collate_fn: Callable | None 
+
+SpatialDatasetLoader = Callable[[str], SpatialDatasetDict]
+
+def load_viirs_roi_manifest(
+    root_dir: str, 
+    *, 
+    canvas_hw=(512, 512), 
+    tile_hw=None
+) -> SpatialDatasetDict:
+
+    ds     = ViirsLazyLoader(root_dir)
+    labels = np.asarray([r["label"] for r in ds.records], dtype=np.int64)
+    fips   = np.asarray([r["fips"] for r in ds.records], dtype="U5")
+    coords = np.zeros((labels.shape[0], 2), dtype=np.float64)
+
+    def _collate(batch): 
+        return ViirsLazyLoader.pack(batch, canvas_hw=canvas_hw, tile_hw=tile_hw)
+
+    return {
+        "dataset": ds, 
+        "labels": labels, 
+        "coords": coords, 
+        "sample_ids": fips, 
+        "collate_fn": _collate
     }

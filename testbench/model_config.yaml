@@ -181,3 +181,19 @@ models:
     max_delta_step: 1
     focal_gamma: 0.9575971220937156
     gamma: 9.736111397862242
+  ImageCNN/VIIRS_TENSOR:
+    conv_channels: 32-64-128-256
+    fc_dim: 256
+    dropout: 0.3634216094521203
+    batch_size: 64
+    lr: 0.00014591346418009574
+    weight_decay: 3.629982603560718e-05
+  Spatial/VIIRS_ROI:
+    conv_channels: 32-64-128
+    fc_dim: 128
+    dropout: 0.32294705653332806
+    lr: 7.50195444362012e-05
+    weight_decay: 0.0004734989304499476
+    roi_output_size: 4
+    sampling_ratio: 1
+    aligned: false

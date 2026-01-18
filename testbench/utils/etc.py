@@ -25,7 +25,6 @@ from analysis.hyperparameter import (
     define_rf_space,
     define_svm_space,
     define_logistic_space,
-    define_cnn_space
 )
 
 from models.estimators import (
@@ -33,7 +32,6 @@ from models.estimators import (
     make_rf_classifier,
     make_svm_classifier,
     make_logistic,
-    make_image_cnn
 )
 
 def get_param_space(model_type: str): 
@@ -42,7 +40,6 @@ def get_param_space(model_type: str):
         "RandomForest": define_rf_space,
         "SVM": define_svm_space, 
         "Logistic": define_logistic_space,
-        "CNN": define_cnn_space 
     }
     return mapping[model_type]
 
@@ -52,7 +49,6 @@ def get_factory(model_type: str):
         "RandomForest": make_rf_classifier,
         "SVM": make_svm_classifier,
         "Logistic": make_logistic,
-        "CNN": make_image_cnn
     }
     return mapping[model_type]
 

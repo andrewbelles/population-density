@@ -11,9 +11,13 @@ from numpy.typing import NDArray
 import optuna, itertools 
 from optuna.samplers import CmaEsSampler, TPESampler
 
+import torch 
+
 import numpy as np 
 from abc import ABC, abstractmethod 
-from typing import Any, Callable, Dict, Literal 
+from typing import Any, Callable, Dict, Literal
+
+from torch.utils.data import DataLoader, Subset  
 
 from preprocessing.loaders import (
     load_oof_predictions
@@ -202,55 +206,73 @@ class StandardEvaluator(OptunaEvaluator):
         
         raise ValueError("no suitable metric found in summary results ")
 
-class PipelineEvaluator(OptunaEvaluator): 
-    '''
-    Optimization of each step of classifier pipeline 
-    '''
-    pass 
-
-class CNNEvaluator(OptunaEvaluator): 
+class SpatialEvaluator(OptunaEvaluator): 
 
     def __init__(
-        self, 
-        filepath, 
+        self,
+        filepath,
         loader_func,
-        model_factory, 
-        param_space, 
+        model_factory,
+        param_space,
         task,
-        config
+        config,
+        batch_size: int = 64, 
+        num_workers: int = 2, 
+        pin_memory: bool | None = None, 
+        drop_last: bool = False 
     ): 
         self.filepath       = filepath 
         self.loader         = loader_func 
-        self.factory        = model_factory 
-        self.param_space_fn = param_space 
+        self.factory        = model_factory
+        self.param_space_fn = param_space
         self.task           = task 
         self.config         = config 
-        self.config.verbose = False 
+        self.config.verbose = False
+        
+        data                = self.loader(filepath)
+        self.dataset        = data["dataset"]
+        self.labels         = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+        self.coords         = data.get("coords")
+        self.collate_fn     = data.get("collate_fn") 
+        self.batch_size     = batch_size 
+        self.num_workers    = num_workers 
+        self.pin_memory     = pin_memory 
+        self.drop_last      = drop_last 
 
-        data   = self.loader(filepath)
-        self.X = np.asarray(data["features"], dtype=np.float32)
-        self.y = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
-        self.coords = data.get("coords")
-
-    def suggest_params(self, trial): 
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         return self.param_space_fn(trial)
 
-    def evaluate(self, params): 
+    def _make_loader(self, dataset, shuffle: bool): 
+        pin = self.pin_memory 
+        if pin is None: 
+            pin = torch.cuda.is_available() 
+        return DataLoader(
+            dataset, 
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=self.num_workers,
+            pin_memory=pin,
+            drop_last=self.drop_last,
+            collate_fn=self.collate_fn
+        )
+
+    def evaluate(self, params: Dict[str, Any]) -> float:
         splitter    = self.config.get_splitter(self.task)
-        y_for_split = self.y 
+        y_for_split = self.labels 
+        idx         = np.arange(self.labels.shape[0])
         scores      = []
 
-        for train_idx, test_idx in splitter.split(self.X, y_for_split): 
-            model = self.factory(**params)
-            model.fit(self.X[train_idx], self.y[train_idx])
+        for train_idx, test_idx in splitter.split(idx, y_for_split): 
+            train_ds = Subset(self.dataset, train_idx)
+            test_ds  = Subset(self.dataset, test_idx)
 
-            y_prob = model.predict_proba(self.X[test_idx])
-            y_pred = np.argmax(y_prob, axis=1)
+            model = self.factory(collate_fn=self.collate_fn, **params) 
 
-            metrics = self.task.compute_metrics(self.y[test_idx], y_pred, y_prob)
+            model.fit(train_ds, self.labels[train_idx])
+            y_pred  = model.predict(test_ds)
+
+            metrics = self.task.compute_metrics(self.labels[test_idx], y_pred, None)
             score   = metrics.get("f1_macro", np.nan)
-            if np.isnan(score): 
-                score = metrics.get("accuracy", np.nan)
             scores.append(score)
 
         return float(np.mean(scores))
@@ -641,27 +663,32 @@ def define_gate_space(trial):
         "batch_norm": trial.suggest_categorical("batch_norm", [True, False])
     }
 
-def define_cnn_space(trial): 
+def define_spatial_space(trial): 
     conv_choices = {
-        "32-64-128-256": (32, 64, 128, 256),
+        "32-64-128-256": (16, 32, 64),
         "32-64-128": (32, 64, 128),
     }
     key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
     return {
         "conv_channels": conv_choices[key],
-        "fc_dim": trial.suggest_categorical("fc_dim", [256, 512]),
+        "fc_dim": trial.suggest_categorical("fc_dim", [128, 256, 512]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
-        "batch_size": trial.suggest_categorical("batch_size", [64, 128]),
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
+        "roi_output_size": trial.suggest_categorical("roi_output_size", [4, 7]),
+        "sampling_ratio": trial.suggest_categorical("sampling_ratio", [1, 2]),
+        "aligned": trial.suggest_categorical("aligned", [True, False]),
+
         # hardcoded 
+        "batch_size": 16,
         "kernel_size": 3,
         "pool_size": 2, 
         "use_bn": True,
-        "epochs": 150, 
-        "early_stopping_rounds": 20, 
-        "eval_fraction": 0.15
+        "epochs": 50, 
+        "early_stopping_rounds": 10, 
+        "eval_fraction": 0.10,
+        "min_delta": 1e-4
     }
 
 # --------------------------------------------------------- 

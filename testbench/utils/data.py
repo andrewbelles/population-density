@@ -43,7 +43,8 @@ from preprocessing.loaders import (
     load_concat_datasets,
     make_oof_dataset_loader,
     load_oof_predictions, 
-    ConcatSpec
+    ConcatSpec,
+    load_viirs_roi_manifest
 )
 
 from preprocessing.loaders import load_passthrough
@@ -320,3 +321,8 @@ def make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size):
         raise ValueError("mode must be spatial/gaf/dual")
 
     return _adapter 
+
+def make_roi_loader(canvas_hw=(512, 512)): 
+    def _loader(path): 
+        return load_viirs_roi_manifest(path, canvas_hw=canvas_hw)
+    return _loader 

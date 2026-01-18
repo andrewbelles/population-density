@@ -6,7 +6,8 @@
 # 
 # 
 
-import argparse, csv, fiona, rasterio, imageio 
+import argparse, csv, fiona, rasterio, imageio
+import json 
 
 from pathlib import Path 
 
@@ -19,9 +20,6 @@ import rasterio.mask
 from rasterio.warp import transform_geom 
 
 from utils.helpers import project_path
-
-from scipy.io      import savemat 
-from scipy.ndimage import zoom 
 
 
 class ViirsTensorDataset: 
@@ -61,90 +59,42 @@ class ViirsTensorDataset:
         self.debug_png_dir = debug_png_dir
 
         self.label_map     = self._load_labels()
-        self.data          = self._build() 
 
-    def save(self, output_path: str): 
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        savemat(out, self.data)
-        n = self.data["labels"].shape[0]
-        print(f"[viirs tensor] saved {out} ({n} counties)")
+    def save(self, output_dir: str): 
+        out_dir    = Path(output_dir)
+        sample_dir = out_dir / "samples"
+        sample_dir.mkdir(parents=True, exist_ok=True)
 
-    def _build(self): 
-        viirs_path    = Path(self.viirs_path)
-        counties_path = Path(self.counties_path)
-        if not viirs_path.exists():
-            raise FileNotFoundError(f"VIIRS raster not found: {viirs_path}")
-        if not counties_path.exists(): 
-            raise FileNotFoundError(f"county shapefile not found: {counties_path}")
+        records = []
+        count   = 0 
+        for rec in self._iter_samples(): 
+            fips     = rec["fips"]
+            out_path = sample_dir / f"fips_{fips}.npz"
 
-        spatial_list = []
-        mask_list    = []
-        gaf_list     = []
-        labels       = []
-        fips_codes   = []
+            np.savez_compressed(
+                out_path, 
+                spatial=rec["spatial"].astype(np.float32),
+                mask=rec["mask"].astype(np.uint8),
+                gaf=rec["gaf"].astype(np.float32),
+                label=np.int64(rec["label"]),
+                fips=fips
+            )
+            records.append({
+                "fips": fips, 
+                "label": int(rec["label"]),
+                "path": str(out_path.relative_to(out_dir)),
+                "h": int(rec["spatial"].shape[0]),
+                "w": int(rec["spatial"].shape[1]),
+                "mask_sum": int(rec["mask"].sum())
+            })
+            count += 1 
+            if self.max_counties is not None and count >= self.max_counties: 
+                break 
 
-        with rasterio.open(viirs_path) as src: 
-            nodata = src.nodata 
-            with fiona.open(counties_path) as shp: 
-                count = 0 
-                for fips, geom in self._iter_counties(shp, src.crs): 
-                    out_image, _ = rasterio.mask.mask(
-                        src,
-                        [geom],
-                        crop=True,
-                        filled=False,
-                        all_touched=self.all_touched
-                    )
-                    arr = out_image[0]
-                    if arr.size == 0: 
-                        continue 
-
-                    valid_mask = ~arr.mask if hasattr(arr, "mask") else np.isfinite(arr)
-                    if nodata is not None: 
-                        valid_mask &= arr != nodata 
-
-                    if not np.any(valid_mask): 
-                        continue 
-
-                    data = np.asarray(arr, dtype=np.float32)
-                    if self.log_scale: 
-                        data = np.log1p(np.maximum(data, 0.0))
-                    data[~valid_mask] = 0.0 
-
-                    spatial, mask = self._recanvas(data, valid_mask, self.canvas_h, self.canvas_w)
-                    gaf           = self._gaf_from_mask(data, valid_mask, self.gaf_size)
-
-                    spatial_list.append(spatial)
-                    mask_list.append(mask)
-                    gaf_list.append(gaf)
-                    labels.append(self.label_map[fips])
-                    fips_codes.append(fips)
-
-                    if self.debug_png_dir: 
-                        self._write_debug_png(fips, spatial, mask, gaf)
-
-                    count += 1 
-                    if self.max_counties is not None and count >= self.max_counties: 
-                        break 
-
-        if not spatial_list: 
-            raise ValueError("no counties processed")
-
-        spatial    = np.stack(spatial_list, axis=0).astype(np.float32) 
-        mask       = np.stack(mask_list, axis=0).astype(np.uint8)
-        gaf        = np.stack(gaf_list, axis=0).astype(np.float32)
-        labels     = np.asarray(labels, dtype=np.int64).reshape(-1, 1)
-        fips_codes = np.asarray(fips_codes, dtype="U5") 
-
-
-        return {
-            "spatial": spatial, 
-            "mask": mask, 
-            "gaf": gaf, 
-            "labels": labels,
-            "fips": fips_codes 
-        }
+        manifest_path = out_dir / "manifest.jsonl"
+        with manifest_path.open("w", encoding="utf-8") as f: 
+            for r in records: 
+                f.write(json.dumps(r) + "\n")
 
     def _load_labels(self) -> Dict[str, int]: 
         path = Path(self.labels_path)
@@ -172,6 +122,53 @@ class ViirsTensorDataset:
         if not labels: 
             raise ValueError("label map is empty")
         return labels 
+
+    def _iter_samples(self): 
+        viirs_path    = Path(self.viirs_path)
+        counties_path = Path(self.counties_path)
+        if not viirs_path.exists(): 
+            raise FileNotFoundError(f"VIIRS raster not found: {viirs_path}")
+        if not counties_path.exists(): 
+            raise FileNotFoundError(f"county shapefile not found: {counties_path}")
+
+        with rasterio.open(viirs_path) as src: 
+            nodata = src.nodata 
+            with fiona.open(counties_path) as shp: 
+                for fips, geom in self._iter_counties(shp, src.crs): 
+                    out_image, _ = rasterio.mask.mask(
+                        src, [geom], crop=True, filled=False, all_touched=self.all_touched
+                    )
+                    arr = out_image[0]
+                    if arr.size == 0: 
+                        continue 
+
+                    valid_mask = ~arr.mask if hasattr(arr, "mask") else np.isfinite(arr)
+                    if nodata is not None: 
+                        valid_mask &= arr != nodata 
+                    if not np.any(valid_mask): 
+                        continue 
+
+                    data = np.asarray(arr, dtype=np.float32)
+                    if self.log_scale: 
+                        data = np.log1p(np.maximum(data, 0.0))
+                    data[~valid_mask] = 0.0 
+
+                    spatial, mask = self._tight_crop(data, valid_mask)
+                    if spatial.size == 0: 
+                        continue 
+
+                    gaf = self._gaf_from_mask(spatial, mask.astype(bool), self.gaf_size)
+
+                    if self.debug_png_dir: 
+                        self._write_debug_png(fips, spatial, mask, gaf)
+
+                    yield {
+                        "fips": fips, 
+                        "label": self.label_map[fips],
+                        "spatial": spatial,
+                        "mask": mask,
+                        "gaf": gaf
+                    }
 
     def _iter_counties(
         self,
@@ -209,39 +206,17 @@ class ViirsTensorDataset:
         imageio.imwrite(out_dir / f"fips_{fips}_gaf.png", gaf_u8)
 
     @staticmethod 
-    def _recanvas(data, valid_mask, out_h, out_w): 
-        out      = np.zeros((out_h, out_w), dtype=np.float32)
-        out_mask = np.zeros((out_h, out_w), dtype=np.uint8)
-        ys, xs   = np.nonzero(valid_mask)
+    def _tight_crop(data, mask): 
+        ys, xs = np.nonzero(mask)
         if ys.size == 0: 
-            return out, out_mask 
+            return np.zeros((0, 0), dtype=np.float32), np.zeros((0, 0), dtype=np.uint8)
 
         y0, y1 = ys.min(), ys.max() + 1 
         x0, x1 = xs.min(), xs.max() + 1 
-
-        crop_data = data[y0:y1, x0:x1]
-        crop_mask = valid_mask[y0:y1, x0:x1].astype(np.uint8)
-
-        h, w   = crop_data.shape 
-        scale  = min(out_h / h, out_w / w) 
-        new_h  = max(1, int(round(h * scale)))
-        new_w  = max(1, int(round(w * scale)))
-        zoom_h = new_h / h 
-        zoom_w = new_w / w
-
-        resized_data = zoom(crop_data, (zoom_h, zoom_w), order=1)
-        resized_mask = zoom(crop_mask, (zoom_h, zoom_w), order=0)
-
-        out      = np.zeros((out_h, out_w), dtype=np.float32)
-        out_mask = np.zeros((out_h, out_w), dtype=np.uint8)
-
-        y_off = (out_h - new_h) // 2 
-        x_off = (out_w - new_w) // 2 
         
-        out[y_off:y_off + new_h, x_off:x_off + new_w] = resized_data
-        out_mask[y_off:y_off + new_h, x_off:x_off + new_w] = resized_mask
- 
-        return out, out_mask 
+        crop_data = data[y0:y1, x0:x1].astype(np.float32)
+        crop_mask = mask[y0:y1, x0:x1].astype(np.uint8)
+        return crop_data, crop_mask
 
     @staticmethod 
     def _gaf_from_mask(data, valid_mask, size):
@@ -299,10 +274,99 @@ class ViirsTensorDataset:
         return (y * 255.0).astype(np.uint8)
 
 
+class ViirsLazyLoader: 
+    '''
+    Lazy Loader that pulls a single county on __getitem__ instead of entire dataset via 
+    dataset manifest saved by ViirsTensorDataset
+    '''
+    def __init__(self, root_dir: str): 
+        self.root_dir = Path(root_dir)
+        manifest      = self.root_dir / "manifest.jsonl"
+        self.records  = [
+            json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if 
+            line.strip()
+        ]
+
+    def __len__(self): 
+        return len(self.records)
+
+    def __getitem__(self, idx): 
+        rec = self.records[idx] 
+        with np.load(self.root_dir / rec["path"]) as npz: 
+            spatial = npz["spatial"]
+            mask    = npz["mask"]
+            gaf     = npz["gaf"]
+        return spatial, mask, gaf, int(rec["label"]), rec["fips"]
+
+    @staticmethod 
+    def pack(batch, canvas_hw=(512, 512), tile_hw=None, weight_by_mask=True, gap: int = 8): 
+        '''
+        Greedy packing tool designed for ROI pooling, takes batches and aggressively packs 
+        samples together on (H,W) images. 
+        '''
+
+        if tile_hw is None: 
+            tile_hw = canvas_hw 
+        
+        H, W          = canvas_hw 
+        canvases      = []
+        rois          = [] # list of (canvas index, y0, x0, y1, x1)
+        labels, fips  = [], []
+        group_ids     = []
+        group_weights = [] 
+
+        for sample_idx, (spatial, mask, _, label, fip) in enumerate(batch): 
+            labels.append(label)
+            fips.append(fip)
+
+            for tile, tile_mask in ViirsLazyLoader._iter_tiles(spatial, mask, tile_hw): 
+                h, w   = tile.shape 
+                weight = float(tile_mask.sum()) if weight_by_mask else 1.0 
+
+                placed = False 
+                # Try to place current bbox on any active canvases, if not make a new one 
+                for c_idx, (canvas, mask_canvas, cursor) in enumerate(canvases): 
+                    y, x = cursor 
+                    if y + h <= H and x + w <= W: 
+                        canvas[0, y:y+h, x:x+w]      = tile 
+                        mask_canvas[0, y:y+h, x:x+w] = tile_mask 
+                        rois.append((c_idx, y, x, y + h, x + w))
+                        group_ids.append(sample_idx)
+                        group_weights.append(weight)
+                        cursor[1] = x + w + gap 
+                        placed = True 
+                        break 
+                if not placed: 
+                    canvas      = np.zeros((1, H, W), dtype=np.float32)
+                    mask_canvas = np.zeros((1, H, W), dtype=np.uint8)
+                    canvas[0, :h, :w]      = tile 
+                    mask_canvas[0, :h, :w] = tile_mask
+                    canvases.append([canvas, mask_canvas, [0, w + gap]])
+                    rois.append((len(canvases) - 1, 0, 0, h, w)) 
+                    group_ids.append(sample_idx)
+                    group_weights.append(weight)
+
+
+        packed_images = np.stack([c[0] for c in canvases], axis=0)
+        packed_masks  = np.stack([c[1] for c in canvases], axis=0)
+        return (packed_images, packed_masks, rois, np.asarray(labels), 
+                fips, group_ids, group_weights)
+
+    @staticmethod 
+    def _iter_tiles(spatial, mask, tile_hw): 
+        H, W = tile_hw 
+        h, w = spatial.shape 
+        for y0 in range(0, h, H): 
+            for x0 in range(0, w, W): 
+                tile      = spatial[y0:y0 + H, x0:x0 + W] 
+                tile_mask = mask[y0:y0 + H, x0:x0 + W]
+                if tile_mask.sum() == 0: 
+                    continue 
+                yield tile, tile_mask 
+
 def main(): 
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--out", default=project_path("data", "datasets", 
-                                                      "viirs_nchs_tensor_2023.mat"))
+    parser.add_argument("--out", default=project_path("data", "datasets"))
     parser.add_argument("--all-touched", action="store_true")
     parser.add_argument("--log-scale", action="store_true")
     parser.add_argument("--debug-png-dir", default=None)

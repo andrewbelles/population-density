@@ -7,6 +7,9 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
+from os import wait
+import sys
+import time
 from typing import Callable
 
 import numpy as np 
@@ -14,9 +17,11 @@ import numpy as np
 from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier 
+from sklearn.metrics import f1_score
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression 
 
+from sklearn.utils import shuffle
 from xgboost import XGBClassifier, XGBRegressor  
 
 from utils.loss_funcs import (
@@ -29,9 +34,12 @@ import torch, copy
 
 from torch import nn 
 
-from torch.utils.data import DataLoader, TensorDataset, random_split 
+from torch.utils.data import DataLoader, TensorDataset, random_split, Subset 
 
-from models.networks import ConvBackbone
+from models.networks import SpatialBackbone
+
+from sklearn.model_selection import StratifiedShuffleSplit 
+
 
 
 # ---------------------------------------------------------
@@ -427,328 +435,460 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
             raise AttributeError("SVMClassifier was instantiated with probability=False")
         return self.model_.predict_proba(X)
 
+# --------------------------------------------------------- 
+# Decision Optimizer Adapter for Ordinal Regression 
+# --------------------------------------------------------- 
+
+class OrdinalCutModel: 
+    '''
+    Learns monotonic thresholds on ordinal logits to optimize target metric 
+    '''
+
+    def __init__(
+        self, 
+        scorer=None, 
+        n_grid: int = 25, 
+        max_iter: int = 2
+    ): 
+        self.scorer   = scorer 
+        self.n_grid   = n_grid 
+        self.max_iter = max_iter 
+
+    def fit(
+        self, 
+        logits: NDArray,
+        y: NDArray,
+        classes_: NDArray
+    ): 
+        if logits.ndim == 1: 
+            logits = logits.reshape(-1, 1)
+
+        y_idx     = np.searchsorted(classes_, y)
+        p         = 1.0 / (1.0 + np.exp(-logits))
+        n_classes = len(classes_)
+        if p.shape[1] != n_classes - 1: 
+            raise ValueError("logits must have shape (n, k-1)")
+
+        scorer = self.scorer 
+        if scorer is None: 
+            scorer = lambda yt, yp: f1_score(yt, yp, average="macro")
+
+        thresholds = np.full(n_classes - 1, 0.5, dtype=np.float64)
+
+        for _ in range(self.max_iter): 
+            for k in range(n_classes - 1): 
+                cand   = np.unique(np.quantile(p[:, k], np.linspace(0.05, 0.95, self.n_grid)))
+                best_t = thresholds[k]
+                best_s = -np.inf 
+                for t in cand: 
+                    tmp    = thresholds.copy() 
+                    tmp[k] = t 
+                    y_pred = self._predict_from_p(p, tmp)
+                    score  = scorer(y_idx, y_pred)
+                    if score > best_s: 
+                        best_s = score 
+                        best_t = t 
+                thresholds[k] = best_t 
+
+        self.thresholds_ = thresholds 
+        return self 
+
+    def predict(
+        self,
+        logits: NDArray,
+        classes_: NDArray
+    ): 
+        if logits.ndim == 1: 
+            logits = logits.reshape(-1, 1)
+        p = 1.0 / (1.0 + np.exp(-logits))
+        preds = self._predict_from_p(p, self.thresholds_)
+        return np.asarray(classes_)[preds]
+
+    @staticmethod 
+    def _predict_from_p(p: NDArray, thresholds: NDArray) -> NDArray:
+        return (p > thresholds).sum(axis=1)
+
+class OrdinalDecisionAdapter(BaseEstimator, ClassifierMixin): 
+
+    '''
+    Generic adapter that calibrates ordinal logits into discrete classes. 
+    
+    Works with any base model that exposes the predict_logits() method. 
+    '''
+
+    def __init__(
+        self, 
+        base_model,
+        cut_model: OrdinalCutModel | None = None, 
+        scorer=None,
+        fit_base: bool = True 
+    ): 
+        self.base_model = base_model 
+        self.cut_model  = cut_model 
+        self.scorer     = scorer 
+        self.fit_base   = fit_base 
+
+    def fit(self, X, y, coords=None): 
+        if self.fit_base: 
+            try: 
+                self.base_model.fit(X, y, coords)
+            except TypeError: 
+                self.base_model.fit(X, y)
+
+        if not hasattr(self.base_model, "predict_logits"): 
+            raise AttributeError("base_model must implement predict_logits")
+
+        eval_X = self._as_eval_loader(X)
+        logits = self._predict_logits(eval_X, coords)
+
+        self.classes_ = getattr(self.base_model, "classes_", None)
+        if self.classes_ is None: 
+            self.classes_ = np.unique(np.asarray(y))
+
+        cut = self.cut_model or OrdinalCutModel(scorer=self.scorer)
+        self.cut_model_ = cut.fit(logits, y, self.classes_)
+        return self 
+
+    def predict(self, X, coords=None): 
+        eval_X = self._as_eval_loader(X)
+        logits = self._predict_logits(eval_X, coords)
+        return self.cut_model_.predict(logits, np.asarray(self.classes_))
+    
+    def _predict_logits(self, X, coords): 
+        try: 
+            return self.base_model.predict_logits(X, coords)
+        except TypeError: 
+            return self.base_model.predict_logits(X)
+
+    def _as_eval_loader(self, X): 
+        if isinstance(X, DataLoader):
+            return DataLoader(
+                X.dataset, 
+                batch_size=X.batch_size,
+                shuffle=False,
+                num_workers=X.num_workers,
+                pin_memory=X.pin_memory,
+                drop_last=False,
+                collate_fn=X.collate_fn
+            )
+        return X 
+
 # ---------------------------------------------------------
 # CNN, Supervised Feature Extraction  
 # ---------------------------------------------------------
 
-class CNNClassifier(BaseEstimator, ClassifierMixin): 
+class SpatialClassifier(BaseEstimator, ClassifierMixin): 
 
     def __init__(
-        self, 
+        self,
         *,
-        input_shape: tuple[int, int, int] | None = None, 
-        aux_input_shape: tuple[int, int, int] | None = None, 
-        conv_channels: tuple[int, ...] = (32, 64, 128), 
+        conv_channels: tuple[int, ...] = (32, 64, 128, 256), 
         kernel_size: int = 3, 
         pool_size: int = 2, 
-        pool_mode: str = "avgmax",
         fc_dim: int = 128, 
         dropout: float = 0.2, 
         use_bn: bool = True, 
+        roi_output_size: int | tuple[int, int] = 7, 
+        sampling_ratio: int = 2, 
+        aligned: bool = False, 
         epochs: int = 100, 
-        batch_size: int = 32, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
-        random_state: int = 0,
-        device: str | None = None, 
-        normalize_main: bool = True,
-        normalize_aux: bool = False, 
-        input_adapter: Callable | None = None, 
-        mask_channel: int | None = 1, 
-        merge_fn: Callable | None = None,
-        early_stopping_rounds: int | None = None, 
-        eval_fraction: float = 0.1
+        random_state: int = 0, 
+        device: str | None = None,
+        early_stopping_rounds: int | None = 15, 
+        eval_fraction: float = 0.1,
+        min_delta: float = 1e-4,
+        batch_size: int = 32,
+        pin_memory: bool | None = None, 
+        shuffle: bool = True, 
+        collate_fn=None
     ): 
-        self.input_shape     = input_shape
-        self.aux_input_shape = aux_input_shape
         self.conv_channels   = conv_channels
         self.kernel_size     = kernel_size
         self.pool_size       = pool_size
-        self.pool_mode       = pool_mode
         self.fc_dim          = fc_dim
         self.dropout         = dropout
         self.use_bn          = use_bn
+        self.roi_output_size = roi_output_size
+        self.sampling_ratio  = sampling_ratio
+        self.aligned         = aligned
         self.epochs          = epochs
-        self.batch_size      = batch_size
         self.lr              = lr
         self.weight_decay    = weight_decay
-        self.random_state    = random_state 
-        self.device          = device
-        self.normalize_main  = normalize_main 
-        self.normalize_aux   = normalize_aux 
-        self.input_adapter   = input_adapter
-        self.mask_channel    = mask_channel
-        self.merge_fn        = merge_fn
+        self.random_state    = random_state
+        self.device          = self._resolve_device(device)
 
-        # Early stopping 
         self.early_stopping_rounds = early_stopping_rounds 
+        self.min_delta             = min_delta
         self.eval_fraction         = eval_fraction
 
-    def _resolve_device(self): 
-        if self.device is not None: 
-            return torch.device(self.device)
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pin_memory = pin_memory 
+        self.shuffle    = shuffle 
+        self.batch_size = batch_size 
+        self.collate_fn = collate_fn
 
-    def _adapt_inputs(self, X: NDArray): 
-        if self.input_adapter is not None: 
-            return self.input_adapter(X)
+        self.classes_: NDArray | None = None 
+        self.n_classes_: int | None   = None 
 
-        X = np.asarray(X, dtype=np.float64)
-        if X.ndim == 4: 
-            return X 
-
-        if self.input_shape is None: 
-            raise ValueError("input_shape required when X is flat")
-
-        n = X.shape[0]
-        c, h, w = self.input_shape 
-        return X.reshape(n, c, h, w)
-
-    def _fit_norm_stats(self, x_main, x_aux): 
-        data = x_main[:, 0, :, :]
-        mask = x_main[:, self.mask_channel, :, :] > 0.5 
-
-        valid = data[mask]
-
-        if valid.size == 0: 
-            self._norm_main = (0.0, 1.0)
-        else: 
-            self._norm_main = (float(valid.mean()), float(valid.std() + 1e-6))
-
-    def _apply_norm(self, x: NDArray, stats): 
-        if stats is None: 
-            return x 
-        mu, sd = stats 
-        return (x - mu) / sd 
-
-    def _prepare_inputs(self, X, training: bool): 
-        adapted = self._adapt_inputs(X)
-        if isinstance(adapted, tuple): 
-            x_main, x_aux = adapted 
-        else: 
-            x_main, x_aux = adapted, None 
-
-        if training: 
-            self._fit_norm_stats(x_main, x_aux)
-
-        x_main = self._apply_norm(x_main, self._norm_main)
-        if x_aux is not None: 
-            x_aux = self._apply_norm(x_aux, self._norm_aux)
-
-        return x_main, x_aux 
-
-    def _make_dataset(self, x_main, x_aux, y_idx=None): 
-        if y_idx is None: 
-            return (TensorDataset(torch.from_numpy(x_main)) if x_aux is None else 
-                    TensorDataset(torch.from_numpy(x_main), torch.from_numpy(x_aux)))
-        return (TensorDataset(
-                    torch.from_numpy(x_main), 
-                    torch.from_numpy(y_idx)
-                ) if x_aux is None else 
-                TensorDataset(
-                    torch.from_numpy(x_main), 
-                    torch.from_numpy(x_aux), 
-                    torch.from_numpy(y_idx)
-                ))
-    
-    def _make_loader(self, ds, shuffle: bool): 
-        pin = (self.device_ is not None and self.device_.type == "cuda")
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle, drop_last=False,
-                          num_workers=2, pin_memory=pin)
-
-    def _forward_features(self, xb, xa=None): 
-        f_main = self.model_.backbone_main(xb)
-        if xa is None: 
-            return f_main 
-        f_aux = self.model_.backbone_aux(xa)
-        return (self.merge_fn(f_main, f_aux) 
-                if self.merge_fn else torch.cat([f_main, f_aux], dim=1)) 
-
-    def fit(self, X, y, coords=None): 
-        X = np.asarray(X, dtype=np.float32)
-        y = np.asarray(y, dtype=np.int64).reshape(-1)
-
-        self.classes_, y_idx = np.unique(y, return_inverse=True)
-        self.n_classes_      = len(self.classes_)
-
+    def fit(self, X, y=None, val_loader=None): 
         torch.manual_seed(self.random_state)
-        self.device_ = self._resolve_device()
 
-        run_early_stopping = (self.early_stopping_rounds is not None and self.eval_fraction > 0 
-                              and self.epochs > self.early_stopping_rounds)
+        loader = self._ensure_loader(X, shuffle=self.shuffle)
 
-        x_main, x_aux = self._prepare_inputs(X, training=True)
-
-        self.backbone_main_ = ConvBackbone(
-            in_channels=x_main.shape[1],
-            conv_channels=self.conv_channels,
-            kernel_size=self.kernel_size,
-            pool_size=self.pool_size,
-            pool_mode=self.pool_mode,
-            use_bn=self.use_bn
-        )
-
-        self.backbone_aux_  = None 
-        if x_aux is not None: 
-            self.backbone_aux_ = ConvBackbone(
-                in_channels=x_aux.shape[1],
-                conv_channels=self.conv_channels,
-                kernel_size=self.kernel_size,
-                pool_size=self.pool_size,
-                pool_mode=self.pool_mode,
-                use_bn=self.use_bn
-            )
-            feat_dim = self.backbone_main_.out_dim + self.backbone_aux_.out_dim 
+        if y is None: 
+            label_loader = self._as_eval_loader(X)
+            all_labels   = []
+            for batch in label_loader: 
+                all_labels.append(np.asarray(batch[3]).reshape(-1))
+            y_full = np.concatenate(all_labels) if all_labels else np.asarray([], dtype=np.int64)
         else: 
-            feat_dim = self.backbone_main_.out_dim
+            y_full = np.asarray(y).reshape(-1)
 
-        self.head_ = nn.Sequential(
-            nn.Linear(feat_dim, self.fc_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.fc_dim, self.n_classes_)
-        )
+        if y_full.size == 0: 
+            raise ValueError("empty loader")
 
-        self.model_ = nn.Module() 
-        self.model_.backbone_main = self.backbone_main_ 
-        self.model_.backbone_aux  = self.backbone_aux_ 
-        self.model_.head          = self.head_ 
-        self.model_.to(self.device_)
+        self.classes_   = np.unique(y_full)
+        self.n_classes_ = len(self.classes_)
+        if self.n_classes_ < 2: 
+            raise ValueError("ordinal regression requires at least 2 classes")
 
-        class_counts  = np.bincount(y_idx, minlength=self.n_classes_).astype(np.float32)
-        class_weights = class_counts.sum() / np.maximum(class_counts, 1.0)
-        class_weights = class_weights / class_weights.mean()
+        if val_loader is None: 
+            loader, val_loader = self._split_loader(loader, y_full)
 
-        ds      = self._make_dataset(x_main, x_aux, y_idx)
+        for batch in loader: 
+            packed = batch[0]
+            self._build_model(in_channels=packed.shape[1])
+            break
 
-        if run_early_stopping: 
-            n_total = len(ds)
-            n_val   = max(1, int(n_total * self.eval_fraction)) 
-            n_train = n_total - n_val 
-            gen     = torch.Generator().manual_seed(self.random_state)
-            train_ds, val_ds = random_split(ds, [n_train, n_val], generator=gen)
-            dl      = self._make_loader(train_ds, shuffle=True)
-            val_dl  = self._make_loader(val_ds, shuffle=False)
-        else: 
-            dl      = self._make_loader(ds, shuffle=True)
-            val_dl  = None 
-
+        loss_fn = nn.BCEWithLogitsLoss()
         opt     = torch.optim.AdamW(
-            self.model_.parameters(), 
-            lr=self.lr, 
+            self.model_.parameters(),
+            lr=self.lr,
             weight_decay=self.weight_decay
         )
 
-        loss_fn = WassersteinLoss(
-            n_classes=self.n_classes_, 
-            class_weights=None
-        ).to(self.device_)
-
         best_state = None 
         best_val   = float("inf")
-        patience   = 0
+        patience   = 0 
+        run_es     = self.early_stopping_rounds is not None and val_loader is not None 
 
-        for _ in range(self.epochs): 
+        for ep in range(self.epochs): 
+            t0 = time.perf_counter()
             self.model_.train() 
-            for batch in dl: 
-                if x_aux is None: 
-                    xb, yb = batch 
-                    feats  = self._forward_features(xb.to(self.device_))
-                else: 
-                    xb, xa, yb = batch 
-                    feats  = self._forward_features(xb.to(self.device_), xa.to(self.device_))
+            for batch in loader: 
+                loss, _ = self._process_batch(batch, loss_fn)
 
-                logits = self.model_.head(feats)
-                loss   = loss_fn(logits, yb.to(self.device_))
-                opt.zero_grad() 
+                opt.zero_grad()
                 loss.backward() 
-                opt.step() 
+                opt.step()
 
-            if run_early_stopping: 
-                self.model_.eval() 
-                val_loss_sum = 0.0 
-                val_count    = 0 
-                with torch.no_grad(): 
-                    for batch in val_dl: 
-                        if x_aux is None: 
-                            xb, yb = batch 
-                            feats  = self._forward_features(xb.to(self.device_))
-                        else: 
-                            xb, xa, yb = batch 
-                            feats  = self._forward_features(
-                                xb.to(self.device_), 
-                                xa.to(self.device_)
-                            )
+            dt = time.perf_counter() - t0 
+            print(f"[epoch {ep + 1}] {dt:.2f}s", file=sys.stderr, flush=True)
 
-                        logits = self.model_.head(feats)
-                        loss   = loss_fn(logits, yb.to(self.device_))
-                        bsz    = yb.size(0) 
-                        
-                        val_loss_sum += loss.item() * bsz 
-                        val_count    += bsz 
-
-                avg_val = val_loss_sum / max(val_count, 1) 
-                if avg_val < best_val - 1e-6: 
-                    best_val   = avg_val 
+            if run_es: 
+                if self.early_stopping_rounds is None: 
+                    raise TypeError
+                val_loss = self._eval_loss(val_loader, loss_fn)
+                if val_loss < best_val - self.min_delta: 
+                    best_val   = val_loss 
                     best_state = copy.deepcopy(self.model_.state_dict())
                     patience   = 0 
-                else: 
-                    patience += 1 
+                else:
+                    patience  += 1
                     if patience >= self.early_stopping_rounds: 
-                        break
+                        break 
 
         if best_state is not None: 
             self.model_.load_state_dict(best_state)
+        return self 
 
-        return self
-
-    def predict_proba(self, X, coords=None): 
-        X = np.asarray(X, dtype=np.float32)
-
-        x_main, x_aux = self._prepare_inputs(X, training=False)
-        ds = self._make_dataset(x_main, x_aux)
-        dl = self._make_loader(ds, shuffle=False)
-
-        self.model_.eval() 
-        probs = []
-        with torch.no_grad(): 
-            for batch in dl: 
-                if x_aux is None: 
-                    xb     = batch[0]
-                    feats  = self._forward_features(xb.to(self.device_))
-                else: 
-                    xb, xa = batch 
-                    feats  = self._forward_features(xb.to(self.device_), xa.to(self.device_))
-
-                logits = self.model_.head(feats)
-                probs.append(torch.softmax(logits, dim=1).cpu().numpy())
-
-        return np.vstack(probs)
-
-    def predict(self, X, coords=None): 
-        proba = self.predict_proba(X, coords=coords)
-        idx   = np.argmax(proba, axis=1)
-        return self.classes_[idx]
-
-    def extract_features(self, X, coords=None): 
-        X = np.asarray(X, dtype=np.float32)
-        x_main, x_aux = self._prepare_inputs(X, training=False)
-        ds = self._make_dataset(x_main, x_aux)
-        dl = self._make_loader(ds, shuffle=False)
+    def predict_logits(self, X) -> NDArray: 
+        '''
+        Provides raw regression value per row for use in OrdinalDecisionAdapter. 
+        '''
+        loader = self._ensure_loader(X, shuffle=False)
+        outs   = []
 
         self.model_.eval() 
-        feats = []
-        with torch.no_grad(): 
-            for batch in dl: 
-                if x_aux is None: 
-                    xb = batch[0]
-                    f  = self._forward_features(xb.to(self.device_))
-                else: 
-                    xb, xa = batch 
-                    f = self._forward_features(xb.to(self.device_), xa.to(self.device_))
-                feats.append(f.cpu().numpy())
+        with torch.no_grad():
+            for batch in loader: 
+                packed, masks, rois, labels, *extra = batch
+                group_ids     = extra[1] if len(extra) > 1 else None 
+                group_weights = extra[2] if len(extra) > 2 else None 
+                xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
+                mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
+                feats = self.model_.backbone(xb, mask=mb, rois=rois)
+                if group_ids is not None: 
+                    feats = self._aggregate_tiles(
+                        feats, group_ids, group_weights, n_groups=len(labels)
+                    )
+                outs.append(self.model_.head(feats).cpu().numpy())
+        return np.vstack(outs)
 
-        return np.vstack(feats)
+    def _resolve_device(self, device: str | None): 
+        if device is not None: 
+            return torch.device(device)
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _make_loader(self, dataset, shuffle: bool): 
+        pin = self.pin_memory 
+        if pin is None: 
+            pin = self.device is not None and self.device.type == "cuda" 
+        return DataLoader(
+            dataset, 
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=2,
+            pin_memory=pin,
+            collate_fn=self.collate_fn
+        )
+
+    def _ensure_loader(self, X, shuffle: bool): 
+        if isinstance(X, DataLoader): 
+            return X 
+        return self._make_loader(X, shuffle=shuffle)
+
+    def _split_loader(self, loader, y_full): 
+        run_es = self.early_stopping_rounds is not None and self.eval_fraction > 0 
+        if not run_es: 
+            return loader, None 
+
+        ds = getattr(loader, "dataset", None)
+        if ds is None or len(ds) < 2: 
+            return loader, None 
+
+        if y_full is None or len(y_full) != len(ds): 
+            return loader, None 
+
+        try: 
+            splitter = StratifiedShuffleSplit(
+                n_splits=1,
+                test_size=self.eval_fraction, 
+                random_state=self.random_state 
+            )
+            train_idx, val_idx = next(splitter.split(np.zeros(len(y_full)), y_full))
+            train_ds           = Subset(ds, train_idx)
+            val_ds             = Subset(ds, val_idx)
+        except ValueError:
+            n_val   = max(1, int(len(ds) * self.eval_fraction))
+            n_train = len(ds) - n_val 
+            if n_train < 1: 
+                return loader, None 
+
+            gen              = torch.Generator().manual_seed(self.random_state)
+            train_ds, val_ds = random_split(ds, [n_train, n_val], generator=gen)
+
+        train_loader     = self._make_loader(train_ds, shuffle=True)
+        val_loader       = self._make_loader(val_ds, shuffle=False)
+        return train_loader, val_loader 
+
+    def _build_model(self, in_channels: int): 
+        if self.n_classes_ is None: 
+            raise ValueError("n_classes not set before model build")
+
+        self.backbone_ = SpatialBackbone(
+            in_channels=in_channels,
+            conv_channels=self.conv_channels,
+            kernel_size=self.kernel_size,
+            pool_size=self.pool_size,
+            use_bn=self.use_bn,
+            roi_output_size=self.roi_output_size,
+            sampling_ratio=self.sampling_ratio,
+            aligned=self.aligned
+        )
+        self.head_     = nn.Sequential(
+            nn.Linear(self.backbone_.out_dim, self.fc_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.fc_dim, self.n_classes_ - 1)
+        )
+
+        self.model_          = nn.Module() 
+        self.model_.backbone = self.backbone_ 
+        self.model_.head     = self.head_ 
+        self.model_.to(self.device)
+
+    def _aggregate_tiles(
+        self, 
+        feats, 
+        group_ids,
+        group_weights,
+        n_groups
+    ): 
+        gids = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
+        if group_weights is None: 
+            ones      = torch.ones((feats.size(0), 1), device=feats.device)
+            sum_feats = torch.zeros((n_groups, feats.size(1)), device=feats.device)
+            counts    = torch.zeros((n_groups, 1), device=feats.device)
+            sum_feats.index_add_(0, gids, feats)
+            counts.index_add_(0, gids, ones)
+            return sum_feats / counts.clamp(min=1.0)
+
+        w = torch.as_tensor(group_weights, dtype=feats.dtype, device=feats.device).view(-1, 1)
+        sum_feats = torch.zeros((n_groups, feats.size(1)), device=feats.device)
+        sum_w     = torch.zeros((n_groups, 1), device=feats.device)
+        sum_feats.index_add_(0, gids, feats * w)
+        sum_w.index_add_(0, gids, w)
+        return sum_feats / sum_w.clamp(min=1e-6)
+
+
+    def _eval_loss(self, loader, loss_fn): 
+        self.model_.eval() 
+        total = 0.0 
+        count = 0 
+        with torch.no_grad(): 
+            for batch in loader: 
+                loss, bsz = self._process_batch(batch, loss_fn)
+                total    += loss.item() * bsz 
+                count    += bsz 
+
+        return total / max(count, 1)
+
+    def _process_batch(self, batch, loss_fn):
+        if self.n_classes_ is None: 
+            raise TypeError
+        if self.classes_ is None: 
+            raise TypeError
+
+        packed, masks, rois, labels, *extra = batch
+        group_ids     = extra[1] if len(extra) > 1 else None 
+        group_weights = extra[2] if len(extra) > 2 else None 
+
+        xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
+        mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
+    
+        y_np  = np.asarray(labels).reshape(-1)
+        y_idx = np.searchsorted(self.classes_, y_np)
+        yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
+
+        feats  = self.model_.backbone(xb, mask=mb, rois=rois)
+        if group_ids is not None: 
+            feats = self._aggregate_tiles(feats, group_ids, group_weights, n_groups=len(labels))
+        logits = self.model_.head(feats)
+        t      = self._ordinal_targets(yb, self.n_classes_)
+        loss   = loss_fn(logits, t)
+
+        bsz    = yb.size(0)
+        return loss, bsz  
+
+    def _as_eval_loader(self, X): 
+        if isinstance(X, DataLoader):
+            return DataLoader(
+                X.dataset, 
+                batch_size=X.batch_size,
+                shuffle=False,
+                num_workers=X.num_workers,
+                pin_memory=X.pin_memory,
+                drop_last=False,
+                collate_fn=X.collate_fn
+            )
+        return X 
+
+    @staticmethod 
+    def _ordinal_targets(y: torch.Tensor, n_classes: int) -> torch.Tensor: 
+        thresholds = torch.arange(n_classes - 1, device=y.device).view(1, -1)
+        return (y.view(-1, 1) > thresholds).to(dtype=torch.float32)
 
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)
@@ -796,23 +936,25 @@ def make_logistic(C: float = 1.0, **kwargs):
 def make_svm_classifier(probability=True, **kwargs): 
     return lambda: SVMClassifier(probability=probability, **kwargs)
 
-def make_image_cnn(
+def make_spatial_ordinal(
     *,
-    input_shape=None, 
-    aux_input_shape=None,
-    input_adapter=None,
-    merge_fn=None,
+    collate_fn=None, 
+    cut_model: OrdinalCutModel | None = None,
+    scorer=None, 
+    fit_base: bool = True,
     **fixed 
 ): 
-    def _factory(**params): 
-        merged = dict(fixed)
+    def _factory(**params):
+        merged  = dict(fixed)
         merged.update(params)
-        return CNNClassifier(
-            input_shape=input_shape,
-            aux_input_shape=aux_input_shape,
-            input_adapter=input_adapter,
-            merge_fn=merge_fn,
-            **merged 
+        collate = merged.pop("collate_fn", collate_fn)
+        base    = SpatialClassifier(collate_fn=collate, **merged)
+        cut     = cut_model() if isinstance(cut_model, type) else cut_model
+        return OrdinalDecisionAdapter(
+            base_model=base,
+            cut_model=cut,
+            scorer=scorer,
+            fit_base=fit_base
         )
     return _factory 
 

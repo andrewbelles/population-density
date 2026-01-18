@@ -6,60 +6,58 @@
 # 
 # 
 
-import argparse 
-
-import numpy as np 
-
-from scipy.io import savemat 
+import argparse, io 
 
 from testbench.utils.paths     import (
     CONFIG_PATH,
-    TENSOR_DATA,
-    TENSOR_POOLED_OUT
 )
 
-from testbench.utils.data      import (
-    make_tensor_loader,
-    make_tensor_adapter
+from testbench.utils.data      import make_roi_loader 
+
+from analysis.hyperparameter   import (
+    run_optimization,
+    define_spatial_space,
+    SpatialEvaluator
+)
+
+from testbench.utils.config    import (
+    load_model_params,
+    eval_config
 )
 
 from testbench.utils.metrics   import OPT_TASK
 
-from analysis.cross_validation import CVConfig 
-
-from analysis.hyperparameter   import run_optimization, define_cnn_space, CNNEvaluator 
-
-from models.estimators         import make_image_cnn 
-
-from utils.helpers import (
-    save_model_config,
+from testbench.utils.etc       import (
+    run_tests_table,
+    format_metric 
 )
 
-DEFAULT_MODEL_KEY = "ImageCNN/VIIRS_TENSOR"
+from models.estimators         import make_spatial_ordinal
 
+from analysis.cross_validation import CVConfig 
 
-def test_viirs(
+from utils.helpers             import (
+    save_model_config,
+    project_path
+)
+
+DEFAULT_MODEL_KEY = "Spatial/VIIRS_ROI"
+
+def _row_score(name: str, score: float): 
+    return {"Name": name, "F1": format_metric(score)}
+
+def test_spatial_opt(
     *,
-    data_path: str = TENSOR_DATA,
-    out_path: str = TENSOR_POOLED_OUT,
+    data_path: str = project_path("data", "datasets"),
     model_key: str = DEFAULT_MODEL_KEY,
-    mode: str = "dual",
-    canvas_h: int = 128, 
-    canvas_w: int = 128, 
-    gaf_size: int = 64, 
+    canvas_hw: tuple[int, int] = (512, 512), 
     trials: int = 50, 
-    folds: int = 3, 
+    folds: int = 1, 
     random_state: int = 0, 
-    config_path: str | None = None 
+    config_path: str = CONFIG_PATH 
 ): 
-    loader  = make_tensor_loader(mode, canvas_h, canvas_w, gaf_size) 
-    adapter = make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size) 
-    factory = make_image_cnn(
-        input_adapter=adapter, 
-        normalize_main=True, 
-        normalize_aux=False,
-        pool_mode="avgmax"
-    )
+    loader  = make_roi_loader(canvas_hw=canvas_hw) 
+    factory = make_spatial_ordinal()
 
     config  = CVConfig(
         n_splits=folds, 
@@ -69,11 +67,11 @@ def test_viirs(
     )
     config.verbose = False 
 
-    evaluator = CNNEvaluator(
+    evaluator = SpatialEvaluator(
         filepath=data_path,
         loader_func=loader,
         model_factory=factory,
-        param_space=define_cnn_space,
+        param_space=define_spatial_space,
         task=OPT_TASK,
         config=config
     )
@@ -87,47 +85,72 @@ def test_viirs(
         sampler_type="multivariate-tpe"
     )
 
-    if config_path: 
-        save_model_config(config_path, model_key, best_params)
+    save_model_config(config_path, model_key, best_params)
 
-    data  = loader(data_path)
-    X     = np.asarray(data["features"], dtype=np.float32)
-    y     = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
-    fips  = np.asarray(data["sample_ids"], dtype="U5")
-    model = factory(**best_params) 
-    model.fit(X, y)
+    return {
+        "header": ["Name", "F1"],
+        "row": _row_score(model_key, best_value),
+        "params": best_params
+    }
+'''
+def test_spatial(
+    *,
+    data_path: str = project_path("data", "datasets"),
+    model_key: str = DEFAULT_MODEL_KEY,
+    canvas_hw: tuple[int, int] = (512, 512), 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH 
+):
+    
+    loader  = make_roi_loader(canvas_hw=canvas_hw) 
+    factory = make_spatial_ordinal()
+    config  = eval_config(random_state)
 
-    feats = model.extract_features(X)
-    feat_names = np.array([f"cnn_f{i}" for i in range(feats.shape[1])], dtype="U")
+    evaluator = SpatialEvaluator(
+        filepath=data_path,
+        loader_func=loader,
+        model_factory=factory,
+        param_space=define_spatial_space,
+    )
+'''
 
-    savemat(out_path, {
-        "features": feats.astype(np.float32, copy=False),
-        "labels": y.reshape(-1, 1),
-        "fips_codes": fips,
-        "feature_names": feat_names, 
-        "mode": np.array([mode], dtype="U")
-    })
+TESTS = {
+    "spatial_opt": test_spatial_opt
+}
 
-    print(f"[cnn] best value: {best_value:.5f}")
-    print(f"[cnn] saved pooled features: {out_path}")
-
+def _call_test(fn, name, **kwargs): 
+    print(f"[{name}] starting...")
+    return fn(**kwargs)
 
 def main(): 
     parser = argparse.ArgumentParser() 
-    parser.add_argument("--mode", choices=["spatial", "gaf", "dual"], default="spatial")
-    parser.add_argument("--trials", default=80)
+    parser.add_argument("--tests", nargs="*", default=None)
+    parser.add_argument("--data-path", default=project_path("data", "datasets"))
+    parser.add_argument("--trials", default=50)
     parser.add_argument("--folds", default=2)
+    parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
     parser.add_argument("--random-state", default=0)
     args = parser.parse_args()
 
-    test_viirs(
-        mode=args.mode,
+    buf = io.StringIO() 
+
+    targets = args.tests or list(TESTS.keys())
+
+    run_tests_table(
+        buf, 
+        TESTS,
+        targets=targets,
+        caller=lambda fn, name, **kw: _call_test(
+            fn, name, **kw 
+        ),
+        data_path=args.data_path,
         trials=args.trials,
         folds=args.folds,
         random_state=args.random_state,
-        config_path=CONFIG_PATH
+        canvas_hw=tuple(args.canvas_hw)
     )
 
+    print(buf.getvalue().strip())
 
 if __name__ == "__main__": 
     main() 
