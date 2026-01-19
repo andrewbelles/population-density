@@ -8,6 +8,12 @@
 
 import argparse, io 
 
+import numpy as np
+
+from torch.utils.data import Subset
+
+from scipy.io import savemat 
+
 from testbench.utils.paths     import (
     CONFIG_PATH,
 )
@@ -32,7 +38,7 @@ from testbench.utils.etc       import (
     format_metric 
 )
 
-from models.estimators         import make_spatial_ordinal
+from models.estimators         import SpatialClassifier, make_spatial_sfe 
 
 from analysis.cross_validation import CVConfig 
 
@@ -44,7 +50,7 @@ from utils.helpers             import (
 DEFAULT_MODEL_KEY = "Spatial/VIIRS_ROI"
 
 def _row_score(name: str, score: float): 
-    return {"Name": name, "F1": format_metric(score)}
+    return {"Name": name, "Loss": format_metric(score)}
 
 def test_spatial_opt(
     *,
@@ -54,10 +60,11 @@ def test_spatial_opt(
     trials: int = 50, 
     folds: int = 1, 
     random_state: int = 0, 
-    config_path: str = CONFIG_PATH 
+    config_path: str = CONFIG_PATH,
+    **_
 ): 
     loader  = make_roi_loader(canvas_hw=canvas_hw) 
-    factory = make_spatial_ordinal()
+    factory = make_spatial_sfe()
 
     config  = CVConfig(
         n_splits=folds, 
@@ -80,7 +87,7 @@ def test_spatial_opt(
         name=model_key,
         evaluator=evaluator,
         n_trials=trials,
-        direction="maximize",
+        direction="minimize",
         random_state=random_state,
         sampler_type="multivariate-tpe"
     )
@@ -88,10 +95,70 @@ def test_spatial_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "F1"],
+        "header": ["Name", "Loss"],
         "row": _row_score(model_key, best_value),
         "params": best_params
     }
+
+def test_spatial_extract(
+    *,
+    data_path: str = project_path("data", "datasets"),
+    model_key: str = DEFAULT_MODEL_KEY,
+    canvas_hw: tuple[int, int] = (512, 512), 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH,
+    out_path: str | None = None,
+    **_
+): 
+    loader_data = make_roi_loader(canvas_hw=canvas_hw)(data_path)
+    ds          = loader_data["dataset"] 
+    labels      = np.asarray(loader_data["labels"], dtype=np.int64).reshape(-1)
+    fips        = np.asarray(loader_data["sample_ids"]).astype("U5")
+    collate_fn  = loader_data["collate_fn"]
+    params      = load_model_params(config_path, model_key)
+    
+    conv = params.get("conv_channels")
+    if isinstance(conv, str): 
+        params["conv_channels"] = tuple(int(x) for x in conv.split("-") if x)
+
+    params.setdefault("random_state", random_state)
+    params.setdefault("collate_fn", collate_fn)
+
+    config   = eval_config(random_state)
+    splitter = config.get_splitter(OPT_TASK) 
+
+    embs = None 
+    for train_idx, test_idx in splitter.split(np.arange(len(labels)), labels): 
+        model = SpatialClassifier(**params)
+        model.fit(Subset(ds, train_idx), labels[train_idx]) 
+        emb   = model.extract(Subset(ds, test_idx))
+
+        if embs is None: 
+            embs = np.zeros((len(labels), emb.shape[1]), dtype=emb.dtype)
+        embs[test_idx] = emb 
+
+    if embs is None: 
+        raise ValueError("failed to extract any embeddings")
+
+    feature_names = np.array([f"viirs_emb_{i}" for i in range(embs.shape[1])], dtype="U32")
+
+    if out_path is None: 
+        out_path = project_path("data", "datasets", "viirs_pooled_nchs_2023.mat")
+
+    savemat(out_path, {
+        "features": embs, 
+        "labels": labels.reshape(-1, 1), 
+        "fips_codes": fips, 
+        "feature_names": feature_names, 
+        "n_counties": np.array([len(labels)], dtype=np.int64)
+    }) 
+
+    return {
+        "header": ["Name", "Path", "Dim"],
+        "row": {"Name": model_key, "Path": out_path, "Dim": embs.shape[1]}
+    }
+
+
 '''
 def test_spatial(
     *,
@@ -115,7 +182,8 @@ def test_spatial(
 '''
 
 TESTS = {
-    "spatial_opt": test_spatial_opt
+    "spatial_opt": test_spatial_opt,
+    "spatial_extract": test_spatial_extract
 }
 
 def _call_test(fn, name, **kwargs): 

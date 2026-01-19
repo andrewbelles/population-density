@@ -425,9 +425,12 @@ def test_stacking_optimize(
     passthrough: bool = False, 
     filter_dir: str | None = None,
     config_path: str = CONFIG_PATH,
+    extra: list[str] | None = None, 
     **_
 ):
     prob_files = expert_prob_files(DATASETS, EXPERT_PROBA)
+    if extra: 
+        prob_files = prob_files + list(extra)
     check_paths_exist(prob_files, "expert OOF files")
 
     loader       = resolve_stacking_loader(prob_files, passthrough, filter_dir)
@@ -452,9 +455,12 @@ def test_stacking(
     passthrough: bool = False,
     filter_dir: str | None = None,
     config_path: str = CONFIG_PATH,
+    extra: list[str] | None = None, 
     **_
 ): 
     prob_files = expert_prob_files(DATASETS, EXPERT_PROBA)
+    if extra: 
+        prob_files = prob_files + list(extra)
     check_paths_exist(prob_files, "expert OOF files")
 
     loader           = resolve_stacking_loader(prob_files, passthrough, filter_dir)
@@ -574,6 +580,7 @@ def main():
     parser.add_argument("--datasets", nargs="*", default=None)
     parser.add_argument("--no-opt", action="store_true")
     parser.add_argument("--filter", action="store_true")
+    parser.add_argument("--extra", nargs="*", default=None)
     args = parser.parse_args()
 
     if args.filter: 

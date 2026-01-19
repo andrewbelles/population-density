@@ -299,7 +299,7 @@ class ViirsLazyLoader:
         return spatial, mask, gaf, int(rec["label"]), rec["fips"]
 
     @staticmethod 
-    def pack(batch, canvas_hw=(512, 512), tile_hw=None, weight_by_mask=True, gap: int = 8): 
+    def pack(batch, canvas_hw=(512, 512), tile_hw=None, weight_by_mask=True, gap: int = 32): 
         '''
         Greedy packing tool designed for ROI pooling, takes batches and aggressively packs 
         samples together on (H,W) images. 

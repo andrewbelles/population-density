@@ -271,31 +271,37 @@ class XGBClassifierWrapper(BaseEstimator, ClassifierMixin):
 
     def __init__(
         self,
-        n_estimators: int = 100,
+        n_estimators: int = 300,
         max_depth: int = 6,
         learning_rate: float = 0.1,
         subsample: float = 1.0,
         colsample_bytree: float = 1.0,
+        min_child_weight: int = 1, 
+        reg_alpha: float = 0.0, 
+        reg_lambda: float = 1.0, 
+        gamma: float = 0.0, 
         early_stopping_rounds: int | None = None,
         eval_fraction: float = 0.2,
         gpu: bool = False,
         random_state: int | None = None,
         n_jobs: int = -1,  
-        focal_gamma: float = 2.0, 
         **kwargs,
-    ):
-        self.n_estimators = n_estimators
-        self.max_depth = max_depth
-        self.learning_rate = learning_rate
-        self.subsample = subsample
-        self.colsample_bytree = colsample_bytree
+    ): 
+        self.n_estimators          = n_estimators
+        self.max_depth             = max_depth
+        self.learning_rate         = learning_rate
+        self.subsample             = subsample
+        self.colsample_bytree      = colsample_bytree
+        self.min_child_weight      = min_child_weight
+        self.reg_alpha             = reg_alpha
+        self.reg_lambda            = reg_lambda
+        self.gamma                 = gamma 
         self.early_stopping_rounds = early_stopping_rounds
-        self.eval_fraction = eval_fraction
-        self.gpu = gpu
-        self.random_state = random_state
-        self.n_jobs = n_jobs 
-        self.focal_gamma = focal_gamma
-        self.kwargs = kwargs
+        self.eval_fraction         = eval_fraction
+        self.gpu                   = gpu
+        self.random_state          = random_state
+        self.n_jobs                = n_jobs 
+        self.kwargs                = kwargs
 
     def fit(self, X, y): 
         X = np.asarray(X, dtype=np.float64)
@@ -574,7 +580,7 @@ class OrdinalDecisionAdapter(BaseEstimator, ClassifierMixin):
         return X 
 
 # ---------------------------------------------------------
-# CNN, Supervised Feature Extraction  
+# Supervised Feature Extraction based Models  
 # ---------------------------------------------------------
 
 class SpatialClassifier(BaseEstimator, ClassifierMixin): 
@@ -599,7 +605,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         early_stopping_rounds: int | None = 15, 
         eval_fraction: float = 0.1,
         min_delta: float = 1e-4,
-        batch_size: int = 32,
+        batch_size: int = 16,
+        accum_steps: int = 4, 
         pin_memory: bool | None = None, 
         shuffle: bool = True, 
         collate_fn=None
@@ -617,6 +624,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.lr              = lr
         self.weight_decay    = weight_decay
         self.random_state    = random_state
+        self.accum_steps     = accum_steps
         self.device          = self._resolve_device(device)
 
         self.early_stopping_rounds = early_stopping_rounds 
@@ -661,7 +669,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             self._build_model(in_channels=packed.shape[1])
             break
 
-        loss_fn = nn.BCEWithLogitsLoss()
+        loss_fn       = WassersteinLoss(n_classes=self.n_classes_)
+        self.loss_fn_ = loss_fn 
+
         opt     = torch.optim.AdamW(
             self.model_.parameters(),
             lr=self.lr,
@@ -676,20 +686,35 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         for ep in range(self.epochs): 
             t0 = time.perf_counter()
             self.model_.train() 
-            for batch in loader: 
-                loss, _ = self._process_batch(batch, loss_fn)
 
-                opt.zero_grad()
+            accum = max(1, int(self.accum_steps))
+            opt.zero_grad()
+
+            step_idx = -1 
+            total_loss  = 0.0
+            total_count = 0
+
+            for step_idx, batch in enumerate(loader): 
+                loss, bsz = self._process_batch(batch)
+                total_loss += loss.item() * bsz 
+                total_count += bsz
+                
+                loss = loss / accum 
                 loss.backward() 
-                opt.step()
 
-            dt = time.perf_counter() - t0 
-            print(f"[epoch {ep + 1}] {dt:.2f}s", file=sys.stderr, flush=True)
+                if (step_idx + 1) % accum == 0: 
+                    opt.step() 
+                    opt.zero_grad() 
+            
+            if step_idx >= 0 and (step_idx + 1) % accum != 0: 
+                opt.step() 
+                opt.zero_grad()
 
+            val_loss = None 
             if run_es: 
                 if self.early_stopping_rounds is None: 
                     raise TypeError
-                val_loss = self._eval_loss(val_loader, loss_fn)
+                val_loss = self._eval_loss(val_loader)
                 if val_loss < best_val - self.min_delta: 
                     best_val   = val_loss 
                     best_state = copy.deepcopy(self.model_.state_dict())
@@ -699,31 +724,48 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                     if patience >= self.early_stopping_rounds: 
                         break 
 
+            avg_loss = total_loss / max(total_count, 1)
+            dt       = time.perf_counter() - t0 
+            msg      = f"[epoch {ep}] {dt:.2f}s, training_loss={avg_loss:.4f}"
+            if ep % 5 == 0: 
+                if val_loss is not None: 
+                    msg += f" val_loss={val_loss:.4f}"
+                print(msg, file=sys.stderr, flush=True)
+
         if best_state is not None: 
             self.model_.load_state_dict(best_state)
         return self 
 
-    def predict_logits(self, X) -> NDArray: 
-        '''
-        Provides raw regression value per row for use in OrdinalDecisionAdapter. 
-        '''
+    def loss(self, X) -> NDArray: 
+        loader = self._ensure_loader(X, shuffle=False)
+        if not hasattr(self, "loss_fn_"):
+            self.loss_fn_ = WassersteinLoss(n_classes=self.n_classes_)
+        return self._eval_loss(loader)
+
+    def extract(self, X) -> NDArray: 
         loader = self._ensure_loader(X, shuffle=False)
         outs   = []
 
         self.model_.eval() 
-        with torch.no_grad():
+        with torch.no_grad(): 
             for batch in loader: 
-                packed, masks, rois, labels, *extra = batch
-                group_ids     = extra[1] if len(extra) > 1 else None 
-                group_weights = extra[2] if len(extra) > 2 else None 
+                packed, masks, rois, labels, *extra = batch 
+                group_ids      = extra[1] if len(extra) > 1 else None 
+                group_weights  = extra[2] if len(extra) > 2 else None 
+
                 xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
                 mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
-                feats = self.model_.backbone(xb, mask=mb, rois=rois)
+    
+                feats  = self.model_.backbone(xb, mask=mb, rois=rois)
                 if group_ids is not None: 
                     feats = self._aggregate_tiles(
                         feats, group_ids, group_weights, n_groups=len(labels)
                     )
-                outs.append(self.model_.head(feats).cpu().numpy())
+
+                emb = self.fc_(feats)
+                emb = self.act_(emb)
+                outs.append(emb.cpu().numpy())
+
         return np.vstack(outs)
 
     def _resolve_device(self, device: str | None): 
@@ -797,12 +839,11 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             sampling_ratio=self.sampling_ratio,
             aligned=self.aligned
         )
-        self.head_     = nn.Sequential(
-            nn.Linear(self.backbone_.out_dim, self.fc_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.fc_dim, self.n_classes_ - 1)
-        )
+        self.fc_       = nn.Linear(self.backbone_.out_dim, self.fc_dim)
+        self.act_      = nn.ReLU(inplace=True)
+        self.drop_     = nn.Dropout(self.dropout)
+        self.out_      = nn.Linear(self.fc_dim, self.n_classes_)
+        self.head_     = nn.Sequential(self.fc_, self.act_, self.drop_, self.out_) 
 
         self.model_          = nn.Module() 
         self.model_.backbone = self.backbone_ 
@@ -817,35 +858,58 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         n_groups
     ): 
         gids = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
+        
+        dim      = feats.size(1) // 2 
+        avg_part = feats[:, :dim] 
+        max_part = feats[:, dim:]
+
         if group_weights is None: 
-            ones      = torch.ones((feats.size(0), 1), device=feats.device)
-            sum_feats = torch.zeros((n_groups, feats.size(1)), device=feats.device)
+            ones      = torch.ones((avg_part.size(0), 1), device=feats.device)
+            sum_avg   = torch.zeros((n_groups, dim), device=feats.device)
             counts    = torch.zeros((n_groups, 1), device=feats.device)
-            sum_feats.index_add_(0, gids, feats)
+            sum_avg.index_add_(0, gids, avg_part)
             counts.index_add_(0, gids, ones)
-            return sum_feats / counts.clamp(min=1.0)
+            agg_avg   = sum_avg / counts.clamp(min = 1.0)
+        else: 
 
-        w = torch.as_tensor(group_weights, dtype=feats.dtype, device=feats.device).view(-1, 1)
-        sum_feats = torch.zeros((n_groups, feats.size(1)), device=feats.device)
-        sum_w     = torch.zeros((n_groups, 1), device=feats.device)
-        sum_feats.index_add_(0, gids, feats * w)
-        sum_w.index_add_(0, gids, w)
-        return sum_feats / sum_w.clamp(min=1e-6)
+            w = torch.as_tensor(
+                group_weights, dtype=avg_part.dtype, device=avg_part.device
+            ).view(-1, 1)
+            sum_avg   = torch.zeros((n_groups, dim), device=feats.device)
+            sum_w     = torch.zeros((n_groups, 1), device=feats.device)
+            sum_avg.index_add_(0, gids, avg_part * w)
+            sum_w.index_add_(0, gids, w)
+            agg_avg   = sum_avg / sum_w.clamp(min=1e-6)
 
+        agg_max = torch.full((n_groups, dim), torch.finfo(max_part.dtype).min, 
+                             device=feats.device)
+        if hasattr(agg_max, "scatter_reduce_"): 
+            idx = gids.view(-1, 1).expand(-1, dim) 
+            agg_max.scatter_reduce_(0, idx, max_part, reduce="amax", include_self=True)
+        else: 
+            for i in range(max_part.size(0)):
+                g = gids[i].item() 
+                agg_max[g] = torch.maximum(agg_max[g], max_part[i])
 
-    def _eval_loss(self, loader, loss_fn): 
+        has_group = torch.zeros((n_groups, 1), dtype=torch.bool, device=feats.device)
+        has_group.index_fill_(0, gids, True)
+        agg_max   = torch.where(has_group, agg_max, torch.zeros_like(agg_max))
+
+        return torch.cat([agg_avg, agg_max], dim=1)
+
+    def _eval_loss(self, loader): 
         self.model_.eval() 
         total = 0.0 
         count = 0 
         with torch.no_grad(): 
             for batch in loader: 
-                loss, bsz = self._process_batch(batch, loss_fn)
+                loss, bsz = self._process_batch(batch)
                 total    += loss.item() * bsz 
                 count    += bsz 
 
         return total / max(count, 1)
 
-    def _process_batch(self, batch, loss_fn):
+    def _process_batch(self, batch):
         if self.n_classes_ is None: 
             raise TypeError
         if self.classes_ is None: 
@@ -866,8 +930,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if group_ids is not None: 
             feats = self._aggregate_tiles(feats, group_ids, group_weights, n_groups=len(labels))
         logits = self.model_.head(feats)
-        t      = self._ordinal_targets(yb, self.n_classes_)
-        loss   = loss_fn(logits, t)
+        loss   = self.loss_fn_(logits, yb)
 
         bsz    = yb.size(0)
         return loss, bsz  
@@ -956,6 +1019,18 @@ def make_spatial_ordinal(
             scorer=scorer,
             fit_base=fit_base
         )
+    return _factory 
+
+def make_spatial_sfe(
+    *,
+    collate_fn=None,
+    **fixed 
+): 
+    def _factory(**params): 
+        merged = dict(fixed)
+        merged.update(params) 
+        collate = merged.pop("collate_fn", collate_fn) 
+        return SpatialClassifier(collate_fn=collate, **merged)
     return _factory 
 
 # ---------------------------------------------------------

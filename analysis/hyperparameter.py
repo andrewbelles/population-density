@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 import optuna, itertools 
 from optuna.samplers import CmaEsSampler, TPESampler
 
-import torch 
+import torch, gc  
 
 import numpy as np 
 from abc import ABC, abstractmethod 
@@ -269,11 +269,13 @@ class SpatialEvaluator(OptunaEvaluator):
             model = self.factory(collate_fn=self.collate_fn, **params) 
 
             model.fit(train_ds, self.labels[train_idx])
-            y_pred  = model.predict(test_ds)
+            val_loss = model.loss(test_ds)
+            scores.append(float(val_loss))
 
-            metrics = self.task.compute_metrics(self.labels[test_idx], y_pred, None)
-            score   = metrics.get("f1_macro", np.nan)
-            scores.append(score)
+            del model 
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
         return float(np.mean(scores))
 
@@ -665,8 +667,8 @@ def define_gate_space(trial):
 
 def define_spatial_space(trial): 
     conv_choices = {
-        "32-64-128-256": (16, 32, 64),
-        "32-64-128": (32, 64, 128),
+        "32-64-128-256": (32, 64, 128),
+        "32-64-128": (32, 64, 128, 256),
     }
     key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
     return {
@@ -681,14 +683,15 @@ def define_spatial_space(trial):
         "aligned": trial.suggest_categorical("aligned", [True, False]),
 
         # hardcoded 
-        "batch_size": 16,
+        "batch_size": 4,
+        "accum_steps": 4, 
         "kernel_size": 3,
         "pool_size": 2, 
         "use_bn": True,
-        "epochs": 50, 
+        "epochs": 75, 
         "early_stopping_rounds": 10, 
-        "eval_fraction": 0.10,
-        "min_delta": 1e-4
+        "eval_fraction": 0.15,
+        "min_delta": 1e-3
     }
 
 # --------------------------------------------------------- 
