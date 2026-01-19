@@ -24,6 +24,7 @@ pkgs.mkShell {
     python312Packages.fiona
     python312Packages.libpysal
     python312Packages.optuna
+    python312Packages.umap-learn
 
     cudaPackages.cudatoolkit  
     cudaPackages.nccl 

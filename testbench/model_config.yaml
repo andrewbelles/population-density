@@ -182,11 +182,21 @@ models:
     focal_gamma: 0.9575971220937156
     gamma: 9.736111397862242
   Spatial/VIIRS_ROI:
-    conv_channels: 32-64-128-256
-    fc_dim: 512
-    dropout: 0.4007158983884651
-    lr: 6.0306596231036936e-05
-    weight_decay: 5.395267865559326e-05
-    roi_output_size: 4
+    conv_channels: 32-64-128
+    fc_dim: 256
+    dropout: 0.4350060741234096
+    lr: 0.000906226347126195
+    weight_decay: 0.0002497328610406061
+    roi_output_size: 7
     sampling_ratio: 2
     aligned: false
+  XGB/Ordinal:
+    n_estimators: 754
+    learning_rate: 0.005089553213697213
+    max_depth: 3
+    subsample: 0.7183532769654946
+    colsample_bytree: 0.7830350787284195
+    min_child_weight: 2
+    reg_alpha: 0.0017082406215522795
+    reg_lambda: 0.07262129902865576
+    gamma: 0.002505891172898709

@@ -20,6 +20,15 @@ from sklearn.metrics import confusion_matrix
 
 GROUP_ORDER = ("VIIRS", "TIGER", "NLCD", "CROSS", "PASSTHROUGH", "OOF")
 
+palette = [
+    "#0B1F3B",  # navy
+    "#145A6A",  # deep teal
+    "#1F7A3F",  # forest green
+    "#B8860B",  # dark goldenrod
+    "#A64B00",  # burnt orange
+    "#7A1E1E",  # deep red
+]
+
 def get_labels(class_labels, n_classes: int): 
     labels = np.asarray(class_labels).reshape(-1)
     if labels.size == 0: 

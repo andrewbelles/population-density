@@ -7,21 +7,16 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
-from os import wait
-import sys
-import time
-from typing import Callable
+import sys, time, torch, copy, xgboost  
 
 import numpy as np 
 
 from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier 
-from sklearn.metrics import f1_score
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression 
 
-from sklearn.utils import shuffle
 from xgboost import XGBClassifier, XGBRegressor  
 
 from utils.loss_funcs import (
@@ -30,8 +25,6 @@ from utils.loss_funcs import (
     WassersteinLoss
 )
 
-import torch, copy 
-
 from torch import nn 
 
 from torch.utils.data import DataLoader, TensorDataset, random_split, Subset 
@@ -39,8 +32,6 @@ from torch.utils.data import DataLoader, TensorDataset, random_split, Subset
 from models.networks import SpatialBackbone
 
 from sklearn.model_selection import StratifiedShuffleSplit 
-
-
 
 # ---------------------------------------------------------
 # Regressors 
@@ -440,144 +431,6 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         if not self.probability: 
             raise AttributeError("SVMClassifier was instantiated with probability=False")
         return self.model_.predict_proba(X)
-
-# --------------------------------------------------------- 
-# Decision Optimizer Adapter for Ordinal Regression 
-# --------------------------------------------------------- 
-
-class OrdinalCutModel: 
-    '''
-    Learns monotonic thresholds on ordinal logits to optimize target metric 
-    '''
-
-    def __init__(
-        self, 
-        scorer=None, 
-        n_grid: int = 25, 
-        max_iter: int = 2
-    ): 
-        self.scorer   = scorer 
-        self.n_grid   = n_grid 
-        self.max_iter = max_iter 
-
-    def fit(
-        self, 
-        logits: NDArray,
-        y: NDArray,
-        classes_: NDArray
-    ): 
-        if logits.ndim == 1: 
-            logits = logits.reshape(-1, 1)
-
-        y_idx     = np.searchsorted(classes_, y)
-        p         = 1.0 / (1.0 + np.exp(-logits))
-        n_classes = len(classes_)
-        if p.shape[1] != n_classes - 1: 
-            raise ValueError("logits must have shape (n, k-1)")
-
-        scorer = self.scorer 
-        if scorer is None: 
-            scorer = lambda yt, yp: f1_score(yt, yp, average="macro")
-
-        thresholds = np.full(n_classes - 1, 0.5, dtype=np.float64)
-
-        for _ in range(self.max_iter): 
-            for k in range(n_classes - 1): 
-                cand   = np.unique(np.quantile(p[:, k], np.linspace(0.05, 0.95, self.n_grid)))
-                best_t = thresholds[k]
-                best_s = -np.inf 
-                for t in cand: 
-                    tmp    = thresholds.copy() 
-                    tmp[k] = t 
-                    y_pred = self._predict_from_p(p, tmp)
-                    score  = scorer(y_idx, y_pred)
-                    if score > best_s: 
-                        best_s = score 
-                        best_t = t 
-                thresholds[k] = best_t 
-
-        self.thresholds_ = thresholds 
-        return self 
-
-    def predict(
-        self,
-        logits: NDArray,
-        classes_: NDArray
-    ): 
-        if logits.ndim == 1: 
-            logits = logits.reshape(-1, 1)
-        p = 1.0 / (1.0 + np.exp(-logits))
-        preds = self._predict_from_p(p, self.thresholds_)
-        return np.asarray(classes_)[preds]
-
-    @staticmethod 
-    def _predict_from_p(p: NDArray, thresholds: NDArray) -> NDArray:
-        return (p > thresholds).sum(axis=1)
-
-class OrdinalDecisionAdapter(BaseEstimator, ClassifierMixin): 
-
-    '''
-    Generic adapter that calibrates ordinal logits into discrete classes. 
-    
-    Works with any base model that exposes the predict_logits() method. 
-    '''
-
-    def __init__(
-        self, 
-        base_model,
-        cut_model: OrdinalCutModel | None = None, 
-        scorer=None,
-        fit_base: bool = True 
-    ): 
-        self.base_model = base_model 
-        self.cut_model  = cut_model 
-        self.scorer     = scorer 
-        self.fit_base   = fit_base 
-
-    def fit(self, X, y, coords=None): 
-        if self.fit_base: 
-            try: 
-                self.base_model.fit(X, y, coords)
-            except TypeError: 
-                self.base_model.fit(X, y)
-
-        if not hasattr(self.base_model, "predict_logits"): 
-            raise AttributeError("base_model must implement predict_logits")
-
-        eval_X = self._as_eval_loader(X)
-        logits = self._predict_logits(eval_X, coords)
-
-        self.classes_ = getattr(self.base_model, "classes_", None)
-        if self.classes_ is None: 
-            self.classes_ = np.unique(np.asarray(y))
-
-        cut = self.cut_model or OrdinalCutModel(scorer=self.scorer)
-        self.cut_model_ = cut.fit(logits, y, self.classes_)
-        return self 
-
-    def predict(self, X, coords=None): 
-        eval_X = self._as_eval_loader(X)
-        logits = self._predict_logits(eval_X, coords)
-        return self.cut_model_.predict(logits, np.asarray(self.classes_))
-    
-    def _predict_logits(self, X, coords): 
-        try: 
-            return self.base_model.predict_logits(X, coords)
-        except TypeError: 
-            return self.base_model.predict_logits(X)
-
-    def _as_eval_loader(self, X): 
-        if isinstance(X, DataLoader):
-            return DataLoader(
-                X.dataset, 
-                batch_size=X.batch_size,
-                shuffle=False,
-                num_workers=X.num_workers,
-                pin_memory=X.pin_memory,
-                drop_last=False,
-                collate_fn=X.collate_fn
-            )
-        return X 
 
 # ---------------------------------------------------------
 # Supervised Feature Extraction based Models  
@@ -1115,6 +968,262 @@ class EmbeddingProjector(BaseEstimator):
                 count += yb.size(0)
         return total / max(count, 1)
 
+
+class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin): 
+
+    '''
+    Implementation of Frank-Hall method for ordinal multi-classification using the 
+    XGBoost model. 
+    '''
+    
+    def __init__(
+        self,
+        n_estimators: int = 300,
+        max_depth: int = 6,
+        learning_rate: float = 0.1,
+        subsample: float = 1.0,
+        colsample_bytree: float = 1.0,
+        min_child_weight: int = 1, 
+        reg_alpha: float = 0.0, 
+        reg_lambda: float = 1.0, 
+        gamma: float = 0.0, 
+        early_stopping_rounds: int | None = None,
+        eval_fraction: float = 0.2,
+        gpu: bool = False,
+        random_state: int | None = None,
+        n_jobs: int = -1,  
+        **kwargs,
+    ): 
+        self.n_estimators          = n_estimators
+        self.max_depth             = max_depth
+        self.learning_rate         = learning_rate
+        self.subsample             = subsample
+        self.colsample_bytree      = colsample_bytree
+        self.min_child_weight      = min_child_weight
+        self.reg_alpha             = reg_alpha
+        self.reg_lambda            = reg_lambda
+        self.gamma                 = gamma 
+        self.early_stopping_rounds = early_stopping_rounds
+        self.eval_fraction         = eval_fraction
+        self.gpu                   = gpu
+        self.random_state          = random_state
+        self.n_jobs                = n_jobs 
+        self.kwargs                = kwargs
+
+        self.models_ = []
+
+    def fit(self, X, y): 
+        X                   = np.asarray(X, dtype=np.float32)
+        y_idx, classes      = self._encode_labels(y)
+        self.classes_       = classes 
+        self.n_classes_     = classes.size  
+        train_idx, eval_idx = self._split_indices(X.shape[0])
+        self.models_        = []
+
+        for k in range(self.n_classes_ - 1): 
+            y_bin = (y_idx > k).astype(np.int64)
+            model = self._build_model()
+
+            if eval_idx is not None: 
+                model.fit(
+                    X[train_idx],
+                    y_bin[train_idx],
+                    eval_set=[(X[eval_idx], y_bin[eval_idx])],
+                    verbose=False
+                )
+            else: 
+                model.fit(X, y_bin)
+
+            self.models_.append(model)
+
+        return self 
+
+    def loss(self, X, y):
+        y     = np.asarray(y, dtype=np.int64).reshape(-1)
+        y_idx = np.searchsorted(self.classes_, y) 
+        if not np.all(self.classes_[y_idx] == y): 
+            raise ValueError("y contains values not in fitted classes")
+
+        prob_gt = self._prob_gt(X)
+        eps     = 1e-12 
+        total   = 0.0 
+
+        for k in range(prob_gt.shape[1]): 
+            y_bin  = (y_idx > k).astype(np.float64)
+            p      = np.clip(prob_gt[:, k], eps, 1.0 - eps)
+            ll     = -(y_bin * np.log(p) + (1.0 - y_bin) * np.log(1.0 - p)).mean() 
+            total += ll
+
+        return float(total / prob_gt.shape[1])
+
+    def transform(
+        self,
+        X,
+        *,
+        embed_dim: int = 0, 
+        out_dim: int = 64, 
+        pooling: str = "mean"
+    ): 
+        '''
+        Bag of Leaves embedding. computes lookup table of leaf embeddings, pools across trees 
+        then projects to out_dim
+        '''
+    
+        self._init_leaf_projection(embed_dim, out_dim)
+
+        leaf_ids = self.leaves(X)
+        emb      = self.leaf_embed_table_[leaf_ids]
+
+        if pooling == "sum": 
+            pooled = emb.sum(axis=1)
+        elif pooling == "mean": 
+            pooled = emb.mean(axis=1)
+        else: 
+            raise ValueError("invalid pooling method")
+
+        return pooled @ self.leaf_proj_ + self.leaf_proj_bias_
+
+    def leaves(self, X): 
+        X      = np.asarray(X, dtype=np.float32)
+        dmat   = xgboost.DMatrix(X, nthread=self.n_jobs) 
+
+        if not hasattr(self, "leaf_table_size_"):
+            self._build_leaf_table()
+
+        leaves = []
+
+        for model_idx, model in enumerate(self.models_): 
+            booster   = model.get_booster() 
+            best_iter = getattr(model, "best_iteration", None)
+            if best_iter is None: 
+                raw = booster.predict(dmat, pred_leaf=True)
+            else: 
+                raw = booster.predict(dmat, pred_leaf=True, iteration_range=(0, best_iter + 1))
+
+            raw     = raw.astype(np.int64)
+            maps    = self.leaf_maps_[model_idx]
+            offsets = self.leaf_offsets_[model_idx]
+            mapped  = np.empty_like(raw, dtype=np.int64)
+            for t in range(raw.shape[1]): 
+                ids = raw[:, t] 
+                map_arr = maps[t]
+                if ids.max() >= map_arr.size: 
+                    raise ValueError("leaf id out of range for tree")
+                mapped[:, t] = map_arr[ids] + offsets[t]
+
+            leaves.append(mapped)
+
+        return np.hstack(leaves)
+
+    def  _build_leaf_table(self):
+        '''
+        Builds a per-tree leaf ID map w/ global offests. 
+        '''
+
+        self.leaf_maps_    = []
+        self.leaf_offsets_ = []
+        offset             = 0 
+
+        for model in self.models_: 
+            booster = model.get_booster() 
+            df      = booster.trees_to_dataframe() 
+            n_trees = self._num_trees(model)
+
+            model_maps    = []
+            model_offsets = []
+            for t in range(n_trees): 
+                leaf_nodes = (df.loc[(df["Tree"] == t) & (df["Feature"] == "Leaf"), "Node"]
+                    .to_numpy())
+                leaf_nodes = np.unique(leaf_nodes.astype(np.int64))
+
+                if leaf_nodes.size == 0: 
+                    map_arr = np.array([0], dtype=np.int64)
+                    n_leaf  = 1
+                else: 
+                    max_id  = int(leaf_nodes.max())
+                    map_arr = np.full(max_id + 1, -1, dtype=np.int64)
+                    map_arr[leaf_nodes] = np.arange(leaf_nodes.size, dtype=np.int64) 
+                    n_leaf  = leaf_nodes.size 
+
+                model_maps.append(map_arr)
+                model_offsets.append(offset)
+                offset += n_leaf 
+
+            self.leaf_maps_.append(model_maps)
+            self.leaf_offsets_.append(np.asarray(model_offsets, dtype=np.int64))
+
+        self.leaf_table_size_ = int(offset)
+
+    def _build_model(self): 
+        return XGBClassifier(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            learning_rate=self.learning_rate,
+            subsample=self.subsample,
+            colsample_bytree=self.colsample_bytree,
+            min_child_weight=self.min_child_weight,
+            reg_alpha=self.reg_alpha,
+            reg_lambda=self.reg_lambda,
+            gamma=self.gamma,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            tree_method="gpu_hist" if self.gpu else "hist",
+            random_state=self.random_state,
+            n_jobs=self.n_jobs,
+            early_stopping_rounds=self.early_stopping_rounds,
+            **self.kwargs,
+        )
+
+    def _init_leaf_projection(self, embed_dim: int, out_dim: int): 
+        if (getattr(self, "leaf_embed_dim_", None) == embed_dim and 
+            getattr(self, "leaf_out_dim_", None) == out_dim): 
+            return 
+
+        if not hasattr(self, "leaf_table_size_"): 
+            self._build_leaf_table()
+
+        rng = np.random.default_rng(self.random_state)
+
+        # Zero initialization for bag of leaves projection 
+        self.leaf_embed_dim_   = int(embed_dim)
+        self.leaf_out_dim_     = int(out_dim)
+        self.leaf_embed_table_ = rng.normal(
+            0.0, 0.1, size=(self.leaf_table_size_, self.leaf_embed_dim_)
+        ).astype(np.float32)
+        self.leaf_proj_        = rng.normal(
+            0.0, 0.1, size=(self.leaf_embed_dim_, self.leaf_out_dim_)
+        ).astype(np.float32)
+        self.leaf_proj_bias_   = np.zeros((self.leaf_out_dim_,), dtype=np.float32)
+
+    def _encode_labels(self, y): 
+        y = np.asarray(y, dtype=np.int64).reshape(-1)
+        classes = np.unique(y)
+        classes = np.sort(classes)
+        if classes.size <= 2: 
+            raise ValueError("expected n_classes > 2")
+        y_idx = np.searchsorted(classes, y)
+        if not np.all(classes[y_idx] == y): 
+            raise ValueError("y contains values not in sorted classes")
+        return y_idx, classes 
+
+    def _num_trees(self, model): 
+        best_iter = getattr(model, "best_iteration", None)
+        if best_iter is None: 
+            return model.get_booster().num_boosted_rounds() 
+        return int(best_iter) + 1 
+
+    def _split_indices(self, n): 
+        if not (self.early_stopping_rounds and self.eval_fraction > 0): 
+            return np.arange(n), None 
+        n_eval = max(1, int(n * self.eval_fraction))
+        rng    = np.random.default_rng(self.random_state)
+        idx    = rng.permutation(n)
+        return idx[n_eval:], idx[:n_eval]
+
+    def _prob_gt(self, X): 
+        X = np.asarray(X, dtype=np.float32)
+        return np.column_stack([m.predict_proba(X)[:, 1] for m in self.models_])
+
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)
 # ---------------------------------------------------------
@@ -1161,28 +1270,6 @@ def make_logistic(C: float = 1.0, **kwargs):
 def make_svm_classifier(probability=True, **kwargs): 
     return lambda: SVMClassifier(probability=probability, **kwargs)
 
-def make_spatial_ordinal(
-    *,
-    collate_fn=None, 
-    cut_model: OrdinalCutModel | None = None,
-    scorer=None, 
-    fit_base: bool = True,
-    **fixed 
-): 
-    def _factory(**params):
-        merged  = dict(fixed)
-        merged.update(params)
-        collate = merged.pop("collate_fn", collate_fn)
-        base    = SpatialClassifier(collate_fn=collate, **merged)
-        cut     = cut_model() if isinstance(cut_model, type) else cut_model
-        return OrdinalDecisionAdapter(
-            base_model=base,
-            cut_model=cut,
-            scorer=scorer,
-            fit_base=fit_base
-        )
-    return _factory 
-
 def make_spatial_sfe(
     *,
     collate_fn=None,
@@ -1194,6 +1281,21 @@ def make_spatial_sfe(
         collate = merged.pop("collate_fn", collate_fn) 
         return SpatialClassifier(collate_fn=collate, **merged)
     return _factory 
+
+def make_xgb_sfe(
+    n_estimators: int = 400, 
+    early_stopping_rounds: int = 200, 
+    eval_fraction: float = 0.2, 
+    gpu: bool = False, 
+    **kwargs
+):
+    return lambda: XGBOrdinalRegressor(
+        n_estimators=n_estimators,
+        early_stopping_rounds=early_stopping_rounds,
+        eval_fraction=eval_fraction,
+        gpu=gpu,
+        **kwargs
+    )
 
 # ---------------------------------------------------------
 # Helpers 

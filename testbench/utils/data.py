@@ -21,8 +21,6 @@ from testbench.utils.paths import (
     DATASETS
 )
 
-from pathlib import Path
-
 from testbench.utils.transforms import apply_transforms
 
 from testbench.utils.etc        import flatten_imaging
@@ -326,3 +324,11 @@ def make_roi_loader(canvas_hw=(512, 512)):
     def _loader(path): 
         return load_viirs_roi_manifest(path, canvas_hw=canvas_hw)
     return _loader 
+
+def load_embedding_mat(path: str): 
+    mat = loadmat(path)
+    if "features" not in mat or "labels" not in mat: 
+        raise ValueError(f"missing features/labels in {path}")
+    X = np.asarray(mat["features"], dtype=np.float64)
+    y = np.asarray(mat["labels"]).reshape(-1).astype(np.int64)
+    return X, y

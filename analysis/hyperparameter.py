@@ -26,6 +26,7 @@ from preprocessing.loaders import (
 )
 
 from analysis.cross_validation import (
+    CLASSIFICATION,
     CrossValidator, 
     CVConfig,
     ScaledEstimator, 
@@ -208,6 +209,10 @@ class StandardEvaluator(OptunaEvaluator):
         
         raise ValueError("no suitable metric found in summary results ")
 
+# ---------------------------------------------------------
+# Supervised Feature Extraction Evaluators 
+# ---------------------------------------------------------
+
 class SpatialEvaluator(OptunaEvaluator): 
 
     def __init__(
@@ -278,6 +283,48 @@ class SpatialEvaluator(OptunaEvaluator):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
+
+        return float(np.mean(scores))
+
+class XGBOrdinalEvaluator(OptunaEvaluator): 
+    '''
+    Evaluator for detached frank-hall ordinal xgboost model. Returns mean loss across CV folds 
+    '''
+
+    def __init__(
+        self,
+        filepath,
+        loader_func,
+        model_factory,
+        param_space,
+        config,
+    ):
+        self.filepath       = filepath 
+        self.loader         = loader_func 
+        self.factory        = model_factory
+        self.param_space_fn = param_space
+        self.config         = config 
+        
+        data        = self.loader(filepath)
+        self.X      = np.asarray(data["features"], dtype=np.float32)
+        self.y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        return self.param_space_fn(trial)
+
+    def evaluate(self, params: Dict[str, Any]) -> float:
+        splitter = self.config.get_splitter(CLASSIFICATION)
+        scores   = []
+
+        for train_idx, test_idx in splitter.split(self.X, self.y): 
+            model = self.factory(**params)
+            if callable(model) and not hasattr(model, "fit"):
+                model = model() 
+            if not hasattr(model, "fit"):
+                raise TypeError("model_factory must return a model with .fit()")
+
+            model.fit(self.X[train_idx], self.y[train_idx])
+            scores.append(float(model.loss(self.X[test_idx], self.y[test_idx])))
 
         return float(np.mean(scores))
 
@@ -737,12 +784,24 @@ def define_projector_space(trial):
       "dropout": trial.suggest_float("dropout", 0.0, 0.3),
       "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
       "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+      "eval_fraction": trial.suggest_categorical("eval_fraction", [0.1]),
+      "batch_size": trial.suggest_categorical("batch_size", [128]),
+      "epochs": trial.suggest_categorical("epochs", [150]),
+      "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [10]),
+      "out_dim": trial.suggest_categorical("out_dim", [64]),
+    }
 
-      "out_dim": 64, 
-      "epochs": 150,
-      "early_stopping_rounds": 10,
-      "eval_fraction": 0.1,
-      "batch_size": 128
+def define_xgb_ordinal_space(trial): 
+    return {
+        "n_estimators": trial.suggest_int("n_estimators", 150, 900),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 1e-1, log=True),
+        "max_depth": trial.suggest_int("max_depth", 3, 8),
+        "subsample": trial.suggest_float("subsample", 0.6, 0.95),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 1e1, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 1e1, log=True),
+        "gamma": trial.suggest_float("gamma", 1e-3, 5.0, log=True)
     }
 
 # --------------------------------------------------------- 

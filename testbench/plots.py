@@ -6,17 +6,25 @@
 # to pull information required for informative visuals 
 # 
 
-import argparse, io 
+import argparse, io
+
+from pathlib import Path 
+
 import matplotlib.pyplot as plt 
+from matplotlib.colors import ListedColormap, BoundaryNorm 
+from matplotlib.lines  import Line2D
 
 import numpy as np 
 
 import geopandas 
 
+from sklearn.preprocessing import StandardScaler
+
 from dataclasses import dataclass 
 from typing import Callable, Mapping
 
 from preprocessing.loaders import load_oof_predictions
+
 import testbench.adjacency    as adjacency 
 import testbench.downstream   as downstream
 import testbench.stacking     as stacking 
@@ -39,8 +47,16 @@ from testbench.utils.plotting import (
     call_plot,
     confusion_panel,
     confidence_hist,
+    palette 
 )
-from utils.helpers import project_path
+
+from utils.helpers import (
+    project_path,
+    _mat_str_vector
+)
+
+from scipy.io import loadmat 
+
 
 # Silence-able logging 
 def _log(msg, quiet=False): 
@@ -107,9 +123,40 @@ def build_downstream_data(*, cross: str = "off", **_):
         return {"base": _run(False), "passthrough": _run(True)}
     return {("passthrough" if cross == "on" else "base"): _run(cross == "on")}
 
-# --------------------------------------------------------- 
-# Plot Calls 
-# ---------------------------------------------------------
+def build_embedding_data(*, embedding_dir: str | None = None, embedding_paths=None, **_): 
+    if embedding_paths is None: 
+        base  = embedding_dir or project_path("testbench", "local")
+        paths = sorted(Path(base).glob("*.mat")) 
+    else: 
+        paths = [Path(p) for p in embedding_paths]
+
+    entries = []
+    for p in paths: 
+        mat = loadmat(p)
+        if "coords" not in mat or "labels" not in mat: 
+            continue 
+
+        coords = np.asarray(mat["coords"], dtype=np.float64)
+        labels = np.asarray(mat["labels"]).reshape(-1).astype(np.int64)
+
+        name   = mat.get("name")
+        if name is None: 
+            name = p.stem 
+        else: 
+            name = _mat_str_vector(name)[0]
+
+        n_neighbors = mat.get("n_neighbors")
+        min_dist    = mat.get("min_dist")
+
+        entries.append({
+            "name": name, 
+            "coords": coords,
+            "labels": labels,
+            "n_neighbors": int(n_neighbors[0]),
+            "min_dist": int(min_dist[0])
+        })
+
+    return {"embeddings": entries}
 
 # --------------------------------------------------------- 
 # Stacking  
@@ -356,6 +403,65 @@ def plot_cs_distance(data, log_hist: bool = False):
     ax.legend() 
     return fig 
 
+# --------------------------------------------------------- 
+# Plot Calls 
+# ---------------------------------------------------------
+
+def plot_embedding_umap(data): 
+    entries = data.get("embeddings", [])
+    if not entries: 
+        raise ValueError("no embedding PCA data to plot")
+
+    all_coords = np.vstack([e["coords"][:, :3] for e in entries])
+    mins = all_coords.min(axis=0)
+    maxs = all_coords.max(axis=0)
+    pad  = 0.05 * (maxs- mins + 1e-9)
+    mins -= pad 
+    maxs += pad 
+
+    n = len(entries)
+    fig = plt.figure(figsize=(5.2 * n, 4.5), constrained_layout=True)
+
+    for i, item in enumerate(entries, start=1): 
+        coords = np.asarray(item["coords"][:, :3])
+        labels = np.asarray(item["labels"]).reshape(-1)
+        uniq   = np.unique(labels)
+        idx    = np.searchsorted(uniq, labels)
+
+        cmap   = ListedColormap(palette) 
+        norm   = BoundaryNorm(np.arange(len(palette) + 1) - 0.5, len(palette))
+
+        ax     = fig.add_subplot(1, n, i, projection="3d")
+        sc     = ax.scatter(
+            coords[:, 0], coords[:, 1], coords[:, 2],
+            c=idx, cmap=cmap, norm=norm,
+            alpha=0.7, linewidths=0, depthshade=True
+        )
+
+        ax.set_xlim(mins[0], maxs[0])
+        ax.set_ylim(mins[1], maxs[1])
+        ax.set_zlim(mins[2], maxs[2])
+        ax.grid(False)
+
+        title = item["name"].strip()
+        nn = item.get("n_neighbors")
+        md = float(item.get("min_dist"))
+        if nn is not None and md is not None:
+            title += f" (UMAP nn={nn}, min_dist={md:.2f})"
+        ax.set_title(title)
+
+        ax.set_xlabel("UMAP1")
+        ax.set_ylabel("UMAP2")
+        ax.set_zlabel("UMAP3")
+
+        if i == n: 
+            cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_ticks(np.arange(len(uniq)))
+            cbar.set_ticklabels([str(u) for u in uniq])
+            cbar.set_label("Class")
+
+    return fig 
+
 # ---------------------------------------------------------
 # Plot interface 
 # ---------------------------------------------------------
@@ -450,6 +556,13 @@ PLOT_GROUPS = {
             "cs_distance": plot_cs_distance,
         },
     ),
+    "embeddings": PlotGroup(
+        name="embeddings",
+        build=build_embedding_data,
+        plots={
+            "manifold_umap": plot_embedding_umap
+        }
+    )
 }
 
 # ---------------------------------------------------------
