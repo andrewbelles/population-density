@@ -21,6 +21,8 @@ from testbench.utils.paths     import (
 from testbench.utils.data      import make_roi_loader 
 
 from analysis.hyperparameter   import (
+    ProjectorEvaluator,
+    define_projector_space,
     run_optimization,
     define_spatial_space,
     SpatialEvaluator
@@ -38,7 +40,7 @@ from testbench.utils.etc       import (
     format_metric 
 )
 
-from models.estimators         import SpatialClassifier, make_spatial_sfe 
+from models.estimators         import EmbeddingProjector, SpatialClassifier, make_spatial_sfe 
 
 from analysis.cross_validation import CVConfig 
 
@@ -58,7 +60,7 @@ def test_spatial_opt(
     model_key: str = DEFAULT_MODEL_KEY,
     canvas_hw: tuple[int, int] = (512, 512), 
     trials: int = 50, 
-    folds: int = 1, 
+    folds: int = 2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
@@ -108,6 +110,7 @@ def test_spatial_extract(
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     out_path: str | None = None,
+    proj_trials: int = 30,
     **_
 ): 
     loader_data = make_roi_loader(canvas_hw=canvas_hw)(data_path)
@@ -123,6 +126,9 @@ def test_spatial_extract(
 
     params.setdefault("random_state", random_state)
     params.setdefault("collate_fn", collate_fn)
+    params.setdefault("early_stopping_rounds", 15)
+    params.setdefault("eval_fraction", 0.15)
+    params.setdefault("min_delta", 1e-3)
 
     config   = eval_config(random_state)
     splitter = config.get_splitter(OPT_TASK) 
@@ -140,13 +146,32 @@ def test_spatial_extract(
     if embs is None: 
         raise ValueError("failed to extract any embeddings")
 
-    feature_names = np.array([f"viirs_emb_{i}" for i in range(embs.shape[1])], dtype="U32")
+    proj_eval = ProjectorEvaluator(
+        embs, 
+        labels, 
+        define_projector_space, 
+        random_state=random_state
+    )
+
+    best_params, best_loss = run_optimization(
+        name="Spatial/VIIRS_ROI_Projector",
+        evaluator=proj_eval,
+        n_trials=proj_trials,
+        direction="minimize",
+        random_state=random_state
+    )
+
+    projector = EmbeddingProjector(in_dim=embs.shape[1], **best_params, random_state=random_state)
+    projector.fit(embs, labels)
+    proj_emb = projector.transform(embs)
+
+    feature_names = np.array([f"viirs_emb_{i}" for i in range(proj_emb.shape[1])], dtype="U32")
 
     if out_path is None: 
         out_path = project_path("data", "datasets", "viirs_pooled_nchs_2023.mat")
 
     savemat(out_path, {
-        "features": embs, 
+        "features": proj_emb, 
         "labels": labels.reshape(-1, 1), 
         "fips_codes": fips, 
         "feature_names": feature_names, 
@@ -154,10 +179,14 @@ def test_spatial_extract(
     }) 
 
     return {
-        "header": ["Name", "Path", "Dim"],
-        "row": {"Name": model_key, "Path": out_path, "Dim": embs.shape[1]}
+        "header": ["Name", "Path", "Dim", "Proj Loss"],
+        "row": {
+            "Name": model_key, 
+            "Path": out_path, 
+            "Dim": proj_emb.shape[1], 
+            "Proj Loss": best_loss
+        }
     }
-
 
 '''
 def test_spatial(
@@ -194,7 +223,7 @@ def main():
     parser = argparse.ArgumentParser() 
     parser.add_argument("--tests", nargs="*", default=None)
     parser.add_argument("--data-path", default=project_path("data", "datasets"))
-    parser.add_argument("--trials", default=50)
+    parser.add_argument("--trials", default=30)
     parser.add_argument("--folds", default=2)
     parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
     parser.add_argument("--random-state", default=0)

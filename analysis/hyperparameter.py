@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 import optuna, itertools 
 from optuna.samplers import CmaEsSampler, TPESampler
 
+from sklearn.model_selection import StratifiedShuffleSplit
 import torch, gc  
 
 import numpy as np 
@@ -19,6 +20,7 @@ from typing import Any, Callable, Dict, Literal
 
 from torch.utils.data import DataLoader, Subset  
 
+from models.estimators import EmbeddingProjector
 from preprocessing.loaders import (
     load_oof_predictions
 )
@@ -553,6 +555,41 @@ class MobilityEvaluator(OptunaEvaluator):
         )
         return best_value 
 
+class ProjectorEvaluator(OptunaEvaluator): 
+    '''
+    Minimizes Wasserstein loss for projection MLP head 
+    '''
+
+    def __init__(
+        self, 
+        X, 
+        y,
+        param_space, 
+        random_state: int = 0 
+    ): 
+        self.X               = np.asarray(X, dtype=np.float32)
+        self.y               = np.asarray(y, dtype=np.int64)
+        self.param_space_fn  = param_space 
+        self.random_state    = random_state
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        return self.param_space_fn(trial)
+
+    def evaluate(self, params: Dict[str, Any]) -> float:
+        splitter = StratifiedShuffleSplit(
+            n_splits=1, test_size=params.get("eval_fraction", 0.15),
+            random_state=self.random_state
+        )
+        train_idx, val_idx = next(splitter.split(self.X, self.y)) 
+
+        proj = EmbeddingProjector(
+            in_dim=self.X.shape[1],
+            **params,
+            random_state=self.random_state
+        ) 
+        proj.fit(self.X[train_idx], self.y[train_idx])
+        return float(proj.loss(self.X[val_idx], self.y[val_idx]))
+
 # ---------------------------------------------------------
 # Definitions of Parameter Space  
 # ---------------------------------------------------------
@@ -667,8 +704,8 @@ def define_gate_space(trial):
 
 def define_spatial_space(trial): 
     conv_choices = {
-        "32-64-128-256": (32, 64, 128),
-        "32-64-128": (32, 64, 128, 256),
+        "32-64-128-256": (32, 64, 128, 256),
+        "32-64-128": (32, 64, 128),
     }
     key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
     return {
@@ -692,6 +729,20 @@ def define_spatial_space(trial):
         "early_stopping_rounds": 10, 
         "eval_fraction": 0.15,
         "min_delta": 1e-3
+    }
+
+def define_projector_space(trial): 
+    return {
+      "hidden_dim": trial.suggest_categorical("hidden_dim", [64, 128, 256]),
+      "dropout": trial.suggest_float("dropout", 0.0, 0.3),
+      "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
+      "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+
+      "out_dim": 64, 
+      "epochs": 150,
+      "early_stopping_rounds": 10,
+      "eval_fraction": 0.1,
+      "batch_size": 128
     }
 
 # --------------------------------------------------------- 

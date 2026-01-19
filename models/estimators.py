@@ -953,6 +953,168 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         thresholds = torch.arange(n_classes - 1, device=y.device).view(1, -1)
         return (y.view(-1, 1) > thresholds).to(dtype=torch.float32)
 
+class EmbeddingProjector(BaseEstimator): 
+
+    '''
+    Shallow non-linear projection for embedding compression. Trains with Wasserstein loss 
+    on a small classification head, returning only the projected embeddings. 
+    '''
+
+    def __init__(
+        self,
+        in_dim: int, 
+        out_dim: int = 64, 
+        hidden_dim: int | None = None, 
+        dropout: float = 0.1, 
+        epochs: int = 200, 
+        lr: float = 1e-3, 
+        weight_decay: float = 1e-4, 
+        batch_size: int = 128, 
+        early_stopping_rounds: int = 30, 
+        eval_fraction: int = 0, 
+        random_state: int = 0, 
+        device: str | None = None 
+    ): 
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.hidden_dim = hidden_dim
+        self.dropout = dropout
+        self.epochs = epochs
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+        self.early_stopping_rounds = early_stopping_rounds
+        self.eval_fraction = eval_fraction
+        self.random_state = random_state
+        self.device = torch.device(device) if device else (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+
+    def _build(self, n_classes: int): 
+        hidden = self.hidden_dim or max(self.out_dim, min(self.in_dim, 128))
+        self.proj_ = nn.Sequential(
+            nn.Linear(self.in_dim, hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout),
+            nn.Linear(hidden, self.out_dim)
+        )
+
+        self.head_  = nn.Linear(self.out_dim, n_classes)
+        self.model_ = nn.Module() 
+        self.model_.proj = self.proj_ 
+        self.model_.head = self.head_ 
+        self.model_.to(self.device)
+
+    def fit(self, X, y): 
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.int64).reshape(-1)
+        
+        self.classes_   = np.unique(y)
+        self.n_classes_ = len(self.classes_)
+
+        self._build(self.n_classes_)
+        loss_fn  = WassersteinLoss(n_classes=self.n_classes_)
+        opt      = torch.optim.AdamW(
+            self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+        self.loss_fn_ = loss_fn
+
+        splitter = StratifiedShuffleSplit(
+            n_splits=1, test_size=self.eval_fraction, random_state=self.random_state
+        ) 
+
+        train_idx, val_idx = next(splitter.split(X, y))
+        X_train, y_train   = X[train_idx], y[train_idx] 
+        X_val, y_val       = X[val_idx], y[val_idx]
+
+        train_ds = TensorDataset(
+            torch.from_numpy(X_train), torch.from_numpy(y_train)
+        )
+
+        val_ds = TensorDataset(
+            torch.from_numpy(X_val), torch.from_numpy(y_val)
+        )
+        
+        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
+        val_loader   = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
+
+        best_state   = None 
+        best_val     = float("inf")
+        patience     = 0 
+
+        for _ in range(self.epochs): 
+            self.model_.train() 
+            for xb, yb in train_loader: 
+                xb     = xb.to(self.device)
+                yb     = yb.to(self.device)
+                emb    = self.proj_(xb)
+                logits = self.head_(emb)
+                loss   = loss_fn(logits, yb)
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+
+            self.model_.eval()
+            total = 0.0 
+            count = 0 
+            with torch.no_grad():
+                for xb, yb in val_loader:
+                    xb = xb.to(self.device)
+                    yb = yb.to(self.device)
+                    emb = self.proj_(xb)
+                    logits = self.head_(emb)
+                    loss = loss_fn(logits, yb)
+                    total += loss.item() * yb.size(0)
+                    count += yb.size(0)
+            val_loss = total / max(count, 1)
+
+            if val_loss < best_val - 1e-4:
+                best_val = val_loss
+                best_state = copy.deepcopy(self.model_.state_dict())
+                patience = 0
+            else:
+                patience += 1
+                if patience >= self.early_stopping_rounds:
+                    break    
+
+        if best_state is not None: 
+            self.model_.load_state_dict(best_state)
+        return self 
+
+    def transform(self, X): 
+        X = np.asarray(X, dtype=np.float32)
+        self.model_.eval() 
+        outs = []
+        with torch.no_grad(): 
+            for i in range(0, X.shape[0], self.batch_size): 
+                xb  = torch.from_numpy(X[i:i+self.batch_size]).to(self.device)
+                emb = self.proj_(xb).cpu().numpy() 
+                outs.append(emb)
+        return np.vstack(outs)
+
+    def fit_transform(self, X, y): 
+        return self.fit(X, y).transform(X)
+
+    def loss(self, X, y): 
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.int64)
+        loader = DataLoader(TensorDataset(torch.from_numpy(X), torch.from_numpy(y)),
+                            batch_size=self.batch_size, shuffle=False)
+        self.model_.eval() 
+        total = 0.0 
+        count = 0 
+        with torch.no_grad(): 
+            for xb, yb in loader:
+                xb = xb.to(self.device)
+                yb = yb.to(self.device)
+                emb = self.proj_(xb)
+                logits = self.head_(emb)
+                loss = self.loss_fn_(logits, yb)
+                total += loss.item() * yb.size(0)
+                count += yb.size(0)
+        return total / max(count, 1)
+
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)
 # ---------------------------------------------------------
