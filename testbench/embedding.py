@@ -375,7 +375,7 @@ def test_reduce_all(
     *,
     embedding_paths: list[str] | None = None, 
     out_dir: str | Path | None = None, 
-    n_components: int = 3,
+    n_components: int = 2,
     n_neighbors: int = 15, 
     min_dist: float = 0.3,
     metric: str = "euclidean",
@@ -406,8 +406,8 @@ def test_reduce_all(
             n_neighbors=n_neighbors,
             min_dist=min_dist,
             metric=metric,
-            target_metric="categorical",
-            target_weight=0.6,
+            target_metric="l1",
+            target_weight=0.3,
             n_jobs=-1,
         )
         coords   = reducer.fit_transform(X, y)

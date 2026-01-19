@@ -145,15 +145,15 @@ def build_embedding_data(*, embedding_dir: str | None = None, embedding_paths=No
         else: 
             name = _mat_str_vector(name)[0]
 
-        n_neighbors = mat.get("n_neighbors")
-        min_dist    = mat.get("min_dist")
+        n_neighbors = mat["n_neighbors"]
+        min_dist    = mat["min_dist"]
 
         entries.append({
             "name": name, 
             "coords": coords,
             "labels": labels,
-            "n_neighbors": int(n_neighbors[0]),
-            "min_dist": int(min_dist[0])
+            "n_neighbors": n_neighbors,
+            "min_dist": min_dist
         })
 
     return {"embeddings": entries}
@@ -412,7 +412,7 @@ def plot_embedding_umap(data):
     if not entries: 
         raise ValueError("no embedding PCA data to plot")
 
-    all_coords = np.vstack([e["coords"][:, :3] for e in entries])
+    all_coords = np.vstack([e["coords"][:, :2] for e in entries])
     mins = all_coords.min(axis=0)
     maxs = all_coords.max(axis=0)
     pad  = 0.05 * (maxs- mins + 1e-9)
@@ -423,7 +423,7 @@ def plot_embedding_umap(data):
     fig = plt.figure(figsize=(5.2 * n, 4.5), constrained_layout=True)
 
     for i, item in enumerate(entries, start=1): 
-        coords = np.asarray(item["coords"][:, :3])
+        coords = np.asarray(item["coords"][:, :2])
         labels = np.asarray(item["labels"]).reshape(-1)
         uniq   = np.unique(labels)
         idx    = np.searchsorted(uniq, labels)
@@ -431,16 +431,15 @@ def plot_embedding_umap(data):
         cmap   = ListedColormap(palette) 
         norm   = BoundaryNorm(np.arange(len(palette) + 1) - 0.5, len(palette))
 
-        ax     = fig.add_subplot(1, n, i, projection="3d")
+        ax     = fig.add_subplot(1, n, i)
         sc     = ax.scatter(
-            coords[:, 0], coords[:, 1], coords[:, 2],
+            coords[:, 0], coords[:, 1],
             c=idx, cmap=cmap, norm=norm,
-            alpha=0.7, linewidths=0, depthshade=True
+            alpha=0.7, linewidths=0
         )
 
         ax.set_xlim(mins[0], maxs[0])
         ax.set_ylim(mins[1], maxs[1])
-        ax.set_zlim(mins[2], maxs[2])
         ax.grid(False)
 
         title = item["name"].strip()
@@ -452,7 +451,6 @@ def plot_embedding_umap(data):
 
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
-        ax.set_zlabel("UMAP3")
 
         if i == n: 
             cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
