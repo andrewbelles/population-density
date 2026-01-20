@@ -1,0 +1,8 @@
+#
+# cnn_opt.txt  Andrew Belles  Jan 20th, 2026 
+# 
+# Python dependencies for CNN manifold learner training, specifically for use on cluster  
+# 
+# 
+# 
+ 
