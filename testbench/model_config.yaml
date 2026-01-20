@@ -200,3 +200,12 @@ models:
     reg_alpha: 0.0017082406215522795
     reg_lambda: 0.07262129902865576
     gamma: 0.002505891172898709
+  Spatial/NLCD_ROI:
+    conv_channels: 32-64-128
+    fc_dim: 128
+    dropout: 0.32294705653332806
+    lr: 7.50195444362012e-05
+    weight_decay: 0.0004734989304499476
+    roi_output_size: 4
+    sampling_ratio: 1
+    aligned: false

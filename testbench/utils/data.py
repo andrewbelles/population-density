@@ -42,7 +42,7 @@ from preprocessing.loaders import (
     make_oof_dataset_loader,
     load_oof_predictions, 
     ConcatSpec,
-    load_viirs_roi_manifest
+    load_spatial_roi_manifest
 )
 
 from preprocessing.loaders import load_passthrough
@@ -322,7 +322,7 @@ def make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size):
 
 def make_roi_loader(canvas_hw=(512, 512)): 
     def _loader(path): 
-        return load_viirs_roi_manifest(path, canvas_hw=canvas_hw)
+        return load_spatial_roi_manifest(path, canvas_hw=canvas_hw)
     return _loader 
 
 def load_embedding_mat(path: str): 
@@ -332,3 +332,7 @@ def load_embedding_mat(path: str):
     X = np.asarray(mat["features"], dtype=np.float64)
     y = np.asarray(mat["labels"]).reshape(-1).astype(np.int64)
     return X, y
+
+def load_spatial_dataset(root_dir: str, canvas_hw: tuple[int, int]): 
+    data = make_roi_loader(canvas_hw=canvas_hw)(root_dir)
+    return data["dataset"], data["labels"], data["sample_ids"], data["collate_fn"]

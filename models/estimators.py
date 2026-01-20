@@ -604,9 +604,18 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader: 
-                packed, masks, rois, labels, *extra = batch 
-                group_ids      = extra[1] if len(extra) > 1 else None 
-                group_weights  = extra[2] if len(extra) > 2 else None 
+                packed, masks, rois, labels, *extra = batch
+                if packed.ndim == 3: 
+                    packed = packed[:, None, ...]
+                if masks.ndim == 3: 
+                    masks  = masks[:, None, ...]
+
+                if rois is not None and len(rois) == 0: 
+                    rois = None 
+
+                group_ids = group_weights = None 
+                if len(extra) >= 2: 
+                    group_ids, group_weights = extra[-2], extra[-1]
 
                 xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
                 mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
@@ -768,14 +777,21 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         return total / max(count, 1)
 
     def _process_batch(self, batch):
-        if self.n_classes_ is None: 
-            raise TypeError
-        if self.classes_ is None: 
+        if self.n_classes_ is None or self.classes_ is None: 
             raise TypeError
 
         packed, masks, rois, labels, *extra = batch
-        group_ids     = extra[1] if len(extra) > 1 else None 
-        group_weights = extra[2] if len(extra) > 2 else None 
+        if packed.ndim == 3: 
+            packed = packed[:, None, ...]
+        if masks.ndim == 3: 
+            masks  = masks[:, None, ...]
+
+        if rois is not None and len(rois) == 0: 
+            rois = None 
+
+        group_ids = group_weights = None 
+        if len(extra) >= 2: 
+            group_ids, group_weights = extra[-2], extra[-1]
 
         xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
         mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
@@ -1331,8 +1347,11 @@ def make_spatial_sfe(
         merged = dict(fixed)
         merged.update(params) 
         collate = merged.pop("collate_fn", collate_fn) 
-        merged.setdefault("device", compute_strategy.device)
-        return SpatialClassifier(collate_fn=collate, **merged)
+        return SpatialClassifier(
+            collate_fn=collate, 
+            compute_strategy=compute_strategy,
+            **merged
+        )
     return _factory 
 
 def make_xgb_sfe(
