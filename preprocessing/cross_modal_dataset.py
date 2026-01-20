@@ -21,6 +21,10 @@ from utils.helpers import (
 
 from preprocessing.loaders import load_oof_predictions
 
+from utils.resources import ComputeStrategy
+
+strategy = ComputeStrategy.from_env()
+
 EPS          = 1e-6 
 RANDOM_STATE = 0 
 
@@ -152,12 +156,13 @@ def compute_disagreement(
     return (~agreement).astype(np.int64)
 
 def select_disagreement_features(
-        X_raw: NDArray[np.float64],
-        raw_names: NDArray[np.str_],
-        y_conflict: NDArray[np.int64],
+    X_raw: NDArray[np.float64],
+    raw_names: NDArray[np.str_],
+    y_conflict: NDArray[np.int64],
     *,
     n_features: int = 3, 
-    random_state: int = 0 
+    random_state: int = 0,
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
 ) -> tuple[NDArray[np.float64], list[str]]: 
     
     mask = np.isfinite(X_raw).all(axis=1)
@@ -170,7 +175,7 @@ def select_disagreement_features(
     rf = RandomForestClassifier(
         n_estimators=600,
         random_state=random_state,
-        n_jobs=-1, 
+        n_jobs=compute_strategy.n_jobs, 
         class_weight="balanced_subsample"
     )
 
@@ -294,8 +299,10 @@ def build_cross_modal_features(
         raw_names, 
         y_conflict, 
         n_features=disagreement_features,
+        compute_strategy=strategy,
         random_state=random_state
     )
+
     for i, raw in enumerate(top_raw_names): 
         features.append(top_values[:, i])
         feature_names.append(raw)

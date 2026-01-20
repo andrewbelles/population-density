@@ -74,6 +74,10 @@ from testbench.utils.data import (
 )
 
 from testbench.utils.oof import load_probs_labels_fips, stacking_metadata
+
+from utils.resources import ComputeStrategy 
+
+strategy = ComputeStrategy.from_env()
     
 # ---------------------------------------------------------
 # Global Variables 
@@ -123,7 +127,7 @@ def _evaluate_model(
     *,
     proba_path=None
 ):
-    model = get_factory(model_name)(**params)
+    model = get_factory(model_name, strategy=strategy)(**params)
 
     cv = CrossValidator(
         filepath=filepath,
@@ -205,7 +209,7 @@ def _optimize_dataset(
                 name=f"{dataset_key}_{model_name}",
                 filepath=filepath,
                 loader_func=loader_func,
-                model_factory=get_factory(model_name),
+                model_factory=get_factory(model_name, strategy=strategy),
                 param_space=get_param_space(model_name),
                 task=OPT_TASK,
                 outer_config=outer_config,
@@ -257,7 +261,8 @@ def _optimize_cs(
         y_train=y,
         train_mask=train_mask,
         test_mask=test_mask,
-        class_labels=class_labels
+        class_labels=class_labels,
+        compute_strategy=strategy
     )
 
     with contextlib.redirect_stdout(sys.stderr):
@@ -305,7 +310,8 @@ def _evaluate_cs(
         class_labels=class_labels,
         correction=(cl, ca),
         smoothing=(sl, sa),
-        autoscale=autoscl
+        autoscale=autoscl,
+        compute_strategy=strategy
     )
     P_cs    = cs(P, y, train_mask, W_by_name[adj_name])
     metrics = metrics_from_probs(y[test_mask], P_cs[test_mask], class_labels)

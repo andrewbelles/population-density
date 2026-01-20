@@ -69,6 +69,10 @@ from utils.helpers             import (
     project_path
 )
 
+from utils.resources import ComputeStrategy 
+
+strategy = ComputeStrategy.from_env()
+
 DEFAULT_MODEL_KEY = "Spatial/VIIRS_ROI"
 
 def _row_score(name: str, score: float): 
@@ -137,7 +141,7 @@ def test_spatial_opt(
     **_
 ): 
     loader  = make_roi_loader(canvas_hw=canvas_hw) 
-    factory = make_spatial_sfe()
+    factory = make_spatial_sfe(strategy=strategy)
 
     config  = CVConfig(
         n_splits=folds, 
@@ -152,6 +156,7 @@ def test_spatial_opt(
         loader_func=loader,
         model_factory=factory,
         param_space=define_spatial_space,
+        compute_strategy=strategy,
         task=OPT_TASK,
         config=config
     )
@@ -205,14 +210,15 @@ def test_spatial_extract(
     config   = eval_config(random_state)
     splitter = config.get_splitter(OPT_TASK) 
 
-    model_factory = lambda: SpatialClassifier(**params)
+    model_factory = lambda: SpatialClassifier(compute_strategy=strategy, **params)
 
     def _projector_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
         proj_eval = ProjectorEvaluator(
             train_emb, 
             train_y, 
             define_projector_space, 
-            random_state=random_state + fold 
+            random_state=random_state + fold,
+            compute_strategy=strategy
         )
 
         best_params, _ = run_optimization(
@@ -226,7 +232,8 @@ def test_spatial_extract(
         proj = EmbeddingProjector(
             in_dim=train_emb.shape[1],
             **best_params,
-            random_state=random_state + fold 
+            random_state=random_state + fold,
+            device=strategy.device
         )
         proj.fit(train_emb, train_y)
         return proj.transform(val_emb)
@@ -284,10 +291,12 @@ def test_saipe_opt(
     )
     config.verbose = False 
 
+
     evaluator = XGBOrdinalEvaluator(
         filepath=data_path,
         loader_func=loader,
         model_factory=make_xgb_sfe,
+        compute_strategy=strategy,
         param_space=define_xgb_ordinal_space,
         config=config
     )
@@ -319,9 +328,7 @@ def test_saipe_extract(
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
     out_path: str | None = None, 
-    embed_dim: int = 8, 
-    out_dim: int = 64, 
-    pooling: str = "mean", 
+    proj_trials: int = 50,
     **_ 
 ): 
     loader = make_dataset_loader(dataset_key, proba_path)[dataset_key]
@@ -339,12 +346,39 @@ def test_saipe_extract(
     config   = eval_config(random_state)
     splitter = config.get_splitter(OPT_TASK)
 
+    model_factory = lambda **kw: make_xgb_sfe(compute_strategy=strategy, **params, **kw)
+
+    def _projector_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
+        proj_eval = ProjectorEvaluator(
+            train_emb, 
+            train_y, 
+            define_projector_space, 
+            random_state=random_state + fold,
+            compute_strategy=strategy
+        )
+
+        best_params, _ = run_optimization(
+            name="SAIPE/Leaf_Projector",
+            evaluator=proj_eval,
+            n_trials=proj_trials,
+            direction="minimize",
+            random_state=random_state
+        )
+
+        proj = EmbeddingProjector(
+            in_dim=train_emb.shape[1],
+            **best_params,
+            random_state=random_state + fold,
+            device=strategy.device
+        )
+        proj.fit(train_emb, train_y)
+        return proj.transform(val_emb)
+ 
     embs = _holdout_embeddings(
         X, labels, splitter, 
-        model_factory=make_xgb_sfe,
-        extract_fn=lambda m, X_val: m.transform(
-            X_val, embed_dim=embed_dim, out_dim=out_dim, pooling=pooling
-        ),
+        model_factory=model_factory, 
+        extract_fn=lambda m, subset: m.leaf_matrix(subset, dense=True), 
+        postprocess=_projector_fold, 
         subset_fn=lambda data, idx: data[idx]
     )
 
@@ -408,7 +442,7 @@ def test_reduce_all(
             metric=metric,
             target_metric="l1",
             target_weight=0.3,
-            n_jobs=-1,
+            n_jobs=strategy.n_jobs,
         )
         coords   = reducer.fit_transform(X, y)
         name     = p.stem 

@@ -56,6 +56,8 @@ pkgs.mkShell {
       deactivate 
     fi
 
+    export PATH="$PROJECT_ROOT/scripts:$PATH"
+
     source .venv/bin/activate
     echo "[NIX-SHELL] activated virtual environment: $VIRTUAL_ENV"
     

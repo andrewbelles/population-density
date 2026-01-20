@@ -20,6 +20,8 @@ from testbench.utils.paths import CONFIG_PATH
 
 from analysis.graph_metrics import MetricAnalyzer
 
+from utils.resources import ComputeStrategy
+
 from analysis.hyperparameter import (
     define_xgb_space,
     define_rf_space,
@@ -43,14 +45,18 @@ def get_param_space(model_type: str):
     }
     return mapping[model_type]
 
-def get_factory(model_type: str): 
+def get_factory(
+    model_type: str, 
+    strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
+): 
     mapping = {
         "XGBoost": make_xgb_classifier,
         "RandomForest": make_rf_classifier,
         "SVM": make_svm_classifier,
         "Logistic": make_logistic,
     }
-    return mapping[model_type]
+    factory_fn = mapping[model_type] 
+    return lambda **p: factory_fn(compute_strategy=strategy, **p)
 
 def load_metric_params(model_key: str) -> dict: 
     cfg    = load_yaml_config(Path(CONFIG_PATH))

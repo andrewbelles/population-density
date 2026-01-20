@@ -71,6 +71,10 @@ from utils.helpers import (
     make_train_mask
 ) 
 
+from utils.resources import ComputeStrategy 
+
+strategy = ComputeStrategy.from_env()
+
 # Silence-able logging 
 def _log(msg, quiet=False): 
     if not quiet: 
@@ -102,7 +106,7 @@ def _evaluate_model(
     config,
     proba=None 
 ): 
-    model = get_factory(model_name)(**params)
+    model = get_factory(model_name, strategy=strategy)(**params)
     cv    = CrossValidator(
         filepath=filepath,
         loader=loader_func,
@@ -138,7 +142,7 @@ def _optimize_single(
                 name=f"{dataset_key}_label{label}_{model_name}",
                 filepath="virtual",
                 loader_func=loader_func,
-                model_factory=get_factory(model_name),
+                model_factory=get_factory(model_name, strategy=strategy),
                 param_space=get_param_space(model_name),
                 task=OPT_TASK,
                 outer_config=outer_config,
@@ -327,7 +331,7 @@ def test_round_robin_stacking_opt(buf: io.StringIO, n_trials: int, quiet: bool =
                 name=f"{RR_STACK_KEY}_{model_name}",
                 filepath="virtual",
                 loader_func=loader,
-                model_factory=get_factory(model_name),
+                model_factory=get_factory(model_name, strategy=strategy),
                 param_space=get_param_space(model_name),
                 task=OPT_TASK,
                 outer_config=outer_config,

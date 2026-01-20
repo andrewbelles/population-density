@@ -15,6 +15,8 @@ from numpy.typing import NDArray
 
 from torch_geometric.nn.models import CorrectAndSmooth as PyGCS 
 
+from utils.resources import ComputeStrategy
+
 class CorrectAndSmooth: 
 
     def __init__(
@@ -23,11 +25,11 @@ class CorrectAndSmooth:
         correction: tuple[int, float] = (3, 0.01), 
         smoothing: tuple[int, float] = (8, 0.15), 
         autoscale: bool = True, 
-        device: Optional[str] = None,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
         class_labels: Optional[NDArray] = None 
     ): 
         self.class_labels = class_labels
-        self.device = self._resolve_device(device)
+        self.device = self._resolve_device(compute_strategy.device)
         self.model_ = PyGCS(
             num_correction_layers=correction[0], 
             correction_alpha=correction[1],

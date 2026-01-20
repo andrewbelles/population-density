@@ -56,6 +56,10 @@ from testbench.utils.transforms import apply_transforms
 from testbench.utils.graph import coords_for_fips
 from testbench.utils.etc import write_graph_metrics
 
+from utils.resources import ComputeStrategy 
+
+strategy = ComputeStrategy.from_env()
+
 # ---------------------------------------------------------
 # Unit Tests  
 # ---------------------------------------------------------
@@ -78,7 +82,7 @@ def test_mobility(fips: NDArray, k: int = 12):
 
 def test_knn(fips: NDArray, k: int = 12): 
     coords = coords_for_fips(MOBILITY_PATH, fips)
-    W = build_knn_graph_from_coords(coords, k=k, directed=False)
+    W = build_knn_graph_from_coords(coords, compute_strategy=strategy, k=k, directed=False)
     check_adj(W, len(fips), "knn")
     if W.diagonal().sum() != 0: 
         raise ValueError("knn adjacency formed self-loops. Expected no self-loops")
@@ -124,7 +128,7 @@ def test_edge_gate(
 ): 
     base_adj = make_queen_adjacency_factory(SHAPEFILE)(list(fips))
 
-    model = EdgeLearner(**params) 
+    model = EdgeLearner(compute_strategy=strategy, **params) 
     model.fit(X, y, base_adj)
     adj = model.build_graph(X, base_adj)
     check_adj(adj, len(fips), f"{key} adjacency")

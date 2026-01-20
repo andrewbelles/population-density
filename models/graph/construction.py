@@ -23,6 +23,8 @@ from preprocessing.loaders import load_oof_predictions
 
 from utils.helpers import _mat_str_vector
 
+from utils.resources import ComputeStrategy
+
 EARTH_RADIUS_KM = 6371.0
 
 def build_knn_graph_from_coords(
@@ -33,7 +35,7 @@ def build_knn_graph_from_coords(
     metric: str = "haversine",
     metric_params: Optional[dict] = None, 
     include_self: bool = False, 
-    n_jobs: int = -1 
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
 ) -> sparse.csr_matrix:  
 
     '''
@@ -68,7 +70,7 @@ def build_knn_graph_from_coords(
         mode="distance",
         metric=metric,
         include_self=include_self, 
-        n_jobs=n_jobs,
+        n_jobs=compute_strategy.n_jobs,
         **kwargs
     ).tocsr() 
 

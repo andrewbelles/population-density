@@ -20,6 +20,8 @@ from sklearn.ensemble        import RandomForestClassifier
 from sklearn.inspection      import permutation_importance 
 from sklearn.model_selection import StratifiedShuffleSplit
 
+from utils.resources import ComputeStrategy
+
 from preprocessing.loaders import DatasetDict 
 from utils.feature_matrix import (
     coerce_supervised,
@@ -39,6 +41,7 @@ class BorutaConfig:
     perm_repeats: int = 5 
     shadow_qunatile: float = 0.95 
     test_size: float = 0.25 
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
     scoring: str | None = "balanced_accuracy"
 
     def to_dict(self) -> dict[str, object]: 
@@ -52,6 +55,9 @@ class BorutaConfig:
             "alpha": float(self.alpha),
             "perm_repeats": int(self.perm_repeats),
             "shadow_qunatile": float(self.shadow_qunatile),
+            "n_jobs": int(self.compute_strategy.n_jobs),
+            "gpu_id": str(self.compute_strategy.gpu_id),
+            "device": str(self.compute_strategy.device),
             "test_size": float(self.test_size),
             "scoring": self.scoring
         }
@@ -137,7 +143,7 @@ class BorutaProbe:
                 max_depth=self.config.max_depth,
                 max_features=self.config.max_features,
                 min_samples_leaf=self.config.min_samples_leaf,
-                n_jobs=-1,
+                n_jobs=self.config.compute_strategy.n_jobs,
                 random_state=int(rng.integers(0, 2**31 - 1))
             )
             rf.fit(X_aug[train_idx], y[train_idx])

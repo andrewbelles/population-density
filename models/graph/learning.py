@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 
 from models.graph.construction import normalize_adjacency
+from utils.resources import ComputeStrategy
 
 def _edge_pairs_from_adj(
     adj: sparse.spmatrix, 
@@ -105,7 +106,7 @@ class EdgeLearner:
         epochs: int = 1500, 
         batch_size: Optional[int] = None, 
         standardize: bool = True, 
-        device: Optional[str] = "cuda", 
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
         seed: int = 0, 
         verbose: bool = False 
     ): 
@@ -120,7 +121,7 @@ class EdgeLearner:
         self.epochs = epochs
         self.batch_size = batch_size
         self.standardize = standardize
-        self.device = self._resolve_device(device)
+        self.device = self._resolve_device(compute_strategy.device)
         self.seed = seed
         self.verbose = verbose
 

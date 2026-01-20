@@ -45,6 +45,8 @@ from models.graph.construction import (
 
 from sklearn.metrics import accuracy_score
 
+from utils.resources import ComputeStrategy
+
 from utils.helpers import (
     make_train_mask,
     align_on_fips 
@@ -224,40 +226,41 @@ class SpatialEvaluator(OptunaEvaluator):
         task,
         config,
         batch_size: int = 64, 
-        num_workers: int = 2, 
-        pin_memory: bool | None = None, 
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
         drop_last: bool = False 
     ): 
-        self.filepath       = filepath 
-        self.loader         = loader_func 
-        self.factory        = model_factory
-        self.param_space_fn = param_space
-        self.task           = task 
-        self.config         = config 
-        self.config.verbose = False
+        self.filepath         = filepath 
+        self.loader           = loader_func 
+        self.factory          = model_factory
+        self.param_space_fn   = param_space
+        self.task             = task 
+        self.config           = config 
+        self.config.verbose   = False
         
-        data                = self.loader(filepath)
-        self.dataset        = data["dataset"]
-        self.labels         = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
-        self.coords         = data.get("coords")
-        self.collate_fn     = data.get("collate_fn") 
-        self.batch_size     = batch_size 
-        self.num_workers    = num_workers 
-        self.pin_memory     = pin_memory 
-        self.drop_last      = drop_last 
+        data                  = self.loader(filepath)
+        self.dataset          = data["dataset"]
+        self.labels           = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+        self.coords           = data.get("coords")
+        self.collate_fn       = data.get("collate_fn") 
+        self.batch_size       = batch_size 
+        self.compute_strategy = compute_strategy
+        self.drop_last        = drop_last 
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         return self.param_space_fn(trial)
 
     def _make_loader(self, dataset, shuffle: bool): 
-        pin = self.pin_memory 
-        if pin is None: 
-            pin = torch.cuda.is_available() 
+        pin = self.compute_strategy.device == "cuda" 
+        if self.compute_strategy.n_jobs == -1: 
+            num_workers = 2 
+        else: 
+            num_workers = min(self.compute_strategy.n_jobs, 2)
+
         return DataLoader(
             dataset, 
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=self.num_workers,
+            num_workers=num_workers,
             pin_memory=pin,
             drop_last=self.drop_last,
             collate_fn=self.collate_fn
@@ -298,12 +301,14 @@ class XGBOrdinalEvaluator(OptunaEvaluator):
         model_factory,
         param_space,
         config,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
     ):
         self.filepath       = filepath 
         self.loader         = loader_func 
         self.factory        = model_factory
         self.param_space_fn = param_space
         self.config         = config 
+        self.strategy       = compute_strategy
         
         data        = self.loader(filepath)
         self.X      = np.asarray(data["features"], dtype=np.float32)
@@ -317,7 +322,7 @@ class XGBOrdinalEvaluator(OptunaEvaluator):
         scores   = []
 
         for train_idx, test_idx in splitter.split(self.X, self.y): 
-            model = self.factory(**params)
+            model = self.factory(compute_strategy=self.strategy, **params)
             if callable(model) and not hasattr(model, "fit"):
                 model = model() 
             if not hasattr(model, "fit"):
@@ -341,16 +346,18 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
         y_train: NDArray, 
         train_mask: NDArray, 
         test_mask: NDArray, 
-        class_labels: NDArray
+        class_labels: NDArray,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
     ): 
 
-        self.P            = P 
-        self.W_by_name    = W_by_name 
-        self.y_train      = y_train 
-        self.train_mask   = train_mask
-        self.test_mask    = test_mask 
-        self.y_true       = y_train[test_mask]
-        self.class_labels = class_labels
+        self.P                = P 
+        self.W_by_name        = W_by_name 
+        self.y_train          = y_train 
+        self.train_mask       = train_mask
+        self.test_mask        = test_mask 
+        self.y_true           = y_train[test_mask]
+        self.class_labels     = class_labels
+        self.compute_strategy = compute_strategy
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         return {
@@ -372,7 +379,8 @@ class CorrectAndSmoothEvaluator(OptunaEvaluator):
             class_labels=self.class_labels,
             correction=(params.pop("correction_layers"), params.pop("correction_alpha")),
             smoothing=(params.pop("smoothing_layers"), params.pop("smoothing_alpha")),
-            autoscale=params.pop("autoscale")
+            autoscale=params.pop("autoscale"),
+            compute_strategy=self.compute_strategy
         )
 
         P_cs = cs(self.P, self.y_train, self.train_mask, W)
@@ -612,12 +620,14 @@ class ProjectorEvaluator(OptunaEvaluator):
         X, 
         y,
         param_space, 
-        random_state: int = 0 
+        random_state: int = 0,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
     ): 
-        self.X               = np.asarray(X, dtype=np.float32)
-        self.y               = np.asarray(y, dtype=np.int64)
-        self.param_space_fn  = param_space 
-        self.random_state    = random_state
+        self.X                = np.asarray(X, dtype=np.float32)
+        self.y                = np.asarray(y, dtype=np.int64)
+        self.param_space_fn   = param_space 
+        self.random_state     = random_state
+        self.compute_strategy = compute_strategy
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         return self.param_space_fn(trial)
@@ -632,7 +642,8 @@ class ProjectorEvaluator(OptunaEvaluator):
         proj = EmbeddingProjector(
             in_dim=self.X.shape[1],
             **params,
-            random_state=self.random_state
+            random_state=self.random_state,
+            device=self.compute_strategy.device
         ) 
         proj.fit(self.X[train_idx], self.y[train_idx])
         return float(proj.loss(self.X[val_idx], self.y[val_idx]))
@@ -667,7 +678,6 @@ def define_xgb_space(trial):
         "gamma": trial.suggest_float("gamma", 1e-1, 1e1, log=True), 
 
         "tree_method": "hist", 
-        "n_jobs": -1 
     }
 
 def define_rf_space(trial): 
@@ -683,8 +693,6 @@ def define_rf_space(trial):
                                                   [None, "balanced", "balanced_subsample"]),
 
         "criterion": trial.suggest_categorical("criterion", ["gini", "entropy", "log_loss"]),
-
-        "n_jobs": -1 
     }
 
 def define_svm_space(trial): 

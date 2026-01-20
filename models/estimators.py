@@ -7,9 +7,12 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
+from scipy.sparse import csr_matrix
 import sys, time, torch, copy, xgboost  
 
 import numpy as np 
+
+from utils.resources import ComputeStrategy
 
 from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
@@ -452,15 +455,14 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         aligned: bool = False, 
         epochs: int = 100, 
         lr: float = 1e-3, 
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
         weight_decay: float = 0.0, 
         random_state: int = 0, 
-        device: str | None = None,
         early_stopping_rounds: int | None = 15, 
         eval_fraction: float = 0.1,
         min_delta: float = 1e-4,
         batch_size: int = 16,
         accum_steps: int = 4, 
-        pin_memory: bool | None = None, 
         shuffle: bool = True, 
         collate_fn=None
     ): 
@@ -478,16 +480,16 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.weight_decay    = weight_decay
         self.random_state    = random_state
         self.accum_steps     = accum_steps
-        self.device          = self._resolve_device(device)
+        self.device          = self._resolve_device(compute_strategy.device)
 
         self.early_stopping_rounds = early_stopping_rounds 
         self.min_delta             = min_delta
         self.eval_fraction         = eval_fraction
 
-        self.pin_memory = pin_memory 
-        self.shuffle    = shuffle 
-        self.batch_size = batch_size 
-        self.collate_fn = collate_fn
+        self.compute_strategy = compute_strategy 
+        self.shuffle          = shuffle 
+        self.batch_size       = batch_size 
+        self.collate_fn       = collate_fn
 
         self.classes_: NDArray | None = None 
         self.n_classes_: int | None   = None 
@@ -627,14 +629,17 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _make_loader(self, dataset, shuffle: bool): 
-        pin = self.pin_memory 
-        if pin is None: 
-            pin = self.device is not None and self.device.type == "cuda" 
+        pin = self.compute_strategy.device == "cuda" 
+        if self.compute_strategy.n_jobs == -1: 
+            num_workers = 2 
+        else: 
+            num_workers = min(self.compute_strategy.n_jobs, 2)
+
         return DataLoader(
             dataset, 
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=2,
+            num_workers=num_workers,
             pin_memory=pin,
             collate_fn=self.collate_fn
         )
@@ -1083,6 +1088,26 @@ class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin):
 
         return pooled @ self.leaf_proj_ + self.leaf_proj_bias_
 
+    def leaf_matrix(
+        self,
+        X,
+        *,
+        dense: bool = False 
+    ): 
+        leaf_ids = self.leaves(X)
+        n, t     = leaf_ids.shape 
+        n_cols   = int(self.leaf_table_size_)
+
+        if dense: 
+            mat = np.zeros((n, n_cols), dtype=np.float32)
+            mat[np.arange(n)[:, None], leaf_ids] = 1.0 
+            return mat 
+
+        rows = np.repeat(np.arange(n), t)
+        cols = leaf_ids.reshape(-1)
+        data = np.ones(rows.shape[0], dtype=np.float32)
+        return csr_matrix((data, (rows, cols)), shape=(n, n_cols))
+
     def leaves(self, X): 
         X      = np.asarray(X, dtype=np.float32)
         dmat   = xgboost.DMatrix(X, nthread=self.n_jobs) 
@@ -1167,7 +1192,7 @@ class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin):
             gamma=self.gamma,
             objective="binary:logistic",
             eval_metric="logloss",
-            tree_method="gpu_hist" if self.gpu else "hist",
+            device="cuda" if self.gpu else "cpu",
             random_state=self.random_state,
             n_jobs=self.n_jobs,
             early_stopping_rounds=self.early_stopping_rounds,
@@ -1231,54 +1256,82 @@ class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin):
 def make_linear(alpha: float = 1.0):
     return lambda: LinearRegressor(alpha=alpha)
 
-def make_rf_regressor(n_estimators: int = 400, **kwargs): 
-    return lambda: RFRegressor(n_estimators=n_estimators, **kwargs) 
+def make_rf_regressor(
+    n_estimators: int = 400, 
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
+    **kwargs
+): 
+    return lambda: RFRegressor(
+        n_estimators=n_estimators, 
+        n_jobs=compute_strategy.n_jobs,
+        **kwargs
+    ) 
 
 def make_xgb_regressor(
     n_estimators: int = 300, 
     early_stopping_rounds: int = 200, 
-    gpu: bool = False, 
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs 
 ): 
     return lambda: XGBRegressorWrapper(
         n_estimators=n_estimators, 
         early_stopping_rounds=early_stopping_rounds,
-        gpu=gpu,
+        n_jobs=compute_strategy.n_jobs,
+        gpu=compute_strategy.gpu_id is not None,
         **kwargs 
     )
 
-def make_rf_classifier(n_estimators: int = 400, **kwargs):
-    return lambda: RFClassifierWrapper(n_estimators=n_estimators, **kwargs)
+def make_rf_classifier(
+    n_estimators: int = 400, 
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+    **kwargs
+):
+    return lambda: RFClassifierWrapper(
+        n_estimators=n_estimators, 
+        n_jobs=compute_strategy.n_jobs,
+        **kwargs
+    )
 
 def make_xgb_classifier(
     n_estimators: int = 400,
     early_stopping_rounds: int = 200,
-    gpu: bool = False,
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs,
 ):
     return lambda: XGBClassifierWrapper(
         n_estimators=n_estimators,
         early_stopping_rounds=early_stopping_rounds,
-        gpu=gpu,
+        n_jobs=compute_strategy.n_jobs,
+        gpu=compute_strategy.gpu_id is not None,
         **kwargs,
     )
 
 
-def make_logistic(C: float = 1.0, **kwargs):
+def make_logistic(
+    C: float = 1.0, 
+    compute_strategy: ComputeStrategy | None = None, # doesn't require 
+    **kwargs
+):
     return lambda: LogisticWrapper(C=C, **kwargs)
 
-def make_svm_classifier(probability=True, **kwargs): 
+def make_svm_classifier(
+    probability=True, 
+    compute_strategy: ComputeStrategy | None = None, # doesn't require 
+    **kwargs
+): 
     return lambda: SVMClassifier(probability=probability, **kwargs)
 
 def make_spatial_sfe(
     *,
     collate_fn=None,
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **fixed 
 ): 
     def _factory(**params): 
         merged = dict(fixed)
         merged.update(params) 
         collate = merged.pop("collate_fn", collate_fn) 
+        merged.setdefault("device", compute_strategy.device)
         return SpatialClassifier(collate_fn=collate, **merged)
     return _factory 
 
@@ -1286,14 +1339,15 @@ def make_xgb_sfe(
     n_estimators: int = 400, 
     early_stopping_rounds: int = 200, 
     eval_fraction: float = 0.2, 
-    gpu: bool = False, 
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs
 ):
     return lambda: XGBOrdinalRegressor(
         n_estimators=n_estimators,
         early_stopping_rounds=early_stopping_rounds,
         eval_fraction=eval_fraction,
-        gpu=gpu,
+        n_jobs=compute_strategy.n_jobs, 
+        gpu=compute_strategy.gpu_id is not None,
         **kwargs
     )
 

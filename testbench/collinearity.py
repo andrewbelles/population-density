@@ -31,6 +31,10 @@ from testbench.utils.paths   import (
 
 from testbench.utils.etc     import full_long, pairwise_long, render_table, write_csv
 
+from utils.resources         import ComputeStrategy 
+
+strategy = ComputeStrategy.from_env()
+
 RANDOM_STATE = 0 
 
 # --------------------------------------------------------- 

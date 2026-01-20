@@ -39,6 +39,10 @@ from testbench.utils.etc   import (
     write_csv,
 )
 
+from utils.resources import ComputeStrategy
+
+strategy = ComputeStrategy.from_env()
+
 def _log(buf: io.StringIO, msg: str): 
     buf.write(msg.rstrip() + "\n")
 
@@ -74,6 +78,7 @@ def build_boruta_config(
         max_depth=max_depth,
         max_features=max_features,
         min_samples_leaf=min_samples_leaf,
+        compute_strategy=strategy,
         alpha=alpha 
     )
 
