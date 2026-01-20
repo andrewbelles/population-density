@@ -6,3 +6,14 @@
 # 
 # 
  
+numpy 
+scipy 
+pandas 
+scikit-learn
+torch
+torchvision
+optuna
+xgboost
+torch-geometric
+umap-learn
+PyYAML
