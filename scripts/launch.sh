@@ -32,12 +32,7 @@ launch() {
     exit 2 
   fi 
 
-  if [ -n "${IN_NIX_SHELL:-}" ]; then 
-   exec "$@"
-  fi 
-
-  printf -v cmd '%q' "$@"
-  nix-shell --run "$cmd"
+  exec "$@"
 }
 
 while [[ $# -gt 0 ]]; do 
