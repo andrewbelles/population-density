@@ -1,0 +1,38 @@
+#
+# requirements.txt  Andrew Belles  Jan 20th, 2026 
+# 
+# Standard python dependencies for if nix-shell is unavailable by user 
+# 
+# 
+# 
+
+# Scientific Computing Depedencies 
+numpy<3
+scipy<2 
+pandas<3
+scikit-learn<2
+
+# Image/Plotting Depedencies
+matplotlib<4 
+seaborn<1 
+PyYAML<7 
+imageio<3 
+
+# Geography Dependencies 
+geopandas<1
+xarray<2027
+rasterio<2
+fiona<2
+rasterstats<1
+pyrosm<1 
+
+# Machine Learning Libraries 
+libpysal<5 
+optuna<5
+umap-learn<1
+networkit<12 
+xgboost<3 
+torch<3 
+torchvision<1
+torchaudio<3 
+torch-geometric<3
