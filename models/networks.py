@@ -12,6 +12,8 @@ from torch import nn
 
 import torch.nn.functional as F 
 
+import torch.utils.checkpoint as cp
+
 import torchvision.ops as tops 
 
 def _conv_block(in_ch, out_ch, kernel_size=3, pool_size=2, use_bn=True): 
@@ -76,21 +78,19 @@ class SpatialBackbone(nn.Module):
         rois: list[tuple[int, int, int, int, int]] | None = None 
     ) -> torch.Tensor: 
 
-        MICRO_BATCH_SIZE = 32 
+        MICRO_BATCH_SIZE = 64 
         n_tiles          = x.shape[0]
         feat_chunks      = []
         
-
         for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
 
             x_chunk = x[i:i+MICRO_BATCH_SIZE] 
 
-            if x.shape[1] == 1 and self.net[0][0].in_channels > 1: 
-                x_idx    = x.squeeze(1).long() 
-                x_onehot = F.one_hot(x_idx, num_classes=self.net[0][0].in_channels + 1)
-                x        = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
+            if self.training: 
+                feat_chunk = cp.checkpoint(self._forward_chunk, x_chunk, use_reentrant=True) 
+            else: 
+                feat_chunk = self._forward_chunk(x_chunk) 
 
-            feat_chunk = self.net(x_chunk)
             feat_chunks.append(feat_chunk) 
 
         feats = torch.cat(feat_chunks, dim=0) 
@@ -148,6 +148,15 @@ class SpatialBackbone(nn.Module):
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
 
         return self.masked_avgmax(pooled, mask_pooled)
+
+    def _forward_chunk(self, x_chunk): 
+
+        if x_chunk.shape[1] == 1 and self.net[0][0].in_channels > 1: 
+            x_idx    = x_chunk.squeeze(1).long() 
+            x_onehot = F.one_hot(x_idx, num_classes=self.net[0][0].in_channels + 1)
+            x_chunk  = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
+
+        return self.net(x_chunk) 
 
     @staticmethod 
     def prep_mask(
