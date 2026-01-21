@@ -58,13 +58,19 @@ class SpatialBackbone(nn.Module):
         aligned: bool = False 
     ): 
         super().__init__()
+
+        self.model_in_channels = in_channels 
+
         layers = []
         ch     = in_channels 
+
         for out_ch in conv_channels: 
             layers.append(_conv_block(ch, out_ch, kernel_size, pool_size, use_bn))
             ch = out_ch 
 
         self.net             = nn.Sequential(*layers)
+        if hasattr(torch, "compile"):
+            self.net         = torch.compile(self.net)
         self.out_dim         = conv_channels[-1] * 2 # avg + max concat  
         self.roi_output_size = roi_output_size
         self.sampling_ratio  = sampling_ratio 
@@ -81,13 +87,23 @@ class SpatialBackbone(nn.Module):
         MICRO_BATCH_SIZE = 64 
         n_tiles          = x.shape[0]
         feat_chunks      = []
+
+
+        def run_chunk(chunk): 
+
+            if chunk.shape[1] == 1 and self.net[0][0].in_channels > 1: 
+                x_idx    = chunk.squeeze(1).long() 
+                x_onehot = F.one_hot(x_idx, num_classes=self.net[0][0].in_channels + 1)
+                chunk  = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
+
+            return self.net(chunk) 
         
         for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
 
             x_chunk = x[i:i+MICRO_BATCH_SIZE] 
 
             if self.training: 
-                feat_chunk = cp.checkpoint(self._forward_chunk, x_chunk, use_reentrant=True) 
+                feat_chunk = cp.checkpoint(run_chunk, x_chunk, use_reentrant=True) 
             else: 
                 feat_chunk = self._forward_chunk(x_chunk) 
 
@@ -148,15 +164,6 @@ class SpatialBackbone(nn.Module):
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
 
         return self.masked_avgmax(pooled, mask_pooled)
-
-    def _forward_chunk(self, x_chunk): 
-
-        if x_chunk.shape[1] == 1 and self.net[0][0].in_channels > 1: 
-            x_idx    = x_chunk.squeeze(1).long() 
-            x_onehot = F.one_hot(x_idx, num_classes=self.net[0][0].in_channels + 1)
-            x_chunk  = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
-
-        return self.net(x_chunk) 
 
     @staticmethod 
     def prep_mask(

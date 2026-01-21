@@ -649,7 +649,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if self.compute_strategy.n_jobs == -1: 
             num_workers = 6 
         else: 
-            num_workers = min(self.compute_strategy.n_jobs, 6)
+            num_workers = self.compute_strategy.n_jobs
 
         return DataLoader(
             dataset, 
@@ -657,7 +657,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin,
-            collate_fn=self.collate_fn
+            collate_fn=self.collate_fn,
+            persistent_workers=(num_workers > 0), 
+            prefetch_factor=4 if num_workers > 0 else None 
         )
 
     def _ensure_loader(self, X, shuffle: bool): 
