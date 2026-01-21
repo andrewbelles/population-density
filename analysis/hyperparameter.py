@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 import optuna, itertools 
 from optuna.samplers import CmaEsSampler, TPESampler
 
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit, StratifiedGroupKFold
 import torch, gc  
 
 import numpy as np 
@@ -237,11 +237,11 @@ class SpatialEvaluator(OptunaEvaluator):
         self.config           = config 
         self.config.verbose   = False
         
-        data                  = self.loader(filepath)
-        self.dataset          = data["dataset"]
-        self.labels           = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
-        self.coords           = data.get("coords")
-        self.collate_fn       = data.get("collate_fn") 
+        self.data             = self.loader(filepath)
+        self.dataset          = self.data["dataset"]
+        self.labels           = np.asarray(self.data["labels"], dtype=np.int64).reshape(-1)
+        self.coords           = self.data.get("coords")
+        self.collate_fn       = self.data.get("collate_fn") 
         self.batch_size       = batch_size 
         self.compute_strategy = compute_strategy
         self.drop_last        = drop_last 
@@ -256,9 +256,13 @@ class SpatialEvaluator(OptunaEvaluator):
         else: 
             num_workers = min(self.compute_strategy.n_jobs, 2)
 
+        base       = getattr(dataset, "dataset", dataset) 
+        is_packed  = hasattr(base, "is_packed") and base.is_packed 
+        batch_size = 1 if is_packed else self.batch_size 
+
         return DataLoader(
             dataset, 
-            batch_size=self.batch_size,
+            batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin,
@@ -272,14 +276,44 @@ class SpatialEvaluator(OptunaEvaluator):
         idx         = np.arange(self.labels.shape[0])
         scores      = []
 
-        for train_idx, test_idx in splitter.split(idx, y_for_split): 
-            train_ds = Subset(self.dataset, train_idx)
-            test_ds  = Subset(self.dataset, test_idx)
+        is_packed   = getattr(self.dataset, "is_packed", False)
+
+        if is_packed: 
+            y        = self.data["sample_labels"]
+            groups   = self.data["sample_groups"]
+            splitter = StratifiedGroupKFold(
+                n_splits=self.config.n_splits,
+                shuffle=True,
+                random_state=self.config.random_state
+            )
+            splits   = splitter.split(np.zeros_like(y), y, groups)
+        else: 
+            y      = self.labels 
+            idx    = np.arange(len(y))
+            splits = self.config.get_splitter(self.task).split(idx, y)
+
+        for train_idx, test_idx in splits: 
+            if is_packed: 
+                train_packs = np.unique(groups[train_idx])
+                test_packs  = np.unique(groups[test_idx])
+                train_ds    = Subset(self.dataset, train_packs)
+                test_ds     = Subset(self.dataset, test_packs)
+            else: 
+                train_ds = Subset(self.dataset, train_idx)
+                test_ds  = Subset(self.dataset, test_idx)
 
             model = self.factory(collate_fn=self.collate_fn, **params) 
 
-            model.fit(train_ds, self.labels[train_idx])
-            val_loss = model.loss(test_ds)
+            if is_packed: 
+                train_loader = self._make_loader(train_ds, shuffle=True)
+                val_loader   = self._make_loader(test_ds, shuffle=False)
+
+                model.fit(train_loader, y=None, val_loader=val_loader)
+                val_loss = model.loss(val_loader)
+            else: 
+                model.fit(train_ds, self.labels[train_idx])
+                val_loss = model.loss(test_ds)
+
             scores.append(float(val_loss))
 
             del model 
@@ -775,8 +809,8 @@ def define_spatial_space(trial):
         "aligned": trial.suggest_categorical("aligned", [True, False]),
 
         # hardcoded 
-        "batch_size": 4,
-        "accum_steps": 4, 
+        "batch_size": 32,
+        "accum_steps": 1, 
         "kernel_size": 3,
         "pool_size": 2, 
         "use_bn": True,

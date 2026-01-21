@@ -6,13 +6,19 @@
 # supervised/unsupervised datasets for ues by models 
 # 
 
+import json
 
-from dataclasses import dataclass
 import numpy as np 
+
 import pandas as pd 
 
 from numpy.typing import NDArray
+
 from typing import Callable, Sequence, TypedDict, List, Any 
+
+from dataclasses import dataclass
+
+from pathlib import Path
 
 from scipy.io import loadmat
 
@@ -21,7 +27,7 @@ from utils.helpers import (
     align_on_fips
 )
 
-from preprocessing.tensors import SpatialLazyLoader
+from preprocessing.tensors import SpatialLazyLoader, SpatialPackedLoader
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -928,6 +934,10 @@ class SpatialDatasetDict(TypedDict):
     coords: NDArray
     sample_ids: NDArray[np.str_]
     collate_fn: Callable | None 
+    in_channels: int 
+    sample_labels: NDArray  
+    sample_ids_full: NDArray 
+    sample_groups: NDArray
 
 SpatialDatasetLoader = Callable[[str], SpatialDatasetDict]
 
@@ -938,10 +948,73 @@ def load_spatial_roi_manifest(
     tile_hw=None
 ) -> SpatialDatasetDict:
 
+    root     = Path(root_dir)
+    manifest = root / "manifest.jsonl"
+    records  = [
+        json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() 
+        if line.strip() 
+    ]
+    if not records: 
+        raise ValueError(f"empty manifest: {manifest}")
+
+    is_packed = "n_rois" in records[0]
+
+    if is_packed: 
+        ds = SpatialPackedLoader(root_dir)
+        
+        with np.load(root / records[0]["path"]) as npz: 
+            in_channels = int(npz["canvases"].shape[1])
+
+        def _collate_packed(batch): 
+            return batch[0]
+
+        pack_groups = []
+        all_labels  = []
+        all_fips    = []
+
+        for i, rec in enumerate(records): 
+            with np.load(root / rec["path"]) as npz: 
+                labels = np.asarray(npz["labels"]).reshape(-1)
+                fips   = np.asarray(npz["fips"], dtype="U5").reshape(-1)
+            all_labels.append(labels)
+            all_fips.append(fips)
+            pack_groups.append(np.full(labels.shape[0], i, dtype=np.int64))
+
+
+        labels_full = np.concatenate(all_labels) 
+        fips_full   = np.concatenate(all_fips)
+        groups_full = np.concatenate(pack_groups)
+
+
+        pack_labels = []
+        for labels in all_labels:
+            uniq, counts = np.unique(labels, return_counts=True)
+            pack_labels.append(uniq[int(counts.argmax())])
+
+        pack_labels = np.asarray(pack_labels, dtype=np.int64)
+        pack_ids    = np.asarray([f"pack_{i:05d}" for i in range(len(records))], dtype="U16") 
+
+        coords = np.zeros((0, 2), dtype=np.float64) # backwards compatible (useless)
+        
+        return {
+            "dataset": ds, 
+            "labels": pack_labels,
+            "coords": coords,
+            "sample_ids": pack_ids, 
+            "collate_fn": _collate_packed, 
+            "in_channels": in_channels,
+            "sample_labels": labels_full, 
+            "sample_ids_full": fips_full,
+            "sample_groups": groups_full
+        }
+
     ds     = SpatialLazyLoader(root_dir)
     labels = np.asarray([r["label"] for r in ds.records], dtype=np.int64)
     fips   = np.asarray([r["fips"] for r in ds.records], dtype="U5")
     coords = np.zeros((labels.shape[0], 2), dtype=np.float64)
+    
+    shape       = ds.records[0]["shape"]
+    in_channels = shape[0] if len(shape) == 3 else 1 
 
     def _collate(batch): 
         return SpatialLazyLoader.pack(batch, canvas_hw=canvas_hw, tile_hw=tile_hw)
@@ -951,5 +1024,6 @@ def load_spatial_roi_manifest(
         "labels": labels, 
         "coords": coords, 
         "sample_ids": fips, 
-        "collate_fn": _collate
+        "collate_fn": _collate,
+        "in_channels": in_channels
     }

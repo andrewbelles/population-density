@@ -14,11 +14,13 @@ from pathlib                   import Path
 
 from torch.utils.data          import Subset
 
-from umap import UMAP
+from umap                      import UMAP
 
-from scipy.io import savemat 
+from scipy.io                  import savemat 
 
 from sklearn.preprocessing     import StandardScaler
+
+from preprocessing.loaders     import load_spatial_roi_manifest
 
 from testbench.utils.paths     import (
     CONFIG_PATH,
@@ -31,8 +33,6 @@ from testbench.utils.data      import (
     make_roi_loader, 
     load_embedding_mat 
 )
-
-from sklearn.decomposition     import PCA
 
 from analysis.hyperparameter   import (
     ProjectorEvaluator,
@@ -48,7 +48,8 @@ from testbench.utils.config    import (
     cv_config,
     load_model_params,
     eval_config,
-    normalize_spatial_params
+    normalize_spatial_params,
+    with_spatial_channels
 )
 
 from testbench.utils.metrics   import OPT_TASK
@@ -64,8 +65,6 @@ from models.estimators         import (
     make_spatial_sfe,
     make_xgb_sfe 
 )
-
-from analysis.cross_validation import CVConfig 
 
 from utils.helpers             import (
     save_model_config,
@@ -185,8 +184,10 @@ def _spatial_opt(
     config_path: str = CONFIG_PATH,
     **_
 ): 
+    spatial = load_spatial_roi_manifest(root_dir, canvas_hw=canvas_hw)
     loader  = make_roi_loader(canvas_hw=canvas_hw) 
     factory = make_spatial_sfe(compute_strategy=strategy)
+    factory = with_spatial_channels(factory, spatial)
 
     evaluator = SpatialEvaluator(
         filepath=root_dir,

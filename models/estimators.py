@@ -462,27 +462,29 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         eval_fraction: float = 0.1,
         min_delta: float = 1e-4,
         batch_size: int = 2,
-        accum_steps: int = 8, 
+        accum_steps: int = 2, 
         shuffle: bool = True, 
         in_channels: int | None = None, 
+        categorical_input: bool = False, 
         collate_fn=None
     ): 
-        self.conv_channels   = conv_channels
-        self.kernel_size     = kernel_size
-        self.pool_size       = pool_size
-        self.fc_dim          = fc_dim
-        self.dropout         = dropout
-        self.use_bn          = use_bn
-        self.roi_output_size = roi_output_size
-        self.sampling_ratio  = sampling_ratio
-        self.aligned         = aligned
-        self.epochs          = epochs
-        self.lr              = lr
-        self.weight_decay    = weight_decay
-        self.random_state    = random_state
-        self.accum_steps     = accum_steps
-        self.in_channels     = in_channels
-        self.device          = self._resolve_device(compute_strategy.device)
+        self.conv_channels     = conv_channels
+        self.kernel_size       = kernel_size
+        self.pool_size         = pool_size
+        self.fc_dim            = fc_dim
+        self.dropout           = dropout
+        self.use_bn            = use_bn
+        self.roi_output_size   = roi_output_size
+        self.sampling_ratio    = sampling_ratio
+        self.aligned           = aligned
+        self.epochs            = epochs
+        self.lr                = lr
+        self.weight_decay      = weight_decay
+        self.random_state      = random_state
+        self.accum_steps       = accum_steps
+        self.in_channels       = in_channels
+        self.categorical_input = categorical_input
+        self.device            = self._resolve_device(compute_strategy.device)
 
         self.early_stopping_rounds = early_stopping_rounds 
         self.min_delta             = min_delta
@@ -523,13 +525,14 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         for batch in loader: 
             packed = batch[0]
-            self._build_model(in_channels=self.in_channels or packed.shape[1])
+            in_ch = self.in_channels or packed.shape[1]
+            self._build_model(in_channels=in_ch)
             break
 
         loss_fn       = WassersteinLoss(n_classes=self.n_classes_)
         self.loss_fn_ = loss_fn 
 
-        scaler = torch.cuda.amp.GradScaler(enabled=self.device.type == 'cuda')
+        scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
         opt     = torch.optim.AdamW(
             self.model_.parameters(),
@@ -554,7 +557,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             total_count = 0
 
             for step_idx, batch in enumerate(loader): 
-                with torch.cuda.amp.autocast(enabled=self.device.type == 'cuda'): 
+                with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
                     loss, bsz = self._process_batch(batch)
                     total_loss += loss.item() * bsz 
                     total_count += bsz
@@ -647,13 +650,17 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
     def _make_loader(self, dataset, shuffle: bool): 
         pin = self.compute_strategy.device == "cuda" 
         if self.compute_strategy.n_jobs == -1: 
-            num_workers = 6 
+            num_workers = 8 
         else: 
             num_workers = self.compute_strategy.n_jobs
 
+        base       = getattr(dataset, "dataset", dataset)
+        is_packed  = hasattr(base, "is_packed") and base.is_packed  
+        batch_size = 1 if is_packed else self.batch_size 
+
         return DataLoader(
             dataset, 
-            batch_size=self.batch_size,
+            batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin,
@@ -707,6 +714,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         self.backbone_ = SpatialBackbone(
             in_channels=in_channels,
+            categorical_input=self.categorical_input,
             conv_channels=self.conv_channels,
             kernel_size=self.kernel_size,
             pool_size=self.pool_size,

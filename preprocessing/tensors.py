@@ -23,7 +23,7 @@ from rasterio.errors import WindowError
 from utils.helpers import project_path 
 
 # --------------------------------------------------------
-# Lazy Loader for batch collating 
+# Tensor Loaders. Pre-packed and Lazy Loader  
 # --------------------------------------------------------
 
 class SpatialLazyLoader: 
@@ -31,9 +31,10 @@ class SpatialLazyLoader:
     Loads saved spatial samples (VIIRS, NLCD, TIGER) and packs into ROI canvases.
     '''
     def __init__(self, root_dir: str): 
-        self.root_dir = Path(root_dir)
-        manifest      = self.root_dir / "manifest.jsonl"
-        self.records  = [
+        self.is_packed = False 
+        self.root_dir  = Path(root_dir)
+        manifest       = self.root_dir / "manifest.jsonl"
+        self.records   = [
             json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
@@ -128,6 +129,46 @@ class SpatialLazyLoader:
                 if tile_mask.sum() == 0: 
                     continue 
                 yield tile, tile_mask 
+
+
+class SpatialPackedLoader: 
+    '''
+    Loads pre-packed canvases created by SpatialTensorDataset.save_packed. 
+    Each item contains full batch-ready tensors and ROI metadata 
+    '''
+
+    def __init__(self, root_dir: str): 
+        self.is_packed = True 
+        self.root_dir  = Path(root_dir)
+        manifest       = self.root_dir / "manifest.jsonl"
+        self.records   = [
+            json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() 
+            if line.strip() 
+        ]
+
+    def __len__(self): 
+        return len(self.records)
+
+    def __getitem__(self, idx): 
+        rec = self.records[idx]
+        with np.load(self.root_dir / rec["path"]) as npz: 
+            canvases      = npz["canvases"]
+            masks         = npz["masks"]
+            rois          = npz["rois"]
+            labels        = npz["labels"]
+            fips          = npz["fips"]
+            group_ids     = npz["group_ids"]
+            group_weights = npz["group_weights"]
+
+        return (
+            canvases, 
+            masks, 
+            rois.tolist(),
+            labels,
+            list(fips),
+            group_ids, 
+            group_weights 
+        )
 
 # ---------------------------------------------------------
 # Tensor Dataset Parent Class 
@@ -227,6 +268,79 @@ class SpatialTensorDataset(ABC):
 
         print(f"[save] wrote {len(records)} samples to {out_dir} (manifest: {manifest_path})")
 
+    def save_packed(
+        self,
+        out_dir, 
+        pack_batch: int = 8,
+        canvas_hw=(512, 512),
+        tile_hw=None,
+        gap: int = 32,
+        weight_by_mask: bool = True 
+    ):
+        out_dir    = Path(out_dir)
+        packed_dir = out_dir / "packed" 
+        packed_dir.mkdir(parents=True, exist_ok=True)
+        
+        batch    = []
+        records  = []
+        t0       = time.perf_counter() 
+        last     = t0
+        pack_idx = 0
+        count    = 0 
+
+        for rec in self._iter_samples(): 
+            spatial, mask, label, fips = rec["spatial"], rec["mask"], int(rec["label"]), rec["fips"]
+
+            if self.tight_crop: 
+                spatial, mask = self._tight_crop(spatial, mask)
+
+            if spatial.size == 0: 
+                continue 
+
+            batch.append((spatial, mask, label, fips))
+            count += 1 
+
+            if len(batch) >= pack_batch: 
+                meta = self._flush_pack(
+                    batch, pack_idx, out_dir, 
+                    canvas_hw=canvas_hw,
+                    tile_hw=tile_hw,
+                    gap=gap,
+                    weight_by_mask=weight_by_mask
+                )
+                records.append(meta)
+                pack_idx += 1 
+                batch = []
+
+            if count % 250 == 0: 
+                now = time.perf_counter()
+                print(
+                    f"[save] {count} samples | +{now - last:.2f}s | total {now - t0:.2f}s",
+                    file=sys.stderr,
+                    flush=True
+                )
+                last = now 
+
+            if self.max_counties is not None and count >= self.max_counties: 
+                break 
+
+        if batch:
+            meta = self._flush_pack(
+                batch, pack_idx, out_dir, 
+                canvas_hw=canvas_hw,
+                tile_hw=tile_hw,
+                gap=gap,
+                weight_by_mask=weight_by_mask
+            )
+            records.append(meta)
+
+        manifest_path = out_dir / "manifest.jsonl"
+        with manifest_path.open("w", encoding="utf-8") as f: 
+            for r in records: 
+                f.write(json.dumps(r) + "\n")
+
+        print(f"[save_packed] wrote {len(records)} packs to {out_dir} (manifest: {manifest_path})")
+
     def _load_labels(self) -> Dict[str, int]: 
         path = Path(self.labels_path)
         if not path.exists(): 
@@ -292,6 +406,45 @@ class SpatialTensorDataset(ABC):
 
         imageio.imwrite(out_dir / f"fips_{fips}_spatial.png", spatial_u8)
         imageio.imwrite(out_dir / f"fips_{fips}_mask.png", mask_u8)
+
+    @staticmethod 
+    def _flush_pack(
+        batch,
+        pack_idx: int,
+        out_dir: Path,
+        *,
+        canvas_hw=(512, 512),
+        tile_hw=None,
+        gap: int = 32, 
+        weight_by_mask: bool = True 
+    ) -> dict: 
+        packed = SpatialLazyLoader.pack(
+            batch, 
+            canvas_hw=canvas_hw,
+            tile_hw=tile_hw,
+            gap=gap,
+            weight_by_mask=weight_by_mask
+        )
+        canvases, masks, rois, labels, fips, group_ids, group_weights = packed 
+        out_path = out_dir / "packed" / f"pack_{pack_idx:05d}.npz"
+        np.savez_compressed(
+            out_path,
+            canvases=canvases.astype(np.float32),
+            masks=masks.astype(np.uint8),
+            rois=np.asarray(rois, dtype=np.int32),
+            labels=np.asarray(labels, dtype=np.int64),
+            fips=np.asarray(fips),
+            group_ids=np.asarray(group_ids, dtype=np.int64),
+            group_weights=np.asarray(group_weights, dtype=np.float32)
+        )
+
+        return {
+            "path": str(out_path.relative_to(out_dir)),
+            "n_samples": int(len(labels)),
+            "n_canvases": int(canvases.shape[0]),
+            "n_rois": int(len(rois))
+        }
+
 
     @staticmethod 
     def _tight_crop(data, mask): 
@@ -517,6 +670,7 @@ def main():
     parser.add_argument("--no-log-scale", action="store_true")
     parser.add_argument("--skip-viirs", action="store_true")
     parser.add_argument("--skip-nlcd", action="store_true")
+    parser.add_argument("--packed", action="store_true")
     args = parser.parse_args()
 
     out_root  = Path(args.out_root)
@@ -533,7 +687,7 @@ def main():
             log_scale=not args.no_log_scale,
             debug_png_dir=args.debug_png_dir
         )
-        viirs.save(viirs_out)
+        viirs.save(viirs_out) if not args.packed else viirs.save_packed(viirs_out)
 
     if not args.skip_nlcd: 
         nlcd = NlcdTensorDataset(
@@ -542,7 +696,7 @@ def main():
             labels_path=args.labels_path,
             debug_png_dir=args.debug_png_dir
         )
-        nlcd.save(nlcd_out)
+        nlcd.save(nlcd_out) if not args.packed else nlcd.save_packed(nlcd_out)
 
 
 if __name__ == "__main__": 

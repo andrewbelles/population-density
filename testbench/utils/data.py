@@ -335,4 +335,10 @@ def load_embedding_mat(path: str):
 
 def load_spatial_dataset(root_dir: str, canvas_hw: tuple[int, int]): 
     data = make_roi_loader(canvas_hw=canvas_hw)(root_dir)
-    return data["dataset"], data["labels"], data["sample_ids"], data["collate_fn"]
+    return (
+        data["dataset"], 
+        data["labels"], 
+        data["sample_ids"], 
+        data["collate_fn"], 
+        data["in_channels"]
+    )

@@ -64,9 +64,8 @@ pkgs.mkShell {
     echo "[NIX-SHELL] Installing remaining packages via pip"
     pip install --upgrade pip
 
-    python -m pip install torch torchvision torchaudio torch-sparse \
-      torch-sparse torch-cluster torch-spline-conv \
-      --index-url https://download.pytorch.org/whl/cu121
+    python -m pip install torch torchvision torchaudio \
+      --index-url https://download.pytorch.org/whl/cu124
 
     python -m pip install torch-geometric 
 
@@ -81,6 +80,13 @@ pkgs.mkShell {
 
     echo "[NIX-SHELL] creating project directories outside git repo"
     mkdir -p data/climate data/census data/geography 
+
+    echo "[NIX-SHELL] injecting python development headers"
+    PYTHON_INC=$(${pkgs.python312}/bin/python -c "import sysconfig; \
+      print(sysconfig.get_paths()['include'])")
+    export C_INCLUDE_PATH="$PYTHON_INC:''${C_INCLUDE_PATH:-}"
+    export CPLUS_INCLUDE_PATH="$PYTHON_INC:''${CPLUS_INCLUDE_PATH:-}"
+    export TRITON_LIBCUDA_PATH="/run/opengl-driver/lib"
 
     echo "[NIX-SHELL] Injecting pybind11 include path into .clangd"
     PYBIND11_INC=$(${pkgs.python312}/bin/python -c "import pybind11; print(pybind11.get_include())")

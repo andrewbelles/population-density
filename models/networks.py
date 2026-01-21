@@ -49,6 +49,7 @@ class SpatialBackbone(nn.Module):
     def __init__(
         self,
         in_channels: int, 
+        categorical_input: bool = False, 
         conv_channels: tuple[int, ...] = (32, 64, 128),
         kernel_size: int = 3, 
         pool_size: int = 2, 
@@ -68,13 +69,16 @@ class SpatialBackbone(nn.Module):
             layers.append(_conv_block(ch, out_ch, kernel_size, pool_size, use_bn))
             ch = out_ch 
 
-        self.net             = nn.Sequential(*layers)
+        self.net               = nn.Sequential(*layers)
+
         if hasattr(torch, "compile"):
-            self.net         = torch.compile(self.net)
-        self.out_dim         = conv_channels[-1] * 2 # avg + max concat  
-        self.roi_output_size = roi_output_size
-        self.sampling_ratio  = sampling_ratio 
-        self.aligned         = aligned 
+            self.net           = torch.compile(self.net)
+
+        self.out_dim           = conv_channels[-1] * 2 # avg + max concat  
+        self.roi_output_size   = roi_output_size
+        self.sampling_ratio    = sampling_ratio 
+        self.aligned           = aligned 
+        self.categorical_input = categorical_input
 
 
     def forward(
@@ -86,34 +90,56 @@ class SpatialBackbone(nn.Module):
 
         MICRO_BATCH_SIZE = 64 
         n_tiles          = x.shape[0]
-        feat_chunks      = []
-
-
-        def run_chunk(chunk): 
-
-            if chunk.shape[1] == 1 and self.net[0][0].in_channels > 1: 
-                x_idx    = chunk.squeeze(1).long() 
-                x_onehot = F.one_hot(x_idx, num_classes=self.net[0][0].in_channels + 1)
-                chunk  = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
-
-            return self.net(chunk) 
-        
-        for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
-
-            x_chunk = x[i:i+MICRO_BATCH_SIZE] 
-
-            if self.training: 
-                feat_chunk = cp.checkpoint(run_chunk, x_chunk, use_reentrant=True) 
-            else: 
-                feat_chunk = self._forward_chunk(x_chunk) 
-
-            feat_chunks.append(feat_chunk) 
-
-        feats = torch.cat(feat_chunks, dim=0) 
 
         if rois is None: 
-            return self.global_pool(feats, mask, x)
-        return self.roi_pool(feats, mask, rois, x)
+            pooled_chunks = []
+            for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
+                x_chunk = x[i:i+MICRO_BATCH_SIZE] 
+                m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
+
+                if self.training and x_chunk.requires_grad: 
+                    feat_chunk = cp.checkpoint(self._run_chunk, x_chunk, use_reentrant=True) 
+                else: 
+                    feat_chunk = self._run_chunk(x_chunk) 
+
+                if not isinstance(feat_chunk, torch.Tensor): 
+                    raise TypeError 
+                pooled = self._global_pool_chunk(feat_chunk, m_chunk, x_chunk)
+                pooled_chunks.append(pooled)
+            
+            if not pooled_chunks: 
+                return x.new_zeros((0, self.out_dim))
+            return torch.cat(pooled_chunks, dim=0)
+
+        rois_t = self.rois_to_tensor(rois, x.device)
+        if rois_t.numel() == 0: 
+            return x.new_zeros((0, self.out_dim))
+
+        b_idx   = rois_t[:, 0].long() 
+        outputs = x.new_zeros((rois_t.size(0), self.out_dim))
+
+        for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
+            x_chunk = x[i:i+MICRO_BATCH_SIZE] 
+            m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
+
+            sel = (b_idx >= i) & (b_idx < i + MICRO_BATCH_SIZE)
+            if not sel.any(): 
+                continue 
+
+            rois_chunk = rois_t[sel].clone() 
+            rois_chunk[:, 0] -= i 
+
+            if self.training and x_chunk.requires_grad: 
+                feat_chunk = cp.checkpoint(self._run_chunk, x_chunk, use_reentrant=True) 
+            else: 
+                feat_chunk = self._run_chunk(x_chunk) 
+
+            if not isinstance(feat_chunk, torch.Tensor): 
+                raise TypeError 
+            pooled = self._roi_pool_chunk(feat_chunk, m_chunk, rois_chunk, x_chunk)
+            outputs[sel] = pooled 
+    
+        return outputs
 
     def global_pool(
         self, 
@@ -125,17 +151,15 @@ class SpatialBackbone(nn.Module):
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
         return self.masked_avgmax(feats, m)
 
-    def roi_pool(
+    def _roi_pool_chunk(
         self, 
         feats: torch.Tensor, 
         mask: torch.Tensor | None, 
-        rois, 
+        rois: torch.Tensor, 
         x: torch.Tensor
     ) -> torch.Tensor: 
-        rois_t = self.rois_to_tensor(rois, feats.device)
-        if rois_t.numel() == 0: 
+        if rois.numel() == 0: 
             return feats.new_zeros((0, self.out_dim))
-
 
         scale_h = feats.shape[-2] / x.shape[-2] 
         scale_w = feats.shape[-1] / x.shape[-1] 
@@ -145,7 +169,7 @@ class SpatialBackbone(nn.Module):
     
         pooled = tops.roi_align(
             feats, 
-            rois_t, 
+            rois, 
             output_size=self.roi_output_size,
             spatial_scale=spatial_scale,
             sampling_ratio=self.sampling_ratio,
@@ -155,7 +179,7 @@ class SpatialBackbone(nn.Module):
         m = self.prep_mask(x, mask)
         mask_pooled = tops.roi_align(
             m,
-            rois_t,
+            rois,
             output_size=self.roi_output_size,
             spatial_scale=spatial_scale,
             sampling_ratio=self.sampling_ratio,
@@ -164,6 +188,25 @@ class SpatialBackbone(nn.Module):
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
 
         return self.masked_avgmax(pooled, mask_pooled)
+
+    def _run_chunk(self, chunk): 
+
+        if self.categorical_input and chunk.shape[1] == 1: 
+            x_idx    = chunk.squeeze(1).long().clamp_min(0) 
+            x_onehot = F.one_hot(x_idx, num_classes=self.model_in_channels + 1)
+            chunk  = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
+
+        return self.net(chunk) 
+
+    def _global_pool_chunk(
+        self,
+        feats: torch.Tensor, 
+        mask: torch.Tensor | None, 
+        x: torch.Tensor 
+    ) -> torch.Tensor: 
+        m = self.prep_mask(x, mask)
+        m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
+        return self.masked_avgmax(feats, m)
 
     @staticmethod 
     def prep_mask(

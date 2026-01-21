@@ -65,7 +65,11 @@ def normalize_spatial_params(params, *, random_state: int, collate_fn):
     params.setdefault("collate_fn", collate_fn)
     params.setdefault("early_stopping_rounds", 15)
     params.setdefault("eval_fraction", 0.15)
-    params.setdefault("min_delta, 1e-3")
+    params.setdefault("min_delta", 1e-3)
     params.setdefault("batch_size", 32)
-    params.setdefault("accum_steps", 2) 
+    params.setdefault("accum_steps", 1) 
     return params 
+
+def with_spatial_channels(factory, spatial_data): 
+    in_ch = spatial_data.get("in_channels")
+    return lambda **p: factory(in_channels=in_ch, **p)
