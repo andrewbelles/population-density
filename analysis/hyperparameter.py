@@ -252,13 +252,23 @@ class SpatialEvaluator(OptunaEvaluator):
     def _make_loader(self, dataset, shuffle: bool): 
         pin = self.compute_strategy.device == "cuda" 
         if self.compute_strategy.n_jobs == -1: 
-            num_workers = 2 
+            num_workers = 8 
         else: 
-            num_workers = min(self.compute_strategy.n_jobs, 2)
+            num_workers = self.compute_strategy.n_jobs
 
-        base       = getattr(dataset, "dataset", dataset) 
-        is_packed  = hasattr(base, "is_packed") and base.is_packed 
+        base       = getattr(dataset, "dataset", dataset)
+        is_packed  = hasattr(base, "is_packed") and base.is_packed  
+
+        worker_override = getattr(base, "prefetch_workers", None)
+        if worker_override is not None: 
+            num_workers = int(worker_override)
+
         batch_size = 1 if is_packed else self.batch_size 
+
+        prefetch_factor = 4 if num_workers > 0 else None 
+        pf_override     = getattr(base, "prefetch_factor", None)
+        if pf_override is not None and num_workers > 0: 
+            prefetch_factor = int(pf_override)
 
         return DataLoader(
             dataset, 
@@ -266,8 +276,9 @@ class SpatialEvaluator(OptunaEvaluator):
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin,
-            drop_last=self.drop_last,
-            collate_fn=self.collate_fn
+            collate_fn=self.collate_fn,
+            persistent_workers=(num_workers > 0), 
+            prefetch_factor=prefetch_factor  
         )
 
     def evaluate(self, params: Dict[str, Any]) -> float:

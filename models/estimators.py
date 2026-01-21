@@ -545,6 +545,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         patience   = 0 
         run_es     = self.early_stopping_rounds is not None and val_loader is not None 
 
+        start      = time.perf_counter()
         for ep in range(self.epochs): 
             t0 = time.perf_counter()
             self.model_.train() 
@@ -590,8 +591,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                         break 
 
             avg_loss = total_loss / max(total_count, 1)
-            dt       = time.perf_counter() - t0 
-            msg      = f"[epoch {ep}] {dt:.2f}s, training_loss={avg_loss:.4f}"
+            avg_dt   = (time.perf_counter() - start) / (ep + 1)
+            msg      = f"[epoch {ep}] {avg_dt:.2f}s avg, training_loss={avg_loss:.4f}"
             if ep % 5 == 0: 
                 if val_loss is not None: 
                     msg += f" val_loss={val_loss:.4f}"

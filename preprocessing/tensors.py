@@ -155,8 +155,13 @@ class SpatialPackedLoader:
                 max_items=(cache_items if cache_items > 0 else None)
             )
 
-        self.prefetch_workers = 1 
+        self.prefetch_workers = 0 
         self.prefetch_factor  = 4
+
+        # cache metadata 
+        self._cache_reads  = 0 
+        self._cache_hits   = 0 
+        self._cache_misses = 0
 
     def __len__(self): 
         return len(self.records)
@@ -165,9 +170,18 @@ class SpatialPackedLoader:
         rec = self.records[idx]
         key = rec["path"]
 
+        self._cache_reads += 1 
+        if self.cache is not None and self._cache_reads % 1000 == 0: 
+            hit_rate     = self._cache_hits / max(self._cache_reads, 1)
+            cached_items = len(self.cache.data)
+            cached_mb    = (self.cache.total / (1024**2))
+            print(f"[cache] reads={self._cache_reads}, hit_rate={hit_rate:.2f}% "
+                  f"items={cached_items} cache_mb={cached_mb:.1f}", file=sys.stderr)
+
         if self.cache is not None: 
             hit = self.cache.get(key)
             if hit is not None: 
+                self._cache_hits += 1 
                 canvases, masks, rois, labels, fips, group_ids, group_weights = hit 
                 return (
                     canvases, 
@@ -178,6 +192,8 @@ class SpatialPackedLoader:
                     group_ids, 
                     group_weights 
                 )
+            else: 
+                self._cache_misses += 1 
 
         with np.load(self.root_dir / rec["path"]) as npz: 
             canvases      = npz["canvases"]

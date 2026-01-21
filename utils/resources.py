@@ -41,8 +41,8 @@ class LRUCache:
     def _sizeof(self, value) -> int: 
         size = 0 
         for arr in value: 
-            if hasattr(arr, "nbtyes"): 
-                size += int(arr.nbtyes)
+            if hasattr(arr, "nbytes"): 
+                size += int(arr.nbytes)
         return size 
 
     def _evict(self): 
