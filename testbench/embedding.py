@@ -224,6 +224,7 @@ def _spatial_extract(
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     proj_trials: int = 50,
+    in_channels: int = 1, 
     **_
 ): 
     ds, labels, fips, collate_fn = load_spatial_dataset(root_dir, canvas_hw)
@@ -232,7 +233,11 @@ def _spatial_extract(
     params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
 
     splitter      = eval_config().get_splitter(OPT_TASK) 
-    model_factory = lambda: SpatialClassifier(compute_strategy=strategy, **params)
+    model_factory = lambda: SpatialClassifier(
+        in_channels=in_channels, 
+        compute_strategy=strategy, 
+        **params
+    )
 
     projector     = _projector_fold_factory(
         f"{model_key}_Projector",
@@ -474,7 +479,8 @@ def test_viirs_extract(
         canvas_hw=canvas_hw,
         random_state=random_state,
         config_path=config_path,
-        proj_trials=proj_trials
+        proj_trials=proj_trials,
+        in_channels=1
     )
 
 def test_nlcd_opt(
@@ -516,7 +522,8 @@ def test_nlcd_extract(
         canvas_hw=canvas_hw,
         random_state=random_state,
         config_path=config_path,
-        proj_trials=proj_trials
+        proj_trials=proj_trials,
+        in_channels=7
     )
 
 # ---------------------------------------------------------

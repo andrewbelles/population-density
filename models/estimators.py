@@ -464,6 +464,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         batch_size: int = 16,
         accum_steps: int = 4, 
         shuffle: bool = True, 
+        in_channels: int | None = None, 
         collate_fn=None
     ): 
         self.conv_channels   = conv_channels
@@ -480,6 +481,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.weight_decay    = weight_decay
         self.random_state    = random_state
         self.accum_steps     = accum_steps
+        self.in_channels     = in_channels
         self.device          = self._resolve_device(compute_strategy.device)
 
         self.early_stopping_rounds = early_stopping_rounds 
@@ -521,7 +523,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         for batch in loader: 
             packed = batch[0]
-            self._build_model(in_channels=packed.shape[1])
+            self._build_model(in_channels=self.in_channels or packed.shape[1])
             break
 
         loss_fn       = WassersteinLoss(n_classes=self.n_classes_)

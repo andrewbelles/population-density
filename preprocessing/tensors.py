@@ -6,7 +6,7 @@
 # canvas counties together so that they are on uniform images for SpatialClassifier to use. 
 # 
 
-import imageio, fiona, csv, json, rasterio, rasterio.mask, argparse, sys 
+import imageio, fiona, csv, json, rasterio, rasterio.mask, argparse, sys, time 
 
 import numpy as np 
 
@@ -98,7 +98,7 @@ class SpatialLazyLoader:
                         break 
 
                 if not placed: 
-                    canvas      = np.zeros((spatial.shape[0], H, W), dtype=np.float32)
+                    canvas      = np.zeros((spatial.shape[0], H, W), dtype=spatial.dtype)
                     mask_canvas = np.zeros((1, H, W), dtype=np.uint8)
                     canvas[:, :h, :w]      = tile 
                     mask_canvas[0, :h, :w] = tile_mask
@@ -173,6 +173,8 @@ class SpatialTensorDataset(ABC):
         sample_dir.mkdir(parents=True, exist_ok=True)
 
         records = []
+        t0      = time.perf_counter() 
+        last    = t0
         count   = 0 
         for rec in self._iter_samples(): 
             fips    = rec["fips"]
@@ -207,6 +209,14 @@ class SpatialTensorDataset(ABC):
                 self._write_debug_png(fips, spatial, mask)
 
             count += 1 
+            if count % 250 == 0: 
+                now = time.perf_counter()
+                print(
+                    f"[save] {count} samples | +{now - last:.2f}s | total {now - t0:.2f}s",
+                    file=sys.stderr,
+                    flush=True
+                )
+                last = now 
             if self.max_counties is not None and count >= self.max_counties: 
                 break 
 
@@ -441,14 +451,12 @@ class NlcdTensorDataset(SpatialTensorDataset):
         lut = {}
         for idx, codes in enumerate(groups.values()): 
             for c in codes: 
-                lut[int(c)] = idx 
+                lut[int(c)] = idx + 1 
         return lut 
 
     def _iter_samples(self): 
         if self.raster_path is None: 
             raise ValueError("nlcd_path is required")
-
-        n_channels = len(self.channel_groups)
 
         with rasterio.open(self.raster_path) as src: 
             nodata = src.nodata 
@@ -476,9 +484,9 @@ class NlcdTensorDataset(SpatialTensorDataset):
                     data[~valid_mask] = -1 
 
                     H, W = data.shape 
-                    spatial = np.zeros((n_channels, H, W), dtype=np.float32)
+                    spatial = np.zeros((H, W), dtype=np.uint8)
                     for code, ch in self._lut.items():
-                        spatial[ch] = (data == code).astype(np.float32)
+                        spatial[data == code] = ch
 
                     yield {
                         "fips": fips,

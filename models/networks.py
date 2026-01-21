@@ -75,6 +75,11 @@ class SpatialBackbone(nn.Module):
         mask: torch.Tensor | None = None,
         rois: list[tuple[int, int, int, int, int]] | None = None 
     ) -> torch.Tensor: 
+        if x.shape[1] == 1 and self.net[0][0].in_channels > 1: 
+            x_idx    = x.squeeze(1).long() 
+            x_onehot = F.one_hot(x_idx, num_classes=self.net[0][0].in_channels + 1)
+            x        = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
+
         feats = self.net(x)
         if rois is None: 
             return self.global_pool(feats, mask, x)
