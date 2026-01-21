@@ -15,6 +15,9 @@ NUM_GPUS=0
 JOBS=1 
 CMD=()
 
+export TOPG_PACK_CACHE_MB=2048 
+export TOPG_PACK_CACHE_ITEMS=200
+
 usage() {
   cat << 'EOF'
 usage: 

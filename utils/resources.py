@@ -10,6 +10,50 @@ import os, torch
 
 from dataclasses import dataclass 
 
+from collections import OrderedDict 
+
+
+class LRUCache: 
+    def __init__(
+        self, 
+        *,
+        max_bytes: int | None = None, 
+        max_items: int | None = None 
+    ): 
+        self.max_bytes = max_bytes 
+        self.max_items = max_items 
+        self.total     = 0 
+        self.data      = OrderedDict()
+
+    def get(self, key): 
+        if key not in self.data: 
+            return None 
+        val, size = self.data.pop(key)
+        self.data[key] = (val, size)
+        return val 
+
+    def put(self, key, value): 
+        size = self._sizeof(value)
+        self.data[key] = (value, size)
+        self.total += size 
+        self._evict() 
+
+    def _sizeof(self, value) -> int: 
+        size = 0 
+        for arr in value: 
+            if hasattr(arr, "nbtyes"): 
+                size += int(arr.nbtyes)
+        return size 
+
+    def _evict(self): 
+        while True: 
+            too_many = self.max_items is not None and len(self.data) > self.max_items 
+            too_big  = self.max_bytes is not None and self.total > self.max_bytes 
+            if not (too_many or too_big): 
+                break 
+            _, (_, size) = self.data.popitem(last=False)
+            self.total -= size 
+
 @dataclass 
 class ComputeStrategy: 
     device: str 

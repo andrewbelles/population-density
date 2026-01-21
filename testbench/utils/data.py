@@ -320,9 +320,18 @@ def make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size):
 
     return _adapter 
 
-def make_roi_loader(canvas_hw=(512, 512)): 
+def make_roi_loader(
+    canvas_hw: tuple[int, int] = (512, 512), 
+    cache_mb: int | None = None, 
+    cache_items: int | None = None
+): 
     def _loader(path): 
-        return load_spatial_roi_manifest(path, canvas_hw=canvas_hw)
+        return load_spatial_roi_manifest(
+            path, 
+            canvas_hw=canvas_hw,
+            cache_mb=cache_mb,
+            cache_items=cache_items
+        )
     return _loader 
 
 def load_embedding_mat(path: str): 

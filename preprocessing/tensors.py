@@ -22,6 +22,8 @@ from rasterio.errors import WindowError
 
 from utils.helpers import project_path 
 
+from utils.resources import LRUCache
+
 # --------------------------------------------------------
 # Tensor Loaders. Pre-packed and Lazy Loader  
 # --------------------------------------------------------
@@ -137,7 +139,7 @@ class SpatialPackedLoader:
     Each item contains full batch-ready tensors and ROI metadata 
     '''
 
-    def __init__(self, root_dir: str): 
+    def __init__(self, root_dir: str, *, cache_mb: int = 0, cache_items: int = 0): 
         self.is_packed = True 
         self.root_dir  = Path(root_dir)
         manifest       = self.root_dir / "manifest.jsonl"
@@ -146,11 +148,37 @@ class SpatialPackedLoader:
             if line.strip() 
         ]
 
+        self.cache = None 
+        if cache_mb > 0 or cache_items > 0: 
+            self.cache = LRUCache(
+                max_bytes=(cache_mb * 1024 * 1024) if cache_mb > 0 else None, 
+                max_items=(cache_items if cache_items > 0 else None)
+            )
+
+        self.prefetch_workers = 1 
+        self.prefetch_factor  = 4
+
     def __len__(self): 
         return len(self.records)
 
     def __getitem__(self, idx): 
         rec = self.records[idx]
+        key = rec["path"]
+
+        if self.cache is not None: 
+            hit = self.cache.get(key)
+            if hit is not None: 
+                canvases, masks, rois, labels, fips, group_ids, group_weights = hit 
+                return (
+                    canvases, 
+                    masks, 
+                    rois.tolist(),
+                    labels,
+                    list(fips),
+                    group_ids, 
+                    group_weights 
+                )
+
         with np.load(self.root_dir / rec["path"]) as npz: 
             canvases      = npz["canvases"]
             masks         = npz["masks"]
@@ -159,6 +187,9 @@ class SpatialPackedLoader:
             fips          = npz["fips"]
             group_ids     = npz["group_ids"]
             group_weights = npz["group_weights"]
+
+        if self.cache is not None: 
+            self.cache.put(key, (canvases, masks, rois, labels, fips, group_ids, group_weights))
 
         return (
             canvases, 
@@ -671,6 +702,7 @@ def main():
     parser.add_argument("--skip-viirs", action="store_true")
     parser.add_argument("--skip-nlcd", action="store_true")
     parser.add_argument("--packed", action="store_true")
+    parser.add_argument("--pack-size", type=int, default=8)
     args = parser.parse_args()
 
     out_root  = Path(args.out_root)
@@ -687,7 +719,10 @@ def main():
             log_scale=not args.no_log_scale,
             debug_png_dir=args.debug_png_dir
         )
-        viirs.save(viirs_out) if not args.packed else viirs.save_packed(viirs_out)
+        viirs.save(viirs_out) if not args.packed else viirs.save_packed(
+            viirs_out,
+            pack_batch=args.pack_size 
+        )
 
     if not args.skip_nlcd: 
         nlcd = NlcdTensorDataset(
@@ -696,7 +731,10 @@ def main():
             labels_path=args.labels_path,
             debug_png_dir=args.debug_png_dir
         )
-        nlcd.save(nlcd_out) if not args.packed else nlcd.save_packed(nlcd_out)
+        nlcd.save(nlcd_out) if not args.packed else nlcd.save_packed(
+            nlcd_out,
+            pack_batch=args.pack_size 
+        )
 
 
 if __name__ == "__main__": 

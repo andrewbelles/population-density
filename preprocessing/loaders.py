@@ -6,7 +6,7 @@
 # supervised/unsupervised datasets for ues by models 
 # 
 
-import json
+import json, os 
 
 import numpy as np 
 
@@ -945,7 +945,9 @@ def load_spatial_roi_manifest(
     root_dir: str, 
     *, 
     canvas_hw=(512, 512), 
-    tile_hw=None
+    tile_hw=None,
+    cache_mb: int | None = None, 
+    cache_items: int | None = None 
 ) -> SpatialDatasetDict:
 
     root     = Path(root_dir)
@@ -960,7 +962,12 @@ def load_spatial_roi_manifest(
     is_packed = "n_rois" in records[0]
 
     if is_packed: 
-        ds = SpatialPackedLoader(root_dir)
+        if cache_mb is None: 
+            cache_mb    = int(os.environ.get("TOPG_PACK_CACHE_MB", "0"))
+        if cache_items is None: 
+            cache_items = int(os.environ.get("TOPG_PACK_CACHE_ITEMS", "0"))
+
+        ds = SpatialPackedLoader(root_dir, cache_mb=cache_mb, cache_items=cache_items)
         
         with np.load(root / records[0]["path"]) as npz: 
             in_channels = int(npz["canvases"].shape[1])
