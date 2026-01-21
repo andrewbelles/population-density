@@ -276,10 +276,15 @@ class SpatialTensorDataset(ABC):
             if spatial.size == 0:
                 continue 
 
+            if np.issubdtype(spatial.dtype, np.floating): 
+                spatial_out = spatial.astype(np.float32, copy=False) 
+            else: 
+                spatial_out = spatial 
+
             out_path = sample_dir / f"fips_{fips}.npz"
             np.savez_compressed(
                 out_path,
-                spatial=spatial.astype(np.float32),
+                spatial=spatial_out,
                 mask=mask.astype(np.uint8),
                 label=np.int64(label),
                 fips=fips
@@ -474,9 +479,15 @@ class SpatialTensorDataset(ABC):
         )
         canvases, masks, rois, labels, fips, group_ids, group_weights = packed 
         out_path = out_dir / "packed" / f"pack_{pack_idx:05d}.npz"
+
+        if np.issubdtype(canvases.dtype, np.floating): 
+            canvases_out = canvases.astype(np.float32, copy=False) 
+        else: 
+            canvases_out = canvases
+
         np.savez_compressed(
             out_path,
-            canvases=canvases.astype(np.float32),
+            canvases=canvases_out,
             masks=masks.astype(np.uint8),
             rois=np.asarray(rois, dtype=np.int32),
             labels=np.asarray(labels, dtype=np.int64),

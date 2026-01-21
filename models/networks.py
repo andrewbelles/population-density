@@ -50,6 +50,8 @@ class SpatialBackbone(nn.Module):
         self,
         in_channels: int, 
         categorical_input: bool = False, 
+        categorical_embed_dim: int = 4,
+        categorical_cardinality: int | None = None, 
         conv_channels: tuple[int, ...] = (32, 64, 128),
         kernel_size: int = 3, 
         pool_size: int = 2, 
@@ -74,11 +76,24 @@ class SpatialBackbone(nn.Module):
         if hasattr(torch, "compile"):
             self.net           = torch.compile(self.net)
 
-        self.out_dim           = conv_channels[-1] * 2 # avg + max concat  
-        self.roi_output_size   = roi_output_size
-        self.sampling_ratio    = sampling_ratio 
-        self.aligned           = aligned 
-        self.categorical_input = categorical_input
+        self.out_dim         = conv_channels[-1] * 2 # avg + max concat  
+        self.roi_output_size = roi_output_size
+        self.sampling_ratio  = sampling_ratio 
+        self.aligned         = aligned 
+
+        # Categorical information for NLCD
+        self.categorical_input       = categorical_input
+        self.categorical_embed_dim   = categorical_embed_dim
+        self.categorical_cardinality = (categorical_cardinality or 
+                                        (in_channels if in_channels > 1 else 8))
+        
+        if self.categorical_input: 
+            self.embedding = nn.Embedding(self.categorical_cardinality + 1,
+                                          self.categorical_embed_dim,
+                                          padding_idx=0)
+            ch = self.categorical_embed_dim
+        else: 
+            ch = in_channels
 
 
     def forward(
@@ -88,7 +103,7 @@ class SpatialBackbone(nn.Module):
         rois: list[tuple[int, int, int, int, int]] | None = None 
     ) -> torch.Tensor: 
 
-        MICRO_BATCH_SIZE = 64 
+        MICRO_BATCH_SIZE = 16 
         n_tiles          = x.shape[0]
 
         if rois is None: 
@@ -191,11 +206,10 @@ class SpatialBackbone(nn.Module):
 
     def _run_chunk(self, chunk): 
 
-        if self.categorical_input and chunk.shape[1] == 1: 
-            x_idx    = chunk.squeeze(1).long().clamp_min(0) 
-            x_onehot = F.one_hot(x_idx, num_classes=self.model_in_channels + 1)
-            chunk  = x_onehot[..., 1:].permute(0, 3, 1, 2).float() 
-
+        if self.categorical_input: 
+            x_idx = chunk.squeeze(1).long().clamp(0, self.categorical_cardinality) 
+            emb   = self.embedding(x_idx)
+            chunk = emb.permute(0, 3, 1, 2).contiguous()
         return self.net(chunk) 
 
     def _global_pool_chunk(

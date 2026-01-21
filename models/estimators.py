@@ -628,7 +628,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 if len(extra) >= 2: 
                     group_ids, group_weights = extra[-2], extra[-1]
 
-                xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
+                if self.categorical_input: 
+                    xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
+                else: 
+                    xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
                 mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
     
                 feats  = self.model_.backbone(xb, mask=mb, rois=rois)
@@ -821,7 +824,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if len(extra) >= 2: 
             group_ids, group_weights = extra[-2], extra[-1]
 
-        xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
+        if self.categorical_input:
+            xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
+        else: 
+            xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
         mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
     
         y_np  = np.asarray(labels).reshape(-1)
