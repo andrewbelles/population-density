@@ -759,18 +759,18 @@ def define_gate_space(trial):
 
 def define_spatial_space(trial): 
     conv_choices = {
-        "32-64-128-256": (32, 64, 128, 256),
+        # "32-64-128-256": (32, 64, 128, 256),
         "32-64-128": (32, 64, 128),
     }
     key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
     return {
         "conv_channels": conv_choices[key],
-        "fc_dim": trial.suggest_categorical("fc_dim", [128, 256, 512]),
+        "fc_dim": trial.suggest_categorical("fc_dim", [128, 256]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
-        "roi_output_size": trial.suggest_categorical("roi_output_size", [4, 7]),
+        "roi_output_size": trial.suggest_categorical("roi_output_size", [4, 5]),
         "sampling_ratio": trial.suggest_categorical("sampling_ratio", [1, 2]),
         "aligned": trial.suggest_categorical("aligned", [True, False]),
 

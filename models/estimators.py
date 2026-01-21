@@ -461,8 +461,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         early_stopping_rounds: int | None = 15, 
         eval_fraction: float = 0.1,
         min_delta: float = 1e-4,
-        batch_size: int = 16,
-        accum_steps: int = 4, 
+        batch_size: int = 2,
+        accum_steps: int = 8, 
         shuffle: bool = True, 
         in_channels: int | None = None, 
         collate_fn=None

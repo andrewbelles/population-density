@@ -7,28 +7,28 @@
 # 
 
 # Scientific Computing Depedencies 
-numpy<3
-scipy<2 
-pandas<3
-scikit-learn<2
+numpy
+scipy 
+pandas
+scikit-learn
 
 # Image/Plotting Depedencies
-matplotlib<4 
-PyYAML<7 
-imageio<3 
+matplotlib 
+PyYAML 
+imageio 
 
 # Geography Dependencies 
-geopandas<1
-rasterio<2
-fiona<2
-rasterstats<1
+geopandas
+rasterio
+fiona
+rasterstats
 
 # Machine Learning Libraries 
-libpysal<5 
-optuna<5
-umap-learn<1
-networkit<12 
-xgboost<3 
-torch<3 
-torchvision<1
-torch-geometric<3
+libpysal 
+optuna
+umap-learn
+networkit 
+xgboost 
+torch 
+torchvision
+torch-geometric
