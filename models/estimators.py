@@ -529,6 +529,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         loss_fn       = WassersteinLoss(n_classes=self.n_classes_)
         self.loss_fn_ = loss_fn 
 
+        scaler = torch.cuda.amp.GradScaler(enabled=self.device.type == 'cuda')
+
         opt     = torch.optim.AdamW(
             self.model_.parameters(),
             lr=self.lr,
@@ -552,20 +554,23 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             total_count = 0
 
             for step_idx, batch in enumerate(loader): 
-                loss, bsz = self._process_batch(batch)
-                total_loss += loss.item() * bsz 
-                total_count += bsz
-                
-                loss = loss / accum 
-                loss.backward() 
+                with torch.cuda.amp.autocast(enabled=self.device.type == 'cuda'): 
+                    loss, bsz = self._process_batch(batch)
+                    total_loss += loss.item() * bsz 
+                    total_count += bsz
+                    loss = loss / accum 
+
+                scaler.scale(loss).backward() 
 
                 if (step_idx + 1) % accum == 0: 
-                    opt.step() 
+                    scaler.step(opt)
+                    scaler.update()
                     opt.zero_grad() 
             
             if step_idx >= 0 and (step_idx + 1) % accum != 0: 
-                opt.step() 
-                opt.zero_grad()
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad() 
 
             val_loss = None 
             if run_es: 
@@ -642,9 +647,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
     def _make_loader(self, dataset, shuffle: bool): 
         pin = self.compute_strategy.device == "cuda" 
         if self.compute_strategy.n_jobs == -1: 
-            num_workers = 2 
+            num_workers = 6 
         else: 
-            num_workers = min(self.compute_strategy.n_jobs, 2)
+            num_workers = min(self.compute_strategy.n_jobs, 6)
 
         return DataLoader(
             dataset, 
