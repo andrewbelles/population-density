@@ -93,7 +93,7 @@ class SpatialBackbone(nn.Module):
             feat_chunk = self.net(x_chunk)
             feat_chunks.append(feat_chunk) 
 
-        feats = torch.ca(feat_chunks, dim=0) 
+        feats = torch.cat(feat_chunks, dim=0) 
 
         if rois is None: 
             return self.global_pool(feats, mask, x)
