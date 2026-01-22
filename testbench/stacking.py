@@ -8,7 +8,8 @@
 
 import contextlib
 import argparse, io
-import sys 
+import sys
+from typing import Literal 
 
 import numpy as np 
 
@@ -193,6 +194,7 @@ def _optimize_dataset(
     filepath, 
     loader_func, 
     n_trials,
+    direction: Literal["minimize", "maximize"] = "maximize",
     *,
     config_path: str = CONFIG_PATH
 ): 
@@ -217,6 +219,7 @@ def _optimize_dataset(
                 param_space=get_param_space(model_name),
                 task=OPT_TASK,
                 outer_config=outer_config,
+                direction=direction, 
                 inner_config=inner_config,
                 n_trials=n_trials,
                 random_state=RANDOM_STATE,
@@ -390,6 +393,7 @@ def test_expert_optimize(
             name, 
             base["path"],
             loader, 
+            direction="minimize",
             n_trials=EXPERT_TRIALS,
             config_path=config_path 
         )
