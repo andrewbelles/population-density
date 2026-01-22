@@ -16,6 +16,7 @@ from analysis.cross_validation import (
     CrossValidator,
     CVConfig,
     CLASSIFICATION,
+    FULL_CLASSIF,
     TaskSpec
 )
 
@@ -94,7 +95,9 @@ EXPERT_PROBA    = {
     "VIIRS": project_path("data", "stacking", "viirs_optimized_probs.mat"),
     # "TIGER": project_path("data", "stacking", "tiger_optimized_probs.mat"),
     "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat"),
-    "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat")
+    "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat"),
+    "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"),
+    "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat")
 }
 
 STACKED_BASE_PROBS        = project_path("data", "results", "final_stacked_predictions.mat")
@@ -125,6 +128,7 @@ def _evaluate_model(
     params, 
     config, 
     *,
+    task=CLASSIFICATION,
     proba_path=None
 ):
     model = get_factory(model_name, strategy=strategy)(**params)
@@ -132,7 +136,7 @@ def _evaluate_model(
     cv = CrossValidator(
         filepath=filepath,
         loader=loader_func,
-        task=CLASSIFICATION,
+        task=task,
         scale_y=False 
     )
 
@@ -323,6 +327,7 @@ def _select_best_model(
     loader_func, 
     config, 
     *, 
+    task=CLASSIFICATION,
     config_path: str = CONFIG_PATH
 ): 
     leaderboard = []
@@ -334,7 +339,8 @@ def _select_best_model(
             loader_func,
             model_name,
             params,
-            config
+            config,
+            task=task
         )
         leaderboard.append((score, model_name, params, metrics))
 
@@ -346,7 +352,12 @@ def _row_metrics(name: str, metrics: dict):
         "Name":    name, 
         "Acc":     format_metric(metrics.get("accuracy")),
         "F1":      format_metric(metrics.get("f1_macro")),
-        "ROC_AUC": format_metric(metrics.get("roc_auc"))
+        "ROC_AUC": format_metric(metrics.get("roc_auc")),
+        "LogLoss": format_metric(metrics.get("log_loss")),
+        "Brier": format_metric(metrics.get("brier")),
+        "ECE": format_metric(metrics.get("ece")),
+        "QWK": format_metric(metrics.get("qwk")),
+        "OrdMAE": format_metric(metrics.get("ord_mae"))
     }
 
 def _row_opt(name: str, model: str, score: float): 
@@ -392,14 +403,18 @@ def test_expert_optimize(
     }
 
 def test_expert_oof(
+    datasets: list[str] | None = None, 
     filter_dir: str | None = None, 
     config_path: str = CONFIG_PATH, 
     **_
 ):
-    rows   = []
-    config = eval_config() 
+    rows    = []
+    config  = eval_config() 
+    targets = datasets or list(DATASETS) 
 
-    for name in DATASETS: 
+    for name in targets:
+        if name not in BASE: 
+            raise ValueError(f"unknown dataset: {name}")
         base, loader = resolve_expert_loader(name, filter_dir)
 
         _, best_model, best_params, metrics = _select_best_model(
@@ -407,6 +422,7 @@ def test_expert_oof(
             base["path"],
             loader,
             config,
+            task=FULL_CLASSIF,
             config_path=config_path
         )
 
@@ -416,13 +432,14 @@ def test_expert_oof(
             best_model,
             best_params,
             config,
+            task=FULL_CLASSIF,
             proba_path=EXPERT_PROBA[name]
         )
 
         rows.append(_row_metrics(f"{name}/{best_model}", metrics))
 
     return {
-        "header": ["Name", "Acc", "F1", "ROC_AUC"],
+        "header": ["Name", "Acc", "F1", "ROC_AUC", "LogLoss", "Brier", "ECE", "QWK", "OrdMAE"],
         "rows": rows,
         "experts": {k: EXPERT_PROBA[k] for k in DATASETS}
     }

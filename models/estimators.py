@@ -8,6 +8,7 @@
 # 
 
 from scipy.sparse import csr_matrix
+from threadpoolctl import register
 import sys, time, torch, copy, xgboost  
 
 import numpy as np 
@@ -279,6 +280,7 @@ class XGBClassifierWrapper(BaseEstimator, ClassifierMixin):
         gpu: bool = False,
         random_state: int | None = None,
         n_jobs: int = -1,  
+        ordinal: bool = True,
         **kwargs,
     ): 
         self.n_estimators          = n_estimators
@@ -295,68 +297,131 @@ class XGBClassifierWrapper(BaseEstimator, ClassifierMixin):
         self.gpu                   = gpu
         self.random_state          = random_state
         self.n_jobs                = n_jobs 
+        self.ordinal               = ordinal 
         self.kwargs                = kwargs
 
+        self.models_ = []
+        self.model_  = None 
+
     def fit(self, X, y): 
-        X = np.asarray(X, dtype=np.float64)
+        X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64) 
 
-        device = "cuda" if self.gpu else "cpu"
+        y_idx, classes  = self._encode_labels(y)
+        self.classes_   = classes 
+        self.n_classes_ = classes.size 
 
-        n_classes = int(np.max(y)) + 1 if y.size else 0  
-        is_multi  = n_classes > 2 
+        if self.n_classes_ <= 2 or not self.ordinal: 
+            self.model_ = self._build_model(self.n_classes_)
+            train_idx, eval_idx = self._split_indices(X.shape[0])
 
-        if is_multi:
-            alpha     = _alpha_from_counts(y, n_classes)
-            objective = focal_loss_obj(n_classes, alpha, self.focal_gamma)
-            metric    = focal_mlogloss_eval(n_classes)
-            disable_default_eval_metric = True 
+            if eval_idx is not None: 
+                self.model_.fit(
+                    X[train_idx], y_idx[train_idx],
+                    eval_set=[(X[eval_idx], y_idx[eval_idx])],
+                    verbose=False
+                )
+            else: 
+                self.model_.fit(X, y_idx)
+            return self 
+
+        train_idx, eval_idx = self._split_indices(X.shape[0])
+        self.models_ = []
+        for k in range(self.n_classes_ - 1): 
+            y_bin = (y_idx > k).astype(np.int64)
+            model = self._build_model(2)
+            if eval_idx is not None: 
+                model.fit(
+                    X[train_idx], y_bin[train_idx],
+                    eval_set=[(X[eval_idx], y_bin[eval_idx])],
+                    verbose=False
+                )
+            else: 
+                model.fit(X, y_bin)
+            self.models_.append(model)
+
+        return self 
+
+    def predict(self, X): 
+        proba = self.predict_proba(X)
+        idx   = np.argmax(proba, axis=1)
+        return self.classes_[idx]
+
+    def predict_proba(self, X): 
+        X = np.asarray(X, dtype=np.float32)
+
+        if self.model_ is not None: 
+            return self.model_.predict_proba(X)
+
+        prob_gt = self._prob_gt(X)
+        n       = prob_gt.shape[0]
+        K       = self.n_classes_ 
+        probs   = np.zeros((n, K), dtype=np.float32)
+
+        probs[:, 0] = 1.0 - prob_gt[:, 0]
+        for k in range(1, K - 1): 
+            probs[:, k] = prob_gt[:, k - 1] - prob_gt[:, k]
+        probs[:, -1] = prob_gt[:, -1]
+
+        probs = np.clip(probs, 1e-12, 1.0)
+        probs = probs / probs.sum(axis=1, keepdims=True)
+        return probs
+
+    @property 
+    def feature_importances_(self): 
+        if self.model_ is not None: 
+            return self.model_.feature_importances_ 
+        if self.models_:
+            return np.mean(
+                [m.feature_importances_ for m in self.models_], axis=0
+            )
+
+    def _build_model(self, n_classes: int):
+        if n_classes <= 2: 
+            objective   = "binary:logistic"
+            eval_metric = "logloss"
         else: 
-            objective = "binary:logistic"
-            metric    = "logloss"
-            disable_default_eval_metric = False  
+            objective   = "multi:softprob"
+            eval_metric = "mlogloss" 
 
-        self.model_ = XGBClassifier(
+        return XGBClassifier(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,
             learning_rate=self.learning_rate,
             subsample=self.subsample,
             colsample_bytree=self.colsample_bytree,
-            early_stopping_rounds=self.early_stopping_rounds,
-            device=device,
+            min_child_weight=self.min_child_weight,
+            reg_alpha=self.reg_alpha,
+            reg_lambda=self.reg_lambda,
+            gamma=self.gamma,
+            objective=objective,
+            eval_metric=eval_metric,
+            num_class=n_classes if n_classes > 2 else None,
+            device="cuda" if self.gpu else "cpu",
             random_state=self.random_state,
             n_jobs=self.n_jobs,
-            eval_metric=metric,
-            objective=objective, 
-            disable_default_eval_metric=disable_default_eval_metric,
-            num_class=n_classes if is_multi else None, 
-            **self.kwargs
+            early_stopping_rounds=self.early_stopping_rounds,
+            **self.kwargs 
         )
+    
+    def _encode_labels(self, y): 
+        classes = np.unique(y)
+        classes = np.sort(classes)
+        y_idx   = np.searchsorted(classes, y)
+        if not np.all(classes[y_idx] == y):
+            raise ValueError("y contains values not in sorted classes")
+        return y_idx, classes 
 
-        if self.early_stopping_rounds and self.eval_fraction > 0: 
-            n = X.shape[0]
-            n_eval = int(n * self.eval_fraction)
-            idx = np.random.default_rng(self.random_state).permutation(n)
-            train_idx, eval_idx = idx[n_eval:], idx[:n_eval]
+    def _split_indices(self, n): 
+        if not (self.early_stopping_rounds and self.eval_fraction > 0):
+            return np.arange(n), None 
+        n_eval = max(1, int(n * self.eval_fraction))
+        rng    = np.random.default_rng(self.random_state)
+        idx    = rng.permutation(n)
+        return idx[n_eval:], idx[:n_eval]
 
-            self.model_.fit(
-                X[train_idx],
-                y[train_idx], 
-                eval_set=[(X[eval_idx], y[eval_idx])],
-                verbose=False 
-            )
-        else: 
-            self.model_.fit(X, y)
-
-        self.classes_ = self.model_.classes_ 
-        return self 
-
-    def predict(self, X): 
-        return self.model_.predict(np.asarray(X, dtype=np.float64))
-
-    def predict_proba(self, X): 
-        return self.model_.predict_proba(np.asarray(X, dtype=np.float64))
-
+    def _prob_gt(self, X): 
+        return np.column_stack([m.predict_proba(X)[:, 1] for m in self.models_])
 
 class LogisticWrapper(BaseEstimator, ClassifierMixin): 
     
@@ -1104,7 +1169,7 @@ class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin):
         total   = 0.0 
 
         for k in range(prob_gt.shape[1]): 
-            y_bin  = (y_idx > k).astype(np.float64)
+            y_bin  = (y_idx > k).astype(np.float32)
             p      = np.clip(prob_gt[:, k], eps, 1.0 - eps)
             ll     = -(y_bin * np.log(p) + (1.0 - y_bin) * np.log(1.0 - p)).mean() 
             total += ll
@@ -1403,14 +1468,3 @@ def make_xgb_sfe(
         gpu=compute_strategy.gpu_id is not None,
         **kwargs
     )
-
-# ---------------------------------------------------------
-# Helpers 
-# ---------------------------------------------------------
-
-def _alpha_from_counts(y, n_classes): 
-    counts = np.bincount(y, minlength=n_classes).astype(np.float64)
-    counts = np.maximum(counts, 1.0)
-    inv    = (counts.sum() / (n_classes * counts))
-    alpha  = inv / inv.mean()
-    return alpha 

@@ -11,17 +11,17 @@ models:
     class_weight: balanced
     criterion: gini
   VIIRS/XGBoost:
-    n_estimators: 932
-    learning_rate: 0.0037936027657133626
-    max_depth: 4
-    subsample: 0.7329301018996917
-    colsample_bytree: 0.8525372092441367
-    min_child_weight: 6
-    reg_alpha: 0.1640100769590566
-    reg_lambda: 0.1692370639802492
-    max_delta_step: 2
-    focal_gamma: 0.5875080879750108
-    gamma: 2.4659535454850356
+    n_estimators: 618
+    learning_rate: 0.0480665063096762
+    max_depth: 5
+    subsample: 0.7129380565686629
+    colsample_bytree: 0.9711899958834275
+    min_child_weight: 7
+    reg_alpha: 0.010446355479832711
+    reg_lambda: 4.035520733938055
+    max_delta_step: 8
+    focal_gamma: 1.8286356117515208
+    gamma: 0.18324349504355514
   VIIRS/SVM:
     kernel: poly
     C: 968.3436192190226
@@ -209,3 +209,15 @@ models:
     roi_output_size: 4
     sampling_ratio: 1
     aligned: false
+  VIIRS_MANIFOLD/XGBoost:
+    n_estimators: 990
+    learning_rate: 0.06861911201612636
+    max_depth: 5
+    subsample: 0.6407480557685601
+    colsample_bytree: 0.816082898223063
+    min_child_weight: 20
+    reg_alpha: 0.12414470303988795
+    reg_lambda: 0.9815872530073907
+    max_delta_step: 6
+    focal_gamma: 3.3220605945994635
+    gamma: 1.2276734933370124

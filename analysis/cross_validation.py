@@ -24,6 +24,7 @@ from sklearn.model_selection import (
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator, clone 
 from sklearn.metrics import (
+    cohen_kappa_score,
     mean_squared_error, 
     r2_score, 
     accuracy_score, 
@@ -43,6 +44,34 @@ from scipy.io import savemat
 # ---------------------------------------------------------
 # Task Specification 
 # --------------------------------------------------------- 
+
+# Task Metric Helper Functions 
+def as_label_indices(y_true):
+    labels = np.unique(y_true)
+    labels = np.sort(labels)
+    y_idx  = np.searchsorted(labels, y_true)
+    return y_idx, labels 
+
+def brier_multiclass(probs, y_idx, n_classes): 
+    y_onehot = np.eye(n_classes)[y_idx]
+    return float(np.mean(np.sum((probs - y_onehot)**2, axis=1)))
+
+def ece(probs, y_idx, n_bins=10):
+    conf    = probs.max(axis=1)
+    pred    = probs.argmax(axis=1)
+    correct = (pred == y_idx).astype(np.float64)
+
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ece  = 0.0 
+    for i in range(n_bins): 
+        lo, hi = bins[i], bins[i + 1]
+        mask   = (conf >= lo) & (conf < hi)
+        if not np.any(mask): 
+            continue 
+        acc = correct[mask].mean() 
+        avg_conf = conf[mask].mean() 
+        ece += np.abs(acc - avg_conf) * (mask.sum() / conf.size)
+    return float(ece)
 
 TaskType = Literal["regression", "classification"]
 
@@ -67,7 +96,6 @@ class TaskSpec:
         y_prob: NDArray | None = None
     ) -> dict[str, float]: 
 
-
         y_true = np.asarray(y_true).ravel()
         n_classes = len(np.unique(y_true))
         results = {}
@@ -79,32 +107,64 @@ class TaskSpec:
                 elif m == "rmse": 
                     results["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
         else: 
-            for m in self.metrics: 
-                if m == "accuracy": 
+            y_prob_arr = None
+            y_idx = None
+            labels = None
+            if y_prob is not None:
+                y_prob_arr = np.asarray(y_prob)
+                # Align label indices with prob columns (0..K-1)
+                y_idx, labels = as_label_indices(y_true)
+
+                # Normalize row-wise if needed (prevents log_loss warnings)
+                if y_prob_arr.ndim > 1:
+                    row_sum = y_prob_arr.sum(axis=1, keepdims=True)
+                    y_prob_arr = np.divide(
+                        y_prob_arr,
+                        row_sum,
+                        out=np.zeros_like(y_prob_arr),
+                        where=row_sum != 0
+                    )
+
+            for m in self.metrics:
+                if m == "accuracy":
                     results["accuracy"] = float(accuracy_score(y_true, y_pred))
-                elif m == "f1": 
+                elif m == "f1":
                     avg = "binary" if n_classes == 2 else "macro"
                     results["f1"] = float(f1_score(y_true, y_pred, average=avg))
-                elif m == "f1_macro": 
+                elif m == "f1_macro":
                     results["f1_macro"] = float(f1_score(y_true, y_pred, average="macro"))
-                elif m == "roc_auc" and y_prob is not None: 
-                    try: 
-                        y_prob_arr = np.asarray(y_prob)
-                        if (y_prob_arr.ndim == 1 or 
-                            (y_prob_arr.ndim == 2 and y_prob_arr.shape[1] == 1)):
+                elif m == "roc_auc" and y_prob_arr is not None:
+                    try:
+                        if y_prob_arr.ndim == 1 or (y_prob_arr.ndim == 2 and 
+                                                    y_prob_arr.shape[1] == 1):
                             results["roc_auc"] = float(roc_auc_score(y_true, y_prob_arr.ravel()))
-                        else: 
+                        else:
                             results["roc_auc"] = float(roc_auc_score(
-                                y_true, 
+                                y_idx,
                                 y_prob_arr,
-                                multi_class="ovr", 
+                                multi_class="ovr",
                                 average="macro"
-                            )) 
-
+                            ))
                     except ValueError:
-                        results["roc_auc"] = np.nan 
-                elif m == "log_loss" and y_prob is not None: 
-                    results["log_loss"] = float(log_loss(y_true, y_prob))
+                        results["roc_auc"] = np.nan
+                elif m == "log_loss" and y_prob_arr is not None:
+                    if y_prob_arr.ndim > 1:
+                        results["log_loss"] = float(
+                            log_loss(y_idx, y_prob_arr, labels=np.arange(labels.size))
+                        )
+                    else:
+                        results["log_loss"] = float(log_loss(y_true, y_prob_arr))
+                elif m == "brier" and y_prob_arr is not None:
+                    results["brier"] = brier_multiclass(y_prob_arr, y_idx, labels.size)
+                elif m == "ece" and y_prob_arr is not None:
+                    results["ece"] = ece(y_prob_arr, y_idx, labels.size)
+                elif m == "qwk" and y_prob_arr is not None:
+                    p_idx, _ = as_label_indices(y_pred)
+                    results["qwk"] = float(cohen_kappa_score(y_idx, p_idx, weights="quadratic"))
+                elif m == "ord_mae" and y_prob_arr is not None:
+                    p_idx, _ = as_label_indices(y_pred)
+                    results["ord_mae"] = float(np.mean(np.abs(y_idx - p_idx)))
+
 
         return results 
 
@@ -125,6 +185,11 @@ class TaskSpec:
 
 REGRESSION     = TaskSpec("regression")
 CLASSIFICATION = TaskSpec("classification") 
+
+FULL_CLASSIF   = TaskSpec(
+    "classification", 
+    ("accuracy", "f1_macro", "roc_auc", "log_loss", "brier", "ece", "qwk", "ord_mae")
+)
 
 # ---------------------------------------------------------
 # Cross-Validator Configuration 

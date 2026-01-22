@@ -6,6 +6,7 @@
 # canvas counties together so that they are on uniform images for SpatialClassifier to use. 
 # 
 
+from numpy.typing import NDArray
 import imageio, fiona, csv, json, rasterio, rasterio.mask, argparse, sys, time 
 
 import numpy as np 
@@ -327,21 +328,65 @@ class SpatialTensorDataset(ABC):
         canvas_hw=(512, 512),
         tile_hw=None,
         gap: int = 32,
-        weight_by_mask: bool = True 
+        weight_by_mask: bool = True, 
+        max_canvases: int | None = 8
     ):
         out_dir    = Path(out_dir)
         packed_dir = out_dir / "packed" 
         packed_dir.mkdir(parents=True, exist_ok=True)
         
-        batch    = []
-        records  = []
-        t0       = time.perf_counter() 
-        last     = t0
-        pack_idx = 0
-        count    = 0 
+        batch          = []
+        records        = []
+        all_labels     = []
+        all_fips       = []
+        all_groups     = []
+        pack_labels    = []
+        pack_n_samples = []
+        pack_idx       = 0
+        count          = 0 
+
+        t0   = time.perf_counter() 
+        last = t0
+
+        def _record_pack(batch, pack_idx):
+            pack_y = [b[2] for b in batch]
+            pack_f = [b[3] for b in batch]
+
+            uniq, counts = np.unique(pack_y, return_counts=True)
+            pack_labels.append(int(uniq[counts.argmax()]))
+            pack_n_samples.append(len(pack_y))
+            all_labels.extend(pack_y)
+            all_fips.extend(pack_f)
+            all_groups.extend([pack_idx] * len(pack_y))
+
+        def _flush_capped(batch):
+            nonlocal pack_idx
+            if not batch: 
+                return []
+            batch, overflow = self._pack_with_cap(
+                batch,
+                max_canvases=max_canvases,
+                canvas_hw=canvas_hw,
+                tile_hw=tile_hw,
+                gap=gap,
+                weight_by_mask=weight_by_mask,
+            )
+
+            _record_pack(batch, pack_idx)
+            meta = self._flush_pack(
+                batch, pack_idx, out_dir, 
+                canvas_hw=canvas_hw,
+                tile_hw=tile_hw,
+                gap=gap,
+                weight_by_mask=weight_by_mask
+            )
+            records.append(meta)
+            pack_idx += 1 
+            return overflow 
 
         for rec in self._iter_samples(): 
-            spatial, mask, label, fips = rec["spatial"], rec["mask"], int(rec["label"]), rec["fips"]
+            spatial, mask, label, fips = (rec["spatial"], rec["mask"], 
+                                          int(rec["label"]), rec["fips"])
 
             if self.tight_crop: 
                 spatial, mask = self._tight_crop(spatial, mask)
@@ -353,16 +398,8 @@ class SpatialTensorDataset(ABC):
             count += 1 
 
             if len(batch) >= pack_batch: 
-                meta = self._flush_pack(
-                    batch, pack_idx, out_dir, 
-                    canvas_hw=canvas_hw,
-                    tile_hw=tile_hw,
-                    gap=gap,
-                    weight_by_mask=weight_by_mask
-                )
-                records.append(meta)
-                pack_idx += 1 
-                batch = []
+                overflow = _flush_capped(batch)
+                batch[:] = overflow 
 
             if count % 250 == 0: 
                 now = time.perf_counter()
@@ -376,15 +413,20 @@ class SpatialTensorDataset(ABC):
             if self.max_counties is not None and count >= self.max_counties: 
                 break 
 
-        if batch:
-            meta = self._flush_pack(
-                batch, pack_idx, out_dir, 
-                canvas_hw=canvas_hw,
-                tile_hw=tile_hw,
-                gap=gap,
-                weight_by_mask=weight_by_mask
-            )
-            records.append(meta)
+        overflow = _flush_capped(batch)
+        while overflow: 
+            overflow = _flush_capped(overflow)
+
+        meta_path = out_dir / "packed" / "meta.npz" 
+        np.savez(
+            meta_path,
+            sample_labels=np.asarray(all_labels, dtype=np.int64),
+            sample_ids_full=np.asarray(all_fips, dtype="U5"),
+            sample_groups=np.asarray(all_groups, dtype=np.int64),
+            pack_labels=np.asarray(pack_labels, dtype=np.int64),
+            pack_n_samples=np.asarray(pack_n_samples, dtype=np.int64)
+        )
+        print(f"[save_packed] wrote meta: {meta_path}")
 
         manifest_path = out_dir / "manifest.jsonl"
         with manifest_path.open("w", encoding="utf-8") as f: 
@@ -440,6 +482,45 @@ class SpatialTensorDataset(ABC):
 
             yield fips, geom
 
+    def _pack_with_cap(
+        self,
+        batch,
+        *,
+        max_canvases: int | None, 
+        canvas_hw, 
+        tile_hw, 
+        gap,
+        weight_by_mask
+    ): 
+        if max_canvases is None: 
+            return batch, None 
+
+        overflow = []
+        while len(batch) > 1: 
+            canvases = SpatialLazyLoader.pack(
+                batch, 
+                canvas_hw=canvas_hw,
+                tile_hw=tile_hw,
+                gap=gap,
+                weight_by_mask=weight_by_mask
+            )[0]
+
+            if canvases.shape[0] <= max_canvases:
+                break 
+            overflow.append(batch.pop()) 
+
+        if len(batch) == 1:
+            canvases = SpatialLazyLoader.pack(
+                batch,
+                canvas_hw=canvas_hw,
+                tile_hw=tile_hw,
+                gap=gap,
+                weight_by_mask=weight_by_mask,
+            )[0]
+
+        overflow.reverse()
+        return batch, overflow
+
     @abstractmethod
     def _iter_samples(self):
         '''
@@ -468,8 +549,9 @@ class SpatialTensorDataset(ABC):
         canvas_hw=(512, 512),
         tile_hw=None,
         gap: int = 32, 
-        weight_by_mask: bool = True 
+        weight_by_mask: bool = True,
     ) -> dict: 
+
         packed = SpatialLazyLoader.pack(
             batch, 
             canvas_hw=canvas_hw,
@@ -477,7 +559,8 @@ class SpatialTensorDataset(ABC):
             gap=gap,
             weight_by_mask=weight_by_mask
         )
-        canvases, masks, rois, labels, fips, group_ids, group_weights = packed 
+        canvases, masks, rois, labels, fips, group_ids, group_weights = packed
+
         out_path = out_dir / "packed" / f"pack_{pack_idx:05d}.npz"
 
         if np.issubdtype(canvases.dtype, np.floating): 
@@ -632,7 +715,8 @@ class NlcdTensorDataset(SpatialTensorDataset):
         *,
         channel_groups: dict[str, list[int]] | None = None, 
         all_touched: bool = False, 
-        max_counties: int | None = None, 
+        max_counties: int | None = None,
+        downsample: int = 1, 
         debug_png_dir: str | None = None 
     ): 
         super().__init__(
@@ -656,6 +740,7 @@ class NlcdTensorDataset(SpatialTensorDataset):
                 "wetlands": [90, 95]
             }
         self.channel_groups = channel_groups 
+        self.downsample     = downsample
         self._lut           = self._build_lut(self.channel_groups)
 
     def _build_lut(self, groups: dict[str, list[int]]) -> dict[int, int]: 
@@ -699,12 +784,49 @@ class NlcdTensorDataset(SpatialTensorDataset):
                     for code, ch in self._lut.items():
                         spatial[data == code] = ch
 
+                    if self.downsample > 1: 
+                        spatial, valid_mask = self._block_mode_downsample(
+                            spatial, valid_mask, self.downsample 
+                        )
+
                     yield {
                         "fips": fips,
                         "label": self.label_map[fips],
                         "spatial": spatial,
                         "mask": valid_mask.astype(np.uint8)
                     }
+
+    @staticmethod 
+    def _block_mode_downsample(spatial: NDArray, mask: NDArray, factor: int): 
+        if factor <= 1: 
+            return spatial, mask 
+
+        H, W = spatial.shape 
+        h    = (H // factor) * factor 
+        w    = (W // factor) * factor 
+        
+        spatial = spatial[:h, :w]
+        mask    = mask[:h, :w].astype(bool)
+
+        hf = h // factor 
+        wf = w // factor 
+
+        s = spatial.reshape(hf, factor, wf, factor)
+        m = mask.reshape(hf, factor, wf, factor) 
+
+        s = s.reshape(hf, wf, factor * factor)
+        m = m.reshape(hf, wf, factor * factor) 
+
+        s = np.where(m, s, -1)
+
+        n_classes = int(spatial.max()) + 1 
+        counts    = np.zeros((hf, wf, n_classes), dtype=np.int32)
+        for c in range(n_classes): 
+            counts[..., c] = np.sum(s == c, axis=2)
+
+        out      = counts.argmax(axis=2).astype(np.uint8)
+        out_mask = (m.any(axis=2)).astype(np.uint8)
+        return out, out_mask
 
 # ---------------------------------------------------------
 # Main entry point  
@@ -730,6 +852,7 @@ def main():
     parser.add_argument("--skip-nlcd", action="store_true")
     parser.add_argument("--packed", action="store_true")
     parser.add_argument("--pack-size", type=int, default=8)
+    parser.add_argument("--downsample", type=int, default=1)
     args = parser.parse_args()
 
     out_root  = Path(args.out_root)
@@ -756,7 +879,8 @@ def main():
             nlcd_path=args.nlcd_path,
             counties_path=args.counties_path,
             labels_path=args.labels_path,
-            debug_png_dir=args.debug_png_dir
+            debug_png_dir=args.debug_png_dir,
+            downsample=args.downsample
         )
         nlcd.save(nlcd_out) if not args.packed else nlcd.save_packed(
             nlcd_out,

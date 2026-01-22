@@ -66,6 +66,11 @@ BASE: dict[str, ConcatSpec] = {
         "path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
         "loader": load_viirs_nchs
     },
+    "VIIRS_MANIFOLD": {
+        "name": "VIIRS_MANIFOLD",
+        "path": project_path("data", "datasets", "viirs_pooled.mat"),
+        "loader": load_compact_dataset
+    },
     "TIGER": {
         "name": "tiger",
         "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
@@ -79,6 +84,11 @@ BASE: dict[str, ConcatSpec] = {
     "SAIPE": {
         "name": "SAIPE", 
         "path": project_path("data", "datasets", "saipe_nchs_2023.mat"),
+        "loader": load_compact_dataset
+    },
+    "SAIPE_MANIFOLD": {
+        "name": "SAIPE_MANIFOLD",
+        "path": project_path("data", "datasets", "saipe_pooled.mat"),
         "loader": load_compact_dataset
     },
     "COORDS": {

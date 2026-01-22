@@ -975,33 +975,41 @@ def load_spatial_roi_manifest(
         def _collate_packed(batch): 
             return batch[0]
 
-        pack_groups = []
-        all_labels  = []
-        all_fips    = []
+        meta_path = root / "packed" / "meta.npz" 
+        if meta_path.exists(): 
+            meta = np.load(meta_path)
+            labels_full = np.asarray(meta["sample_labels"], dtype=np.int64)
+            fips_full   = np.asarray(meta["sample_ids_full"], dtype="U5")
+            groups_full = np.asarray(meta["sample_groups"], dtype=np.int64)
+            pack_labels = np.asarray(meta["pack_labels"], dtype=np.int64)
+        else: 
+            pack_groups = []
+            all_labels  = []
+            all_fips    = []
 
-        for i, rec in enumerate(records): 
-            with np.load(root / rec["path"]) as npz: 
-                labels = np.asarray(npz["labels"]).reshape(-1)
-                fips   = np.asarray(npz["fips"], dtype="U5").reshape(-1)
-            all_labels.append(labels)
-            all_fips.append(fips)
-            pack_groups.append(np.full(labels.shape[0], i, dtype=np.int64))
+            for i, rec in enumerate(records): 
+                with np.load(root / rec["path"]) as npz: 
+                    labels = np.asarray(npz["labels"]).reshape(-1)
+                    fips   = np.asarray(npz["fips"], dtype="U5").reshape(-1)
+                all_labels.append(labels)
+                all_fips.append(fips)
+                pack_groups.append(np.full(labels.shape[0], i, dtype=np.int64))
 
 
-        labels_full = np.concatenate(all_labels) 
-        fips_full   = np.concatenate(all_fips)
-        groups_full = np.concatenate(pack_groups)
+            labels_full = np.concatenate(all_labels) 
+            fips_full   = np.concatenate(all_fips)
+            groups_full = np.concatenate(pack_groups)
 
 
-        pack_labels = []
-        for labels in all_labels:
-            uniq, counts = np.unique(labels, return_counts=True)
-            pack_labels.append(uniq[int(counts.argmax())])
+            pack_labels = []
+            for labels in all_labels:
+                uniq, counts = np.unique(labels, return_counts=True)
+                pack_labels.append(uniq[int(counts.argmax())])
 
-        pack_labels = np.asarray(pack_labels, dtype=np.int64)
-        pack_ids    = np.asarray([f"pack_{i:05d}" for i in range(len(records))], dtype="U16") 
+            pack_labels = np.asarray(pack_labels, dtype=np.int64)
 
         coords = np.zeros((0, 2), dtype=np.float64) # backwards compatible (useless)
+        pack_ids = np.asarray([f"pack_{i:05d}" for i in range(len(records))], dtype="U16")
         
         return {
             "dataset": ds, 
@@ -1032,5 +1040,8 @@ def load_spatial_roi_manifest(
         "coords": coords, 
         "sample_ids": fips, 
         "collate_fn": _collate,
-        "in_channels": in_channels
+        "in_channels": in_channels,
+        "sample_labels": np.array([]),
+        "sample_ids_full": np.array([]),
+        "sample_groups": np.array([])
     }

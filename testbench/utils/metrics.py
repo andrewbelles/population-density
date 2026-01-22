@@ -13,7 +13,13 @@ import pandas as pd
 from numpy.typing import NDArray
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
-from analysis.cross_validation import TaskSpec
+from analysis.cross_validation import (
+    TaskSpec,
+    brier_multiclass,
+    ece,
+    as_label_indices
+) 
+from sklearn.metrics import log_loss, cohen_kappa_score
 
 OPT_TASK = TaskSpec("classification", ("f1_macro",))
 
@@ -44,7 +50,12 @@ def metrics_from_summary(summary):
     return {
         "accuracy": float(row["accuracy_mean"]) if "accuracy_mean" in row else np.nan, 
         "f1_macro": float(row["f1_macro_mean"]) if "f1_macro_mean" in row else np.nan,
-        "roc_auc": float(row["roc_auc_mean"]) if "roc_auc_mean" in row else np.nan
+        "roc_auc": float(row["roc_auc_mean"]) if "roc_auc_mean" in row else np.nan,
+        "log_loss": float(row["log_loss_mean"]) if "log_loss_mean" in row else np.nan,
+        "brier": float(row["brier_mean"]) if "brier_mean" in row else np.nan,
+        "ece": float(row["ece_mean"]) if "ece_mean" in row else np.nan,
+        "qwk": float(row["qwk_mean"]) if "qwk_mean" in row else np.nan,
+        "ord_mae": float(row["ord_mae_mean"]) if "ord_mae_mean" in row else np.nan,
     }
 
 def metrics_from_probs(y_true, probs, class_labels): 
@@ -69,10 +80,20 @@ def metrics_from_probs(y_true, probs, class_labels):
             labels=labels
         )
 
+    y_idx, labels = as_label_indices(y_true)
+    p_idx = np.argmax(probs, axis=1) if probs.ndim > 1 else (probs >= 0.5).astype(int)
+
     return {
         "accuracy": float(accuracy_score(y_true, preds)),
         "f1_macro": float(f1_score(y_true, preds, average="macro")),
-        "roc_auc": float(roc)
+        "roc_auc": float(roc),
+        "log_loss": float(log_loss(y_idx, probs, labels=np.arange(labels.size))) 
+        if probs.ndim > 1 else float(log_loss(y_true, probs)),
+        "brier": brier_multiclass(probs, y_idx, labels.size) if probs.ndim > 1 
+        else float(np.mean((probs - y_true) ** 2)),
+        "ece": ece(probs, y_idx),
+        "qwk": float(cohen_kappa_score(y_idx, p_idx, weights="quadratic")),
+        "ord_mae": float(np.mean(np.abs(y_idx - p_idx))),
     }
 
 def rank_by_label(results, labels): 
