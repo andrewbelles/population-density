@@ -204,6 +204,10 @@ class StandardEvaluator(OptunaEvaluator):
             raise RuntimeError(f"cross-val fold errors: {err_msgs}")
 
         summary = cv.summarize(results)
+        for m in self.task.metrics: 
+            key = f"{m}_mean"
+            if key in summary.columns and not np.isnan(summary.iloc[0][key]): 
+                return summary.iloc[0][key]
 
         for metric in ["f1_macro_mean", "accuracy_mean", "r2_mean"]: 
             if metric in summary.columns: 
@@ -916,6 +920,10 @@ def _select_metric_value(
         if metric not in metrics or np.isnan(metrics[metric]): 
             raise ValueError(f"metric {metric} missing or NaN")
         return metrics[metric]
+
+    for key in task.metrics:
+        if key in metrics and not np.isnan(metrics[key]):
+            return metrics[key]
 
     if task.task_type == "classification": 
         for key in ("f1_macro", "accuracy", "roc_auc"): 
