@@ -18,3 +18,5 @@ Cargo.lock
 *.env 
 
 check_packs.py
+
+papers/

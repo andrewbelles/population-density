@@ -22,7 +22,8 @@ from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier, XGBRegressor  
 
 from utils.loss_funcs import (
-    WassersteinLoss
+    WassersteinLoss,
+    WassersteinDiceLoss
 )
 
 from scipy.sparse import csr_matrix
@@ -515,9 +516,12 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         fc_dim: int = 128, 
         dropout: float = 0.2, 
         use_bn: bool = True, 
+        loss_beta: float = 0.99, 
+        distance_power: float = 1.0, 
         roi_output_size: int | tuple[int, int] = 7, 
         sampling_ratio: int = 2, 
         aligned: bool = False, 
+        pretrain_epochs: int = 10, 
         epochs: int = 100, 
         lr: float = 1e-3, 
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
@@ -531,7 +535,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         shuffle: bool = True, 
         in_channels: int | None = None, 
         categorical_input: bool = False, 
-        collate_fn=None
+        collate_fn=None,
+        class_values: list[int] | None = None
     ): 
         self.conv_channels     = conv_channels
         self.kernel_size       = kernel_size
@@ -542,6 +547,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.roi_output_size   = roi_output_size
         self.sampling_ratio    = sampling_ratio
         self.aligned           = aligned
+        self.loss_beta         = loss_beta 
+        self.distance_power    = distance_power
+        self.pretrain_epochs   = pretrain_epochs 
         self.epochs            = epochs
         self.lr                = lr
         self.weight_decay      = weight_decay
@@ -549,6 +557,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.accum_steps       = accum_steps
         self.in_channels       = in_channels
         self.categorical_input = categorical_input
+        self.class_values      = class_values
         self.device            = self._resolve_device(compute_strategy.device)
 
         self.early_stopping_rounds = early_stopping_rounds 
@@ -580,8 +589,24 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if y_full.size == 0: 
             raise ValueError("empty loader")
 
-        self.classes_   = np.unique(y_full)
-        self.n_classes_ = len(self.classes_)
+        if self.class_values is not None: 
+            classes = np.asarray(self.class_values, dtype=np.int64)
+            if classes.ndim != 1 or classes.size == 0: 
+                raise ValueError("class_values must be non-empty 1D list/array")
+            classes = np.unique(classes)
+            if not np.all(np.isin(y_full, classes)):
+                missing = np.setdiff1d(np.unique(y_full), classes)
+                raise ValueError(f"labels not in class_values: {missing}")
+            self.classes_   = classes 
+            self.n_classes_ = len(classes)
+        else: 
+            self.classes_   = np.unique(y_full)
+            self.n_classes_ = len(self.classes_)
+
+        y_idx           = np.searchsorted(self.classes_, y_full)
+        class_counts    = np.bincount(y_idx, minlength=self.n_classes_)
+        self.class_counts_ = class_counts
+
         if self.n_classes_ < 2: 
             raise ValueError("ordinal regression requires at least 2 classes")
 
@@ -594,8 +619,13 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             self._build_model(in_channels=in_ch)
             break
 
-        loss_fn       = WassersteinLoss(n_classes=self.n_classes_)
-        self.loss_fn_ = loss_fn 
+        loss_fn_pre   = WassersteinLoss(n_classes=self.n_classes_)
+        loss_fn_post  = WassersteinDiceLoss(
+            n_classes=self.n_classes_, 
+            class_counts=class_counts,
+            distance_power=self.distance_power,
+            beta=self.loss_beta 
+        )
 
         scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
@@ -612,7 +642,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         start      = time.perf_counter()
         for ep in range(self.epochs): 
-            t0 = time.perf_counter()
+            self.loss_fn_ = loss_fn_pre if ep < self.pretrain_epochs else loss_fn_post
             self.model_.train() 
 
             accum = max(1, int(self.accum_steps))
@@ -669,8 +699,16 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
     def loss(self, X) -> NDArray: 
         loader = self._ensure_loader(X, shuffle=False)
-        if not hasattr(self, "loss_fn_"):
-            self.loss_fn_ = WassersteinLoss(n_classes=self.n_classes_)
+        if not hasattr(self, "loss_fn_"): 
+            if hasattr(self, "class_counts_"):
+                self.loss_fn_ = WassersteinDiceLoss(
+                    n_classes=self.n_classes_,
+                    class_counts=self.class_counts_,
+                    distance_power=self.distance_power,
+                    beta=self.loss_beta,
+                )
+            else: 
+                self.loss_fn_ = WassersteinLoss(n_classes=self.n_classes_)
         return self._eval_loss(loader)
 
     def extract(self, X) -> NDArray: 
