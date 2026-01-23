@@ -204,12 +204,6 @@ class SpatialPackedLoader:
         key = rec["path"]
 
         self._cache_reads += 1 
-        if self.cache is not None and self._cache_reads % 1000 == 0: 
-            hit_rate     = self._cache_hits / max(self._cache_reads, 1)
-            cached_items = len(self.cache.data)
-            cached_mb    = (self.cache.total / (1024**2))
-            print(f"[cache] reads={self._cache_reads}, hit_rate={hit_rate:.2f}% "
-                  f"items={cached_items} cache_mb={cached_mb:.1f}", file=sys.stderr)
 
         if self.cache is not None: 
             hit = self.cache.get(key)
