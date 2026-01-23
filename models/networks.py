@@ -6,15 +6,22 @@
 # 
 # 
 
-import torch, sys 
+import torch, sys, warnings 
 
-from torch import nn 
+from torch import dtype, nn 
 
 import torch.nn.functional as F 
 
 import torchvision.ops as tops 
 
 import torch.utils.checkpoint as cp
+
+
+def best_num_groups(ch: int, max_groups: int = 32) -> int: 
+    for g in (32, 16, 8, 4, 2, 1): 
+        if g <= max_groups and ch % g == 0: 
+            return g 
+    return 1 
 
 
 class MaskedGroupNorm(nn.Module): 
@@ -49,7 +56,10 @@ class MaskedGroupNorm(nn.Module):
             mask = mask.unsqueeze(1)
 
         if mask.shape[-2:] != x.shape[-2:]:
+            mask = mask.to(device=x.device, dtype=x.dtype)
             mask = F.interpolate(mask, size=x.shape[-2:], mode="nearest")
+        else: 
+            mask = mask.to(device=x.device, dtype=x.dtype)
 
         n, c, h, w = x.shape
         g  = self.num_groups 
@@ -81,7 +91,7 @@ class MaskedConvBlock(nn.Module):
         in_ch,  
         out_ch,
         kernel_size=3,
-        pool_size=2, 
+        dilation=1, 
         use_norm=True 
     ): 
         super().__init__()
@@ -89,15 +99,16 @@ class MaskedConvBlock(nn.Module):
             in_ch, 
             out_ch,
             kernel_size=kernel_size,
-            padding=kernel_size // 2, 
+            stride=1,
+            dilation=dilation,
+            padding=dilation,
             bias=not use_norm 
         )
         self.norm = None 
         if use_norm: 
-            num_groups = 8 if out_ch < 32 else 32 
+            num_groups = best_num_groups(out_ch) 
             self.norm  = MaskedGroupNorm(num_groups, out_ch)
         self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.MaxPool2d(kernel_size=pool_size)
 
     def forward(self, x, mask=None): 
         out = self.conv(x)
@@ -114,17 +125,71 @@ class MaskedConvBlock(nn.Module):
             out = self.norm(out, norm_mask)
 
         out = self.relu(out)
-        out = self.pool(out)
+        return out, mask 
 
-        next_mask = mask 
-        if next_mask is not None: 
-            if next_mask.ndim ==3: 
-                next_mask = next_mask.unsqueeze(1)
 
-            next_mask = self.pool(next_mask)
-            next_mask = (next_mask > 0).to(next_mask.dtype)
+class DilatedResidualBlock(nn.Module): 
+    '''
+    Residual dilated block implemented with masked normalization
+    '''
+    def __init__(
+        self,
+        in_ch,
+        out_ch,
+        kernel_size=3,
+        dilation=1,
+        num_convs: int = 2, 
+        use_norm=True
+    ):
+        super().__init__()
+        if num_convs < 2: 
+            raise ValueError("num_convs must be >= 2")
+        self.num_convs = num_convs
 
-        return out, next_mask
+        self.convs = nn.ModuleList() 
+        self.norms = nn.ModuleList() 
+
+        for i in range(num_convs):
+            d = dilation if i == 0 else 1 
+            p = d 
+            in_i = in_ch if i == 0 else out_ch 
+            conv = nn.Conv2d(
+                in_i,
+                out_ch,
+                kernel_size=kernel_size,
+                stride=1,
+                dilation=d,
+                padding=p,
+                bias=not use_norm
+            )
+            self.convs.append(conv)
+            if use_norm:
+                num_groups = best_num_groups(out_ch) 
+                self.norms.append(MaskedGroupNorm(num_groups, out_ch))
+            else: 
+                self.norms.append(None)
+
+        self.relu = nn.ReLU(inplace=True)
+
+        self.proj = None 
+        if in_ch != out_ch:
+            self.proj = nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, bias=False)
+
+    def forward(self, x, mask=None):
+        out = x 
+        for i, conv in enumerate(self.convs):
+            out = conv(out)
+            if self.norms[i] is not None: 
+                norm_mask = mask 
+                if norm_mask is not None and norm_mask.ndim == 3: 
+                    norm_mask = norm_mask.unsqueeze(1)
+                out = self.norms[i](out, norm_mask)
+            if i < self.num_convs - 1: 
+                out = self.relu(out)
+
+        res = x if self.proj is None else self.proj(x)
+        out = out + res 
+        return out, mask 
 
 
 class SpatialBackbone(nn.Module): 
@@ -144,7 +209,6 @@ class SpatialBackbone(nn.Module):
         categorical_cardinality: int | None = None, 
         conv_channels: tuple[int, ...] = (32, 64, 128),
         kernel_size: int = 3, 
-        pool_size: int = 2, 
         use_bn: bool = True, 
         roi_output_size: int | tuple[int, int] = 7, 
         sampling_ratio: int = 2, 
@@ -154,6 +218,7 @@ class SpatialBackbone(nn.Module):
 
         self.model_in_channels = in_channels 
         self.out_dim           = conv_channels[-1] * 2 
+        self.spatial_scale     = 1.0 
         self.roi_output_size   = roi_output_size
         self.sampling_ratio    = sampling_ratio 
         self.aligned           = aligned 
@@ -168,14 +233,21 @@ class SpatialBackbone(nn.Module):
             self.embedding = nn.Embedding(self.categorical_cardinality + 1,
                                           self.categorical_embed_dim,
                                           padding_idx=0)
-        layers = []
-        ch     = self.categorical_embed_dim if self.categorical_input else in_channels
-        for out_ch in conv_channels: 
-            layers.append(MaskedConvBlock(ch, out_ch, kernel_size, pool_size, use_bn))
+        layers    = []
+        ch        = self.categorical_embed_dim if self.categorical_input else in_channels
+        dilations = [2**i for i in range(len(conv_channels))] 
+        for dilation, out_ch in zip(dilations, conv_channels): 
+            layers.append(DilatedResidualBlock(
+                ch,
+                out_ch,
+                kernel_size=kernel_size,
+                dilation=dilation,
+                num_convs=2,
+                use_norm=use_bn
+            ))
             ch = out_ch 
 
         self.net = nn.ModuleList(layers)
-
 
     def forward(
         self, 
@@ -245,7 +317,7 @@ class SpatialBackbone(nn.Module):
         mask: torch.Tensor | None, 
         x: torch.Tensor
     ) -> torch.Tensor: 
-        m = self.prep_mask(x, mask)
+        m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
         return self.masked_avgmax(feats, m)
 
@@ -259,33 +331,36 @@ class SpatialBackbone(nn.Module):
         if rois.numel() == 0: 
             return feats.new_zeros((0, self.out_dim))
 
-        scale_h = feats.shape[-2] / x.shape[-2] 
-        scale_w = feats.shape[-1] / x.shape[-1] 
-        if abs(scale_h - scale_w) > 1e-6: 
-            raise ValueError("non-uniform spatial scale not supported for roi_align")
-        spatial_scale = scale_h 
-    
-        pooled = tops.roi_align(
-            feats, 
-            rois, 
-            output_size=self.roi_output_size,
-            spatial_scale=spatial_scale,
-            sampling_ratio=self.sampling_ratio,
-            aligned=self.aligned
-        )
+        spatial_scale = self.spatial_scale 
 
         m = self.prep_mask(x, mask)
-        mask_pooled = tops.roi_align(
-            m,
-            rois,
-            output_size=self.roi_output_size,
-            spatial_scale=spatial_scale,
-            sampling_ratio=self.sampling_ratio,
-            aligned=self.aligned
-        )
+        m = m.to(dtype=feats.dtype)
 
+        chunk_size    = 16 
+        pooled_chunks = []
+        mask_chunks   = []
+    
+        for i in range(0, rois.size(0), chunk_size): 
+            rois_i   = rois[i:i+chunk_size]
+            pooled_i = tops.roi_align(
+                feats, rois_i, output_size=self.roi_output_size,
+                spatial_scale=spatial_scale, 
+                sampling_ratio=self.sampling_ratio, aligned=self.aligned
+            )
+            mask_i = tops.roi_align(
+                m, rois_i, output_size=self.roi_output_size,
+                spatial_scale=spatial_scale,
+                sampling_ratio=self.sampling_ratio, aligned=self.aligned
+            )
+
+            pooled_chunks.append(pooled_i)
+            mask_chunks.append(mask_i)
+
+        pooled      = torch.cat(pooled_chunks, dim=0)
+        mask_pooled = torch.cat(mask_chunks, dim=0)
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
         mask_pooled = mask_pooled.to(dtype=pooled.dtype)
+
         return self.masked_avgmax(pooled, mask_pooled)
 
     def _run_chunk(self, chunk, mask=None): 
@@ -293,14 +368,19 @@ class SpatialBackbone(nn.Module):
             x_idx = chunk.squeeze(1).long().clamp(0, self.categorical_cardinality)
 
             if mask is None: 
-                mask = (x_idx > 0).unsqueeze(1).to(dtype=chunk.dtype, device=chunk.device)
+                mask = (x_idx > 0).unsqueeze(1).to(device=chunk.device)
             else: 
                 if mask.ndim == 3: 
                     mask = mask.unsqueeze(1)
-                mask = mask.to(device=chunk.device, dtype=chunk.dtype)
+                mask = mask.to(device=chunk.device)
                 if mask.shape[-2:] != x_idx.shape[-2:]:
-                    mask = F.interpolate(mask, size=x_idx.shape[-2:], mode="nearest")
-                mask = mask * (x_idx > 0).unsqueeze(1).to(mask.dtype)
+                    mask = F.interpolate(
+                        mask.to(dtype=chunk.dtype), 
+                        size=x_idx.shape[-2:], 
+                        mode="nearest"
+                    )
+                    mask = mask > 0
+                mask = mask & (x_idx > 0).unsqueeze(1)
 
             emb   = self.embedding(x_idx)
             chunk = emb.permute(0, 3, 1, 2).contiguous() 
@@ -311,8 +391,17 @@ class SpatialBackbone(nn.Module):
             if mask is not None: 
                 mask = self.prep_mask(chunk, mask)
 
+        def _checkpoint(x, block, mask):
+            return block(x, mask)[0]
+
+        def _run_block(block, x, mask, training): 
+            if training: 
+                x = cp.checkpoint(_checkpoint, x, block, mask, use_reentrant=True)
+                return x, mask 
+            return block(x, mask)
+
         for block in self.net: 
-            chunk, mask = block(chunk, mask)
+            chunk, mask = _run_block(block, chunk, mask, self.training)
 
         return chunk
 
@@ -322,9 +411,8 @@ class SpatialBackbone(nn.Module):
         mask: torch.Tensor | None, 
         x: torch.Tensor 
     ) -> torch.Tensor: 
-        m = self.prep_mask(x, mask)
+        m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        m = m.to(dtype=feats.dtype)
         return self.masked_avgmax(feats, m)
 
     @staticmethod 
@@ -336,11 +424,14 @@ class SpatialBackbone(nn.Module):
             mask = torch.ones(
                 (x.shape[0], 1, x.shape[2], x.shape[3]), 
                 device=x.device,
-                dtype=x.dtype 
+                dtype=torch.bool
             )
         elif mask.ndim == 3: 
             mask = mask.unsqueeze(1)
-        return mask.to(device=x.device, dtype=x.dtype)
+        mask = mask.to(device=x.device)
+        if mask.dtype != torch.bool: 
+            mask = mask > 0
+        return mask
 
     @staticmethod 
     def rois_to_tensor(rois, device) -> torch.Tensor: 

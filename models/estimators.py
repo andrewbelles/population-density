@@ -23,7 +23,7 @@ from xgboost import XGBClassifier, XGBRegressor
 
 from utils.loss_funcs import (
     WassersteinLoss,
-    WassersteinDiceLoss
+    CornLoss
 )
 
 from scipy.sparse import csr_matrix
@@ -512,7 +512,6 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         *,
         conv_channels: tuple[int, ...] = (32, 64, 128, 256), 
         kernel_size: int = 3, 
-        pool_size: int = 2, 
         fc_dim: int = 128, 
         dropout: float = 0.2, 
         use_bn: bool = True, 
@@ -540,7 +539,6 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
     ): 
         self.conv_channels     = conv_channels
         self.kernel_size       = kernel_size
-        self.pool_size         = pool_size
         self.fc_dim            = fc_dim
         self.dropout           = dropout
         self.use_bn            = use_bn
@@ -574,6 +572,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
     def fit(self, X, y=None, val_loader=None): 
         torch.manual_seed(self.random_state)
+        if self.device.type == "cuda":
+             torch.backends.cudnn.benchmark = True
+             torch.backends.cuda.matmul.allow_tf32 = True
+             torch.backends.cudnn.allow_tf32 = True
 
         loader = self._ensure_loader(X, shuffle=self.shuffle)
 
@@ -618,14 +620,13 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             in_ch = self.in_channels or packed.shape[1]
             self._build_model(in_channels=in_ch)
             break
-
-        loss_fn_pre   = WassersteinLoss(n_classes=self.n_classes_)
-        loss_fn_post  = WassersteinDiceLoss(
-            n_classes=self.n_classes_, 
-            class_counts=class_counts,
-            distance_power=self.distance_power,
-            beta=self.loss_beta 
+        
+        class_weights = (class_counts.max() / np.clip(class_counts, 1, None))
+        loss_fn       = CornLoss(
+            n_classes=self.n_classes_,
+            class_weights=class_weights
         )
+        self.loss_fn_ = loss_fn
 
         scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
@@ -642,7 +643,6 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         start      = time.perf_counter()
         for ep in range(self.epochs): 
-            self.loss_fn_ = loss_fn_pre if ep < self.pretrain_epochs else loss_fn_post
             self.model_.train() 
 
             accum = max(1, int(self.accum_steps))
@@ -699,16 +699,6 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
     def loss(self, X) -> NDArray: 
         loader = self._ensure_loader(X, shuffle=False)
-        if not hasattr(self, "loss_fn_"): 
-            if hasattr(self, "class_counts_"):
-                self.loss_fn_ = WassersteinDiceLoss(
-                    n_classes=self.n_classes_,
-                    class_counts=self.class_counts_,
-                    distance_power=self.distance_power,
-                    beta=self.loss_beta,
-                )
-            else: 
-                self.loss_fn_ = WassersteinLoss(n_classes=self.n_classes_)
         return self._eval_loss(loader)
 
     def extract(self, X) -> NDArray: 
@@ -834,7 +824,6 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             categorical_input=self.categorical_input,
             conv_channels=self.conv_channels,
             kernel_size=self.kernel_size,
-            pool_size=self.pool_size,
             use_bn=self.use_bn,
             roi_output_size=self.roi_output_size,
             sampling_ratio=self.sampling_ratio,
@@ -843,13 +832,17 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.fc_       = nn.Linear(self.backbone_.out_dim, self.fc_dim)
         self.act_      = nn.ReLU(inplace=True)
         self.drop_     = nn.Dropout(self.dropout)
-        self.out_      = nn.Linear(self.fc_dim, self.n_classes_)
+        self.out_      = nn.Linear(self.fc_dim, self.n_classes_ - 1)
         self.head_     = nn.Sequential(self.fc_, self.act_, self.drop_, self.out_) 
 
         self.model_          = nn.Module() 
         self.model_.backbone = self.backbone_ 
         self.model_.head     = self.head_ 
         self.model_.to(self.device)
+
+        if self.device.type == "cuda": 
+            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
+            self.model_.to(memory_format=torch.channels_last)
 
     def _aggregate_tiles(
         self, 
@@ -928,6 +921,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             group_ids, group_weights = extra[-2], extra[-1]
 
         xb = torch.as_tensor(packed, device=self.device)
+        if xb.ndim == 4: 
+            xb = xb.contiguous(memory_format=torch.channels_last)
 
         if self.categorical_input: 
             if xb.dtype != torch.uint8: 
