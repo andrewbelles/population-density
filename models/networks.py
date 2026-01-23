@@ -201,10 +201,6 @@ class SpatialBackbone(nn.Module):
                 x_chunk = x[i:i+MICRO_BATCH_SIZE] 
                 m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
 
-                #if self.training and x_chunk.requires_grad: 
-                    #     args       = (x_chunk,) if m_chunk is None else (x_chunk, m_chunk)
-                #    feat_chunk = cp.checkpoint(self._run_chunk, *args, use_reentrant=False) 
-                #else: 
                 feat_chunk = self._run_chunk(x_chunk, m_chunk) 
 
                 if not isinstance(feat_chunk, torch.Tensor): 
@@ -234,10 +230,6 @@ class SpatialBackbone(nn.Module):
             rois_chunk = rois_t[sel].clone() 
             rois_chunk[:, 0] -= i 
 
-            #if self.training and x_chunk.requires_grad: 
-            #    args       = (x_chunk,) if m_chunk is None else (x_chunk, m_chunk)
-            #    feat_chunk = cp.checkpoint(self._run_chunk, *args, use_reentrant=False) 
-            #else: 
             feat_chunk = self._run_chunk(x_chunk, m_chunk) 
 
             if not isinstance(feat_chunk, torch.Tensor): 
@@ -296,23 +288,32 @@ class SpatialBackbone(nn.Module):
         return self.masked_avgmax(pooled, mask_pooled)
 
     def _run_chunk(self, chunk, mask=None): 
-        if mask is not None: 
-            mask = self.prep_mask(chunk, mask)
-
         if self.categorical_input: 
             x_idx = chunk.squeeze(1).long().clamp(0, self.categorical_cardinality)
+
+            if mask is None: 
+                mask = (x_idx > 0).unsqueeze(1).to(dtype=chunk.dtype, device=chunk.device)
+            else: 
+                if mask.ndim == 3: 
+                    mask = mask.unsqueeze(1)
+                mask = mask.to(device=chunk.device, dtype=chunk.dtype)
+                if mask.shape[-2:] != x_idx.shape[-2:]:
+                    mask = F.interpolate(mask, size=x_idx.shape[-2:], mode="nearest")
+                mask = mask * (x_idx > 0).unsqueeze(1).to(mask.dtype)
+
             emb   = self.embedding(x_idx)
             chunk = emb.permute(0, 3, 1, 2).contiguous() 
             if mask is not None: 
-                chunk = chunk * mask
+                chunk = chunk * mask 
 
-        current_x = chunk 
-        current_m = mask 
+        else: 
+            if mask is not None: 
+                mask = self.prep_mask(chunk, mask)
 
         for block in self.net: 
-            current_x, current_m = block(current_x, current_m)
+            chunk, mask = block(chunk, mask)
 
-        return current_x 
+        return chunk
 
     def _global_pool_chunk(
         self,

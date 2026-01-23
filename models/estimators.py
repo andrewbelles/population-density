@@ -889,13 +889,20 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if len(extra) >= 2: 
             group_ids, group_weights = extra[-2], extra[-1]
 
-        if self.categorical_input:
-            xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
-        else: 
-            xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
-        mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
+        xb = torch.as_tensor(packed, device=self.device)
 
-        if xb.shape[-2:] != mb.shape[-2:]:
+        if self.categorical_input: 
+            if xb.dtype != torch.uint8: 
+                xb = xb.to(dtype=torch.uint8)
+            mask_dtype = torch.float32 
+        else: 
+            if not xb.is_floating_point(): 
+                xb = xb.float() 
+            mask_dtype = xb.dtype 
+
+        mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+
+        if xb.shape[-2:] != mb.shape[-2:]: 
             raise RuntimeError(f"pre-backbone mismatch: xb={xb.shape}, mb={mb.shape}")
     
         y_np  = np.asarray(labels).reshape(-1)
@@ -903,8 +910,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
 
         feats  = self.model_.backbone(xb, mask=mb, rois=rois)
-        if group_ids is not None: 
+
+        if group_ids is not None and rois is not None: 
             feats = self._aggregate_tiles(feats, group_ids, group_weights, n_groups=len(labels))
+
         logits = self.model_.head(feats)
         loss   = self.loss_fn_(logits, yb)
 

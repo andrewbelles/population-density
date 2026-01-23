@@ -310,7 +310,7 @@ class SpatialTensorDataset(ABC):
                 continue 
 
             if np.issubdtype(spatial.dtype, np.floating): 
-                spatial_out = spatial.astype(np.float32, copy=False) 
+                spatial_out = spatial.astype(np.float16, copy=False) 
             else: 
                 spatial_out = spatial 
 
@@ -629,7 +629,7 @@ class SpatialTensorDataset(ABC):
         out_path = out_dir / "packed" / f"pack_{pack_idx:05d}.npz"
 
         if np.issubdtype(canvases.dtype, np.floating): 
-            canvases_out = canvases.astype(np.float32, copy=False) 
+            canvases_out = canvases.astype(np.float16, copy=False) 
         else: 
             canvases_out = canvases
 
