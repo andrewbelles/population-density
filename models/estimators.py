@@ -896,8 +896,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 xb = xb.to(dtype=torch.uint8)
             mask_dtype = torch.float32 
         else: 
-            if not xb.is_floating_point(): 
-                xb = xb.float() 
+            if xb.dtype != torch.float32: 
+                xb = xb.to(dtype=torch.float32)
             mask_dtype = xb.dtype 
 
         mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
@@ -909,13 +909,18 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         y_idx = np.searchsorted(self.classes_, y_np)
         yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
 
-        feats  = self.model_.backbone(xb, mask=mb, rois=rois)
+        with torch.amp.autocast("cuda", enabled=True): 
+            feats  = self.model_.backbone(xb, mask=mb, rois=rois)
 
-        if group_ids is not None and rois is not None: 
-            feats = self._aggregate_tiles(feats, group_ids, group_weights, n_groups=len(labels))
-
-        logits = self.model_.head(feats)
-        loss   = self.loss_fn_(logits, yb)
+            if group_ids is not None and rois is not None: 
+                feats = self._aggregate_tiles(
+                    feats, 
+                    group_ids, 
+                    group_weights, 
+                    n_groups=len(labels)
+                )
+            logits = self.model_.head(feats)
+            loss   = self.loss_fn_(logits, yb)
 
         bsz    = yb.size(0)
         return loss, bsz  

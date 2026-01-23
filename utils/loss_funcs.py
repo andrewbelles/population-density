@@ -104,12 +104,13 @@ class WassersteinLoss(nn.Module):
     def forward(self, logits, y): 
         probs    = torch.softmax(logits, dim=1)
         prob_cum = torch.cumsum(probs, dim=1)
-        
-        y_onehot = nn.functional.one_hot(y, num_classes=self.n_classes).float() 
+
+        y_onehot = nn.functional.one_hot(y, num_classes=self.n_classes)
+        y_onehot = y_onehot.to(device=logits.device, dtype=logits.dtype)
         y_cum    = torch.cumsum(y_onehot, dim=1)
 
-        loss     = torch.sum((prob_cum - y_cum)**2, dim=1)
+        loss     = torch.sum((prob_cum - y_cum) ** 2, dim=1)
         if self.class_weights is not None: 
-            weights = self.class_weights.to(logits.device)
+            weights = self.class_weights.to(device=logits.device, dtype=logits.dtype)
             loss    = loss * weights.gather(0, y)
         return loss.mean()

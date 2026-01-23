@@ -285,6 +285,7 @@ class SpatialBackbone(nn.Module):
         )
 
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
+        mask_pooled = mask_pooled.to(dtype=pooled.dtype)
         return self.masked_avgmax(pooled, mask_pooled)
 
     def _run_chunk(self, chunk, mask=None): 
@@ -323,6 +324,7 @@ class SpatialBackbone(nn.Module):
     ) -> torch.Tensor: 
         m = self.prep_mask(x, mask)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
+        m = m.to(dtype=feats.dtype)
         return self.masked_avgmax(feats, m)
 
     @staticmethod 
@@ -356,6 +358,7 @@ class SpatialBackbone(nn.Module):
         mask: torch.Tensor, 
         eps: float = 1e-6
     ) -> torch.Tensor: 
+        mask     = mask.to(device=x.device, dtype=x.dtype)
         sum_x    = (x * mask).flatten(2).sum(2)
         sum_m    = mask.flatten(2).sum(2)
         avg      = sum_x / (sum_m + eps)  
