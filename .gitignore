@@ -16,3 +16,5 @@ Cargo.lock
 *.clangd 
 *.log 
 *.env 
+
+check_packs.py
