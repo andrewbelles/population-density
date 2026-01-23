@@ -7,11 +7,9 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
-from scipy.sparse import csr_matrix
-from threadpoolctl import register
-import sys, time, torch, copy, xgboost  
-
 import numpy as np 
+
+import time, copy, time, sys 
 
 from utils.resources import ComputeStrategy
 
@@ -24,12 +22,14 @@ from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier, XGBRegressor  
 
 from utils.loss_funcs import (
-    focal_loss_obj, 
-    focal_mlogloss_eval, 
     WassersteinLoss
 )
 
+from scipy.sparse import csr_matrix
+
 from torch import nn 
+
+import torch 
 
 from torch.utils.data import DataLoader, TensorDataset, random_split, Subset 
 
@@ -894,6 +894,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         else: 
             xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
         mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
+
+        if xb.shape[-2:] != mb.shape[-2:]:
+            raise RuntimeError(f"pre-backbone mismatch: xb={xb.shape}, mb={mb.shape}")
     
         y_np  = np.asarray(labels).reshape(-1)
         y_idx = np.searchsorted(self.classes_, y_np)

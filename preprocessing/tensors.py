@@ -6,14 +6,15 @@
 # canvas counties together so that they are on uniform images for SpatialClassifier to use. 
 # 
 
-from numpy.typing import NDArray
-import imageio, fiona, csv, json, rasterio, rasterio.mask, argparse, sys, time 
+import imageio, fiona, csv, json, rasterio, rasterio.mask, argparse, sys, time, os
 
 import numpy as np 
 
 from pathlib import Path 
 
 from typing import Tuple, Dict, Iterable 
+
+from numpy.typing import NDArray
 
 from abc import ABC, abstractmethod
 
@@ -88,25 +89,56 @@ class SpatialLazyLoader:
                 weight = float(tile_mask.sum()) if weight_by_mask else 1.0 
 
                 placed = False 
+
                 # Try to place current bbox on any active canvases, if not make a new one 
                 for c_idx, (canvas, mask_canvas, cursor) in enumerate(canvases): 
-                    y, x = cursor 
+                    y, x, row_h = cursor 
+
+                    if x + w > W: 
+                        y     = y + row_h + gap 
+                        x     = 0 
+                        row_h = 0
+
                     if y + h <= H and x + w <= W: 
+
                         canvas[:, y:y+h, x:x+w]      = tile 
                         mask_canvas[0, y:y+h, x:x+w] = tile_mask 
+
                         rois.append((c_idx, y, x, y + h, x + w))
+
                         group_ids.append(sample_idx)
                         group_weights.append(weight)
-                        cursor[1] = x + w + gap 
+
+                        cursor[:] = [y, x + w + gap, max(row_h, h)]   
+                        placed = True 
+                        break 
+
+                    new_y = y + h + gap 
+                    if new_y + h <= H: 
+                        
+                        cursor[0] = new_y 
+                        cursor[1] = 0 
+                        
+                        canvas[:, new_y:new_y+h, 0:w] = tile 
+                        mask_canvas[0, new_y:new_y+h, 0:w] = tile_mask 
+                        rois.append((c_idx, new_y, 0, new_y + h, w))
+
+                        group_ids.append(sample_idx)
+                        group_weights.append(weight)
+
+                        cursor[1] = w + gap 
                         placed = True 
                         break 
 
                 if not placed: 
+
                     canvas      = np.zeros((spatial.shape[0], H, W), dtype=spatial.dtype)
                     mask_canvas = np.zeros((1, H, W), dtype=np.uint8)
+
                     canvas[:, :h, :w]      = tile 
                     mask_canvas[0, :h, :w] = tile_mask
-                    canvases.append([canvas, mask_canvas, [0, w + gap]])
+
+                    canvases.append([canvas, mask_canvas, [0, w + gap, h]])
                     rois.append((len(canvases) - 1, 0, 0, h, w)) 
                     group_ids.append(sample_idx)
                     group_weights.append(weight)
@@ -329,12 +361,41 @@ class SpatialTensorDataset(ABC):
         tile_hw=None,
         gap: int = 32,
         weight_by_mask: bool = True, 
+        pack_ram_mb: int | None = None, 
         max_canvases: int | None = 8
     ):
         out_dir    = Path(out_dir)
         packed_dir = out_dir / "packed" 
         packed_dir.mkdir(parents=True, exist_ok=True)
+
+        if pack_ram_mb is None: 
+            env_mb      = os.environ.get("TOPG_TENSOR_RAM_MB", "")
+            pack_ram_mb = int(env_mb) if env_mb.strip() else None 
+
+        ram_bytes = None 
+        if pack_ram_mb is not None and pack_ram_mb > 0: 
+            ram_bytes = pack_ram_mb * 1024 * 1024 
+
+        pack_batch_eff   = int(pack_batch)
+        max_canvases_eff = max_canvases
         
+        def _apply_ram_limits(spatial, mask): 
+            nonlocal pack_batch_eff, max_canvases_eff 
+            if ram_bytes is None: 
+                return 
+            sample_bytes = spatial.nbytes + mask.nbytes 
+            if sample_bytes > 0: 
+                est_batch      = max(1, int((ram_bytes * 0.5) / sample_bytes))
+                pack_batch_eff = max(1, min(pack_batch_eff, est_batch))
+
+            bytes_per_canvas = self._estimate_canvas_bytes(spatial, canvas_hw)
+            if bytes_per_canvas > 0: 
+                est_canvases = max(1, int((ram_bytes * 0.5) / bytes_per_canvas))
+                if max_canvases_eff is None: 
+                    max_canvases_eff = est_canvases 
+                else: 
+                    max_canvases_eff = min(max_canvases_eff, est_canvases)
+
         batch          = []
         records        = []
         all_labels     = []
@@ -394,6 +455,8 @@ class SpatialTensorDataset(ABC):
             if spatial.size == 0: 
                 continue 
 
+            _apply_ram_limits(spatial, mask)
+
             batch.append((spatial, mask, label, fips))
             count += 1 
 
@@ -433,7 +496,8 @@ class SpatialTensorDataset(ABC):
             for r in records: 
                 f.write(json.dumps(r) + "\n")
 
-        print(f"[save_packed] wrote {len(records)} packs to {out_dir} (manifest: {manifest_path})")
+        print(f"[save_packed] wrote {len(records)} packs to {out_dir} "
+              f"(manifest: {manifest_path})")
 
     def _load_labels(self) -> Dict[str, int]: 
         path = Path(self.labels_path)
@@ -550,6 +614,7 @@ class SpatialTensorDataset(ABC):
         tile_hw=None,
         gap: int = 32, 
         weight_by_mask: bool = True,
+        compress: bool = True
     ) -> dict: 
 
         packed = SpatialLazyLoader.pack(
@@ -568,7 +633,8 @@ class SpatialTensorDataset(ABC):
         else: 
             canvases_out = canvases
 
-        np.savez_compressed(
+        save_fn = np.savez_compressed if compress else np.savez 
+        save_fn(
             out_path,
             canvases=canvases_out,
             masks=masks.astype(np.uint8),
@@ -627,6 +693,14 @@ class SpatialTensorDataset(ABC):
         y = (x - vmin) / (vmax - vmin)
         y = np.clip(y, 0.0, 1.0)
         return (y * 255.0).astype(np.uint8)
+
+    @staticmethod 
+    def _estimate_canvas_bytes(spatial, canvas_hw): 
+        H, W       = canvas_hw 
+        channels   = spatial.shape[0] if spatial.ndim == 3 else 1 
+        data_bytes = channels * H * W * spatial.dtype.itemsize 
+        mask_bytes = H * W 
+        return data_bytes + mask_bytes
 
 # ---------------------------------------------------------
 # Viirs nighttime lights tensor dataset  
@@ -852,6 +926,7 @@ def main():
     parser.add_argument("--skip-nlcd", action="store_true")
     parser.add_argument("--packed", action="store_true")
     parser.add_argument("--pack-size", type=int, default=8)
+    parser.add_argument("--pack-ram-mb", type=int, default=None)
     parser.add_argument("--downsample", type=int, default=1)
     args = parser.parse_args()
 
@@ -871,7 +946,8 @@ def main():
         )
         viirs.save(viirs_out) if not args.packed else viirs.save_packed(
             viirs_out,
-            pack_batch=args.pack_size 
+            pack_batch=args.pack_size,
+            pack_ram_mb=args.pack_ram_mb
         )
 
     if not args.skip_nlcd: 
@@ -884,7 +960,8 @@ def main():
         )
         nlcd.save(nlcd_out) if not args.packed else nlcd.save_packed(
             nlcd_out,
-            pack_batch=args.pack_size 
+            pack_batch=args.pack_size,
+            pack_ram_mb=args.pack_ram_mb
         )
 
 

@@ -6,35 +6,125 @@
 # 
 # 
 
-import torch 
+import torch, sys 
 
 from torch import nn 
 
 import torch.nn.functional as F 
 
-import torch.utils.checkpoint as cp
-
 import torchvision.ops as tops 
 
-def _conv_block(in_ch, out_ch, kernel_size=3, pool_size=2, use_bn=True): 
-    layers = [
-        nn.Conv2d(
+import torch.utils.checkpoint as cp
+
+
+class MaskedGroupNorm(nn.Module): 
+    '''
+    Uses GroupNorm but Masks out padding to ensure zeros do not pollute normalization 
+    '''
+
+    def __init__(
+        self, 
+        num_groups,
+        num_channels,
+        eps: float = 1e-6, 
+        affine: bool = True 
+    ): 
+        super().__init__()
+        self.num_groups   = num_groups 
+        self.num_channels = num_channels
+        self.eps          = eps 
+
+        if affine: 
+            self.weight = nn.Parameter(torch.ones(num_channels))
+            self.bias   = nn.Parameter(torch.zeros(num_channels))
+        else: 
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward(self, x, mask=None): 
+        if mask is None: 
+            return F.group_norm(x, self.num_groups, self.weight, self.bias, self.eps)
+
+        if mask.ndim == 3: 
+            mask = mask.unsqueeze(1)
+
+        if mask.shape[-2:] != x.shape[-2:]:
+            mask = F.interpolate(mask, size=x.shape[-2:], mode="nearest")
+
+        n, c, h, w = x.shape
+        g  = self.num_groups 
+        xg = x.view(n, g, c // g, h, w) 
+        mg = mask.view(n, 1, 1, h, w)
+
+        sum_m = mg.sum((2, 3, 4))
+        denom = sum_m.clamp(min=1.0)
+        mean  = (xg * mg).sum((2, 3, 4)) / denom 
+        mean  = mean.view(n, g, 1, 1, 1)
+
+        var   = ((xg - mean)**2 * mg).sum((2, 3, 4)) / denom 
+        var   = var.view(n, g, 1, 1, 1)
+        x     = (xg - mean) / torch.sqrt(var + self.eps)
+
+        x = x.view(n, c, h, w)
+        if self.weight is not None: 
+            x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        return x 
+
+
+class MaskedConvBlock(nn.Module): 
+    '''
+    A single convolutional block using MaskedGroupNorm
+    '''
+
+    def __init__(
+        self, 
+        in_ch,  
+        out_ch,
+        kernel_size=3,
+        pool_size=2, 
+        use_norm=True 
+    ): 
+        super().__init__()
+        self.conv = nn.Conv2d(
             in_ch, 
             out_ch,
             kernel_size=kernel_size,
             padding=kernel_size // 2, 
-            bias=not use_bn 
+            bias=not use_norm 
         )
-    ]
-    
-    if use_bn: 
-        num_groups = 8 if out_ch < 32 else 32 
-        layers.append(nn.GroupNorm(num_groups, out_ch))
-    layers += [
-        nn.ReLU(inplace=True),
-        nn.MaxPool2d(kernel_size=pool_size)
-    ]
-    return nn.Sequential(*layers)
+        self.norm = None 
+        if use_norm: 
+            num_groups = 8 if out_ch < 32 else 32 
+            self.norm  = MaskedGroupNorm(num_groups, out_ch)
+        self.relu = nn.ReLU(inplace=True)
+        self.pool = nn.MaxPool2d(kernel_size=pool_size)
+
+    def forward(self, x, mask=None): 
+        out = self.conv(x)
+
+        if self.norm is not None: 
+            norm_mask = mask 
+            if norm_mask is not None: 
+                if norm_mask.ndim == 3: 
+                    norm_mask = norm_mask.unsqueeze(1)
+
+                if norm_mask.shape[-2:] != out.shape[-2:]:
+                    norm_mask = F.interpolate(norm_mask, size=out.shape[-2:], mode="nearest")
+
+            out = self.norm(out, norm_mask)
+
+        out = self.relu(out)
+        out = self.pool(out)
+
+        next_mask = mask 
+        if next_mask is not None: 
+            if next_mask.ndim ==3: 
+                next_mask = next_mask.unsqueeze(1)
+
+            next_mask = self.pool(next_mask)
+            next_mask = (next_mask > 0).to(next_mask.dtype)
+
+        return out, next_mask
 
 
 class SpatialBackbone(nn.Module): 
@@ -63,23 +153,10 @@ class SpatialBackbone(nn.Module):
         super().__init__()
 
         self.model_in_channels = in_channels 
-
-        layers = []
-        ch     = in_channels 
-
-        for out_ch in conv_channels: 
-            layers.append(_conv_block(ch, out_ch, kernel_size, pool_size, use_bn))
-            ch = out_ch 
-
-        self.net               = nn.Sequential(*layers)
-
-        if hasattr(torch, "compile"):
-            self.net           = torch.compile(self.net)
-
-        self.out_dim         = conv_channels[-1] * 2 # avg + max concat  
-        self.roi_output_size = roi_output_size
-        self.sampling_ratio  = sampling_ratio 
-        self.aligned         = aligned 
+        self.out_dim           = conv_channels[-1] * 2 
+        self.roi_output_size   = roi_output_size
+        self.sampling_ratio    = sampling_ratio 
+        self.aligned           = aligned 
 
         # Categorical information for NLCD
         self.categorical_input       = categorical_input
@@ -91,9 +168,13 @@ class SpatialBackbone(nn.Module):
             self.embedding = nn.Embedding(self.categorical_cardinality + 1,
                                           self.categorical_embed_dim,
                                           padding_idx=0)
-            ch = self.categorical_embed_dim
-        else: 
-            ch = in_channels
+        layers = []
+        ch     = self.categorical_embed_dim if self.categorical_input else in_channels
+        for out_ch in conv_channels: 
+            layers.append(MaskedConvBlock(ch, out_ch, kernel_size, pool_size, use_bn))
+            ch = out_ch 
+
+        self.net = nn.ModuleList(layers)
 
 
     def forward(
@@ -103,19 +184,28 @@ class SpatialBackbone(nn.Module):
         rois: list[tuple[int, int, int, int, int]] | None = None 
     ) -> torch.Tensor: 
 
+        if mask is not None: 
+            if mask.ndim == 3: 
+                mask = mask.unsqueeze(1)
+            mask = mask.to(device=x.device, dtype=x.dtype)
+            if mask.shape[-2:] != x.shape[-2:]: 
+                mask = F.interpolate(mask, size=x.shape[-2:], mode="nearest")
+
         MICRO_BATCH_SIZE = 16 
-        n_tiles          = x.shape[0]
+        n_tiles = x.shape[0]
 
         if rois is None: 
             pooled_chunks = []
             for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
+
                 x_chunk = x[i:i+MICRO_BATCH_SIZE] 
                 m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
 
-                if self.training and x_chunk.requires_grad: 
-                    feat_chunk = cp.checkpoint(self._run_chunk, x_chunk, use_reentrant=True) 
-                else: 
-                    feat_chunk = self._run_chunk(x_chunk) 
+                #if self.training and x_chunk.requires_grad: 
+                    #     args       = (x_chunk,) if m_chunk is None else (x_chunk, m_chunk)
+                #    feat_chunk = cp.checkpoint(self._run_chunk, *args, use_reentrant=False) 
+                #else: 
+                feat_chunk = self._run_chunk(x_chunk, m_chunk) 
 
                 if not isinstance(feat_chunk, torch.Tensor): 
                     raise TypeError 
@@ -144,10 +234,11 @@ class SpatialBackbone(nn.Module):
             rois_chunk = rois_t[sel].clone() 
             rois_chunk[:, 0] -= i 
 
-            if self.training and x_chunk.requires_grad: 
-                feat_chunk = cp.checkpoint(self._run_chunk, x_chunk, use_reentrant=True) 
-            else: 
-                feat_chunk = self._run_chunk(x_chunk) 
+            #if self.training and x_chunk.requires_grad: 
+            #    args       = (x_chunk,) if m_chunk is None else (x_chunk, m_chunk)
+            #    feat_chunk = cp.checkpoint(self._run_chunk, *args, use_reentrant=False) 
+            #else: 
+            feat_chunk = self._run_chunk(x_chunk, m_chunk) 
 
             if not isinstance(feat_chunk, torch.Tensor): 
                 raise TypeError 
@@ -200,17 +291,28 @@ class SpatialBackbone(nn.Module):
             sampling_ratio=self.sampling_ratio,
             aligned=self.aligned
         )
-        mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
 
+        mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
         return self.masked_avgmax(pooled, mask_pooled)
 
-    def _run_chunk(self, chunk): 
+    def _run_chunk(self, chunk, mask=None): 
+        if mask is not None: 
+            mask = self.prep_mask(chunk, mask)
 
         if self.categorical_input: 
-            x_idx = chunk.squeeze(1).long().clamp(0, self.categorical_cardinality) 
+            x_idx = chunk.squeeze(1).long().clamp(0, self.categorical_cardinality)
             emb   = self.embedding(x_idx)
-            chunk = emb.permute(0, 3, 1, 2).contiguous()
-        return self.net(chunk) 
+            chunk = emb.permute(0, 3, 1, 2).contiguous() 
+            if mask is not None: 
+                chunk = chunk * mask
+
+        current_x = chunk 
+        current_m = mask 
+
+        for block in self.net: 
+            current_x, current_m = block(current_x, current_m)
+
+        return current_x 
 
     def _global_pool_chunk(
         self,
