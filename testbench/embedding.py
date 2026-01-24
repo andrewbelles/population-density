@@ -34,14 +34,21 @@ from testbench.utils.data      import (
     load_embedding_mat 
 )
 
-from analysis.hyperparameter   import (
+from optimization.evaluators   import (
     ProjectorEvaluator,
     XGBOrdinalEvaluator,
+    SpatialEvaluator
+)
+
+from optimization.spaces       import (
     define_projector_space,
     define_xgb_ordinal_space,
+    define_spatial_space
+)
+
+from optimization.engine       import (
     run_optimization,
-    define_spatial_space,
-    SpatialEvaluator
+    EngineConfig
 )
 
 from testbench.utils.config    import (
@@ -97,6 +104,13 @@ def _row_score(name: str, score: float):
 
 def _projector_fold_factory(name: str, proj_trials: int, random_state: int): 
     def _projector_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
+
+        config = EngineConfig(
+            n_trials=proj_trials, 
+            direction="minimize", 
+            random_state=random_state
+        )
+
         proj_eval = ProjectorEvaluator(
             train_emb, 
             train_y, 
@@ -108,9 +122,7 @@ def _projector_fold_factory(name: str, proj_trials: int, random_state: int):
         best_params, _ = run_optimization(
             name="Spatial/VIIRS_ROI_Projector",
             evaluator=proj_eval,
-            n_trials=proj_trials,
-            direction="minimize",
-            random_state=random_state
+            config=config
         )
 
         proj = EmbeddingProjector(
@@ -199,13 +211,20 @@ def _spatial_opt(
         config=cv_config(folds, random_state)
     )
 
-    best_params, best_value = run_optimization(
-        name=model_key,
-        evaluator=evaluator,
+    devices = strategy.visible_devices()
+    config  = EngineConfig(
         n_trials=trials,
         direction="minimize",
         random_state=random_state,
-        sampler_type="multivariate-tpe"
+        sampler_type="multivariate-tpe",
+        mp_enabled=(True if devices else False),
+        devices=(devices if devices else None)
+    )
+
+    best_params, best_value = run_optimization(
+        name=model_key,
+        evaluator=evaluator,
+        config=config
     )
 
     save_model_config(config_path, model_key, best_params)
@@ -225,11 +244,10 @@ def _spatial_extract(
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     proj_trials: int = 50,
-    in_channels: int = 1, 
     **_
 ): 
-    ds, labels, fips, collate_fn = load_spatial_dataset(root_dir, canvas_hw)
-    
+    ds, labels, fips, collate_fn, in_channels = load_spatial_dataset(root_dir, canvas_hw)
+
     params = load_model_params(config_path, model_key)
     params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
 
@@ -304,13 +322,17 @@ def test_saipe_opt(
         config=config
     )
 
-    best_params, best_value = run_optimization(
-        name=model_key,
-        evaluator=evaluator,
+    config  = EngineConfig(
         n_trials=trials,
         direction="minimize",
         random_state=random_state,
         sampler_type="multivariate-tpe"
+    )
+
+    best_params, best_value = run_optimization(
+        name=model_key,
+        evaluator=evaluator,
+        config=config
     )
 
     save_model_config(config_path, model_key, best_params)
@@ -333,7 +355,7 @@ def test_saipe_extract(
     proj_trials: int = 50,
     **_ 
 ): 
-    ds, labels, fips, collate_fn = load_spatial_dataset(root_dir, canvas_hw)
+    ds, labels, fips, collate_fn, _ = load_spatial_dataset(root_dir, canvas_hw)
     
     params = load_model_params(config_path, model_key)
     params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
@@ -481,7 +503,6 @@ def test_viirs_extract(
         random_state=random_state,
         config_path=config_path,
         proj_trials=proj_trials,
-        in_channels=1
     )
 
 def test_nlcd_opt(
@@ -524,7 +545,6 @@ def test_nlcd_extract(
         random_state=random_state,
         config_path=config_path,
         proj_trials=proj_trials,
-        in_channels=7
     )
 
 # ---------------------------------------------------------

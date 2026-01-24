@@ -18,21 +18,25 @@ from analysis.cross_validation import (
     CVConfig,
     CLASSIFICATION,
     FULL_CLASSIF,
-    TaskSpec
 )
 
 from models.graph.processing import CorrectAndSmooth
 
-from analysis.hyperparameter import (
-    CorrectAndSmoothEvaluator,
-    run_nested_cv,
+from optimization.engine     import (
+    NestedCVConfig,
     run_optimization,
-    make_train_mask 
+    EngineConfig 
 )
 
-from utils.helpers import (
+from optimization.evaluators import (
+    CorrectAndSmoothEvaluator,
+    StandardEvaluator 
+)
+
+from utils.helpers           import (
     project_path,
     save_model_config,
+    make_train_mask
 )
 
 from testbench.utils.paths import (
@@ -210,22 +214,34 @@ def _optimize_dataset(
 
     leaderboard = []
     for model_name in MODELS: 
+        evaluator = StandardEvaluator(
+            filepath=filepath,
+            loader_func=loader_func,
+            base_factory_func=get_factory(model_name, strategy=strategy),
+            param_space=get_param_space(model_name),
+            task=OPT_TASK,
+            config=inner_config,
+            outer_config=outer_config
+        )
+
+        config = EngineConfig(
+            n_trials=n_trials,
+            direction=direction,
+            random_state=RANDOM_STATE 
+            nested=NestedCVConfig(
+                inner_n_trials=n_trials,
+                inner_sampler_type="multivariate-tpe",
+                inner_early_stopping_rounds=EARLY_STOP,
+                inner_early_stopping_delta=EARLY_STOP_EPS,
+                parallel_outer=False 
+            )
+        )
+
         with contextlib.redirect_stdout(sys.stderr): 
-            mean_score, best_params, _, _ = run_nested_cv(
+            best_params, mean_score, _ = run_optimization(
                 name=f"{dataset_key}_{model_name}",
-                filepath=filepath,
-                loader_func=loader_func,
-                model_factory=get_factory(model_name, strategy=strategy),
-                param_space=get_param_space(model_name),
-                task=OPT_TASK,
-                outer_config=outer_config,
-                direction=direction, 
-                inner_config=inner_config,
-                n_trials=n_trials,
-                random_state=RANDOM_STATE,
-                early_stopping_rounds=EARLY_STOP,
-                early_stopping_delta=EARLY_STOP_EPS,
-                sampler_type="multivariate-tpe"
+                evaluator=evaluator,
+                config=config
             )
 
         best_params = normalize_params(model_name, best_params) 
@@ -272,16 +288,20 @@ def _optimize_cs(
         compute_strategy=strategy
     )
 
+    config = EngineConfig(
+        n_trials=CS_TRIALS,
+        direction="maximize",
+        sampler_type="multivariate-tpe",
+        random_state=RANDOM_STATE,
+        early_stopping_rounds=CS_EARLY_STOP,
+        early_stopping_delta=EARLY_STOP_EPS
+    )
+
     with contextlib.redirect_stdout(sys.stderr):
         best_params, best_value = run_optimization(
             name=key,
             evaluator=evaluator,
-            n_trials=CS_TRIALS,
-            direction="maximize",
-            early_stopping_rounds=CS_EARLY_STOP,
-            early_stopping_delta=EARLY_STOP_EPS,
-            sampler_type="multivariate-tpe",
-            random_state=RANDOM_STATE
+            config=config,
         )
 
     save_model_config(config_path, key, best_params)

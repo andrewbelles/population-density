@@ -8,7 +8,7 @@
 
 import torch, sys, warnings 
 
-from torch import dtype, nn 
+from torch import dtype, memory_format, nn 
 
 import torch.nn.functional as F 
 
@@ -33,7 +33,7 @@ class MaskedGroupNorm(nn.Module):
         self, 
         num_groups,
         num_channels,
-        eps: float = 1e-6, 
+        eps: float = 1e-4, 
         affine: bool = True 
     ): 
         super().__init__()
@@ -56,24 +56,31 @@ class MaskedGroupNorm(nn.Module):
             mask = mask.unsqueeze(1)
 
         if mask.shape[-2:] != x.shape[-2:]:
-            mask = mask.to(device=x.device, dtype=x.dtype)
-            mask = F.interpolate(mask, size=x.shape[-2:], mode="nearest")
-        else: 
-            mask = mask.to(device=x.device, dtype=x.dtype)
+            raise ValueError("mask size mismatch. ensure mask precompute is correct")
+
+        mg = mask.to(device=x.device)
+        if mg.dtype != torch.bool: 
+            mg = mg > 0 
 
         n, c, h, w = x.shape
         g  = self.num_groups 
         xg = x.view(n, g, c // g, h, w) 
-        mg = mask.view(n, 1, 1, h, w)
+        mg = mg.view(n, 1, 1, h, w)
 
-        sum_m = mg.sum((2, 3, 4))
-        denom = sum_m.clamp(min=1.0)
-        mean  = (xg * mg).sum((2, 3, 4)) / denom 
+        sum_m    = mg.sum((2, 3, 4), dtype=torch.float32)
+        has_mask = sum_m > 0 
+        denom    = sum_m.clamp(min=1.0)
+
+        mean  = (xg * mg).sum((2, 3, 4), dtype=torch.float32) / denom  
         mean  = mean.view(n, g, 1, 1, 1)
 
-        var   = ((xg - mean)**2 * mg).sum((2, 3, 4)) / denom 
+        var   = ((xg - mean)**2 * mg).sum((2, 3, 4), dtype=torch.float32) / denom  
         var   = var.view(n, g, 1, 1, 1)
-        x     = (xg - mean) / torch.sqrt(var + self.eps)
+        x     = (xg - mean) / torch.sqrt(var.to(dtype=xg.dtype) + self.eps)
+
+        if (~has_mask).any():
+            valid = has_mask.view(n, g, 1, 1, 1) 
+            x     = torch.where(valid, x, torch.zeros_like(x))
 
         x = x.view(n, c, h, w)
         if self.weight is not None: 
@@ -262,11 +269,14 @@ class SpatialBackbone(nn.Module):
         if mask is not None: 
             if mask.ndim == 3: 
                 mask = mask.unsqueeze(1)
-            mask = mask.to(device=x.device, dtype=x.dtype)
-            if mask.shape[-2:] != x.shape[-2:]: 
-                mask = F.interpolate(mask, size=x.shape[-2:], mode="nearest")
+            mask = mask.to(device=x.device)
+        else: 
+            mask = (x > 0).to(device=x.device)
 
-        MICRO_BATCH_SIZE = 16 
+        sizes    = {(x.shape[-2], x.shape[-1])}
+        mask_pyr = self._build_masks(mask, sizes, x.device) if mask is not None else None  
+
+        MICRO_BATCH_SIZE = 8 
         n_tiles = x.shape[0]
 
         if rois is None: 
@@ -275,6 +285,8 @@ class SpatialBackbone(nn.Module):
 
                 x_chunk = x[i:i+MICRO_BATCH_SIZE] 
                 m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
+                if mask_pyr is not None: 
+                    m_chunk = mask_pyr[(x.shape[-2], x.shape[-1])][i:i+MICRO_BATCH_SIZE]
 
                 feat_chunk = self._run_chunk(x_chunk, m_chunk) 
 
@@ -297,6 +309,8 @@ class SpatialBackbone(nn.Module):
         for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
             x_chunk = x[i:i+MICRO_BATCH_SIZE] 
             m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
+            if mask_pyr is not None: 
+                m_chunk = mask_pyr[(x.shape[-2], x.shape[-1])][i:i+MICRO_BATCH_SIZE]
 
             sel = (b_idx >= i) & (b_idx < i + MICRO_BATCH_SIZE)
             if not sel.any(): 
@@ -386,7 +400,8 @@ class SpatialBackbone(nn.Module):
                 mask = mask & (x_idx > 0).unsqueeze(1)
 
             emb   = self.embedding(x_idx)
-            chunk = emb.permute(0, 3, 1, 2).contiguous() 
+            chunk = emb.permute(0, 3, 1, 2).contiguous(memory_format=torch.channels_last) 
+
             if mask is not None: 
                 chunk = chunk * mask 
 
@@ -394,14 +409,26 @@ class SpatialBackbone(nn.Module):
             if mask is not None: 
                 mask = self.prep_mask(chunk, mask)
 
-        def _checkpoint(x, block, mask):
-            return block(x, mask)[0]
+            if not chunk.is_contiguous(memory_format=torch.channels_last):
+                chunk = chunk.contiguous(memory_format=torch.channels_last)
 
         def _run_block(block, x, mask, training): 
-            if training: 
-                x = cp.checkpoint(_checkpoint, x, block, mask, use_reentrant=True)
-                return x, mask 
-            return block(x, mask)
+            if not training: 
+                return block(x, mask) 
+
+            def _ckpt_wrapper(inp, m):
+                out, _ = block(inp, m)
+                return out 
+
+            x = cp.checkpoint(
+                _ckpt_wrapper,
+                x,
+                mask,
+                use_reentrant=True,
+                preserve_rng_state=False
+            )
+
+            return x, mask 
 
         for block in self.net: 
             chunk, mask = _run_block(block, chunk, mask, self.training)
@@ -417,6 +444,21 @@ class SpatialBackbone(nn.Module):
         m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
         return self.masked_pooling_head(feats, m)
+
+    def _build_masks(self, mask, sizes, device): 
+        if mask is None: 
+            return None 
+        if mask.ndim == 3: 
+            mask = mask.unsqueeze(1)
+        mask = mask.to(device=device)
+        out = {}
+        for (h, w) in sizes: 
+            if mask.shape[-2:] == (h, w):
+                out[(h, w)] = mask 
+            else: 
+                m = F.interpolate(mask.float(), size=(h, w), mode="nearest")
+                out[(h, w)] = (m > 0)
+        return out 
 
     @staticmethod 
     def prep_mask(
@@ -457,32 +499,35 @@ class SpatialBackbone(nn.Module):
         Concatenates log sum, generalized mean, max, and shannon entropy 
         of features over a block. 
         '''
-        mask     = mask.to(device=x.device, dtype=x.dtype)
-        x_flat   = x.flatten(2)
-        m_flat   = mask.flatten(2)
+        mask_b   = mask.to(device=x.device)
+        if mask_b.dtype != torch.bool: 
+            mask_b = mask_b > 0 
+
+        x_f      = x.to(dtype=torch.float32)
+        x_flat   = x_f.flatten(2)
+        m_flat   = mask_b.flatten(2).to(dtype=torch.float32)
 
         sum_m    = m_flat.sum(2).clamp(min=eps)
         has_mask = sum_m > eps 
 
-        sum_x_32 = (x_flat.float() * m_flat.float()).sum(2)
-        log_sum  = torch.log1p(sum_x_32).to(dtype=x.dtype)
+        sum_x    = (x_flat * m_flat).sum(2)
+        log_sum  = torch.log1p(sum_x).to(dtype=x.dtype)
 
-        x_clamp  = x_flat.clamp(min=eps)
-        sum_xp   = (x_clamp.pow(p) * m_flat).sum(2)
+        sum_xp   = (x_flat.clamp(min=eps).pow(p) * m_flat).sum(2)
         gem      = (sum_xp / sum_m).pow(1.0 / p)
-        gem      = torch.where(has_mask, gem, torch.zeros_like(gem))
+        gem      = torch.where(has_mask, gem, torch.zeros_like(gem)).to(dtype=x.dtype)
 
-        neg_inf  = torch.finfo(x.dtype).min 
+        neg_inf  = torch.finfo(x_f.dtype).min 
         mx_vals  = torch.where(
-            m_flat > 0, x_flat, torch.tensor(neg_inf, device=x.device, dtype=x.dtype)
+            m_flat > 0, x_flat, torch.tensor(neg_inf, device=x.device, dtype=x_f.dtype)
         )
         mx       = mx_vals.max(2).values 
-        mx       = torch.where(has_mask, mx, torch.zeros_like(mx))
+        mx       = torch.where(has_mask, mx, torch.zeros_like(mx)).to(dtype=x.dtype)
 
-        norm     = sum_x_32.to(dtype=x.dtype).unsqueeze(2) + eps 
+        norm     = sum_x.to(dtype=x.dtype).unsqueeze(2) + eps 
         p_x      = (x_flat * m_flat) / norm 
-        entropy  = -(p_x * torch.log(p_x + eps)).sum(2)
-        entropy  = torch.where(has_mask, entropy, torch.zeros_like(entropy))
+        entropy  = torch.special.entr(p_x).sum(2)
+        entropy  = torch.where(has_mask, entropy, torch.zeros_like(entropy)).to(dtype=x.dtype)
 
         return torch.cat([log_sum, gem, mx, entropy], dim=1)
 

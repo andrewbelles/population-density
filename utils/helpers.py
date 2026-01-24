@@ -18,6 +18,8 @@ from abc import ABC, abstractmethod
 
 from sklearn.model_selection import StratifiedShuffleSplit, ShuffleSplit
 
+from preprocessing.loaders import load_oof_predictions
+
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
 MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
@@ -64,6 +66,25 @@ def normalize_hidden_dims(value):
     if isinstance(value, int): 
         return (int(value),)
     return value 
+
+def load_probs_labels_fips(proba_path): 
+    oof   = load_oof_predictions(proba_path) 
+    probs = np.asarray(oof["probs"], dtype=np.float64)
+    if probs.ndim != 3: 
+        raise ValueError(f"expected probs (n, m, c), got {probs.shape}")
+    if probs.shape[1] == 1: 
+        P = probs[:, 0, :]
+    else: 
+        P = probs.mean(axis=1)
+    y    = np.asarray(oof["labels"]).reshape(-1)
+    fips = np.asarray(oof["fips_codes"]).astype("U5")
+    class_labels = np.asarray(oof["class_labels"]).reshape(-1) 
+    return P, y, fips, class_labels  
+
+def load_probs_for_fips(fips: NDArray[np.str_], proba_path): 
+    P, _, oof_fips, class_labels = load_probs_labels_fips(proba_path)
+    idx = align_on_fips(fips, oof_fips)
+    return P[idx], class_labels
 
 # ---------------------------------------------------------
 # Dataset Manipulation  

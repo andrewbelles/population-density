@@ -118,3 +118,11 @@ class ComputeStrategy:
             greedy=greedy
         )
 
+    def visible_devices(self) -> list[int]: 
+        if self.device != "cuda": 
+            return []
+        raw = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if raw in ("", "-1"):
+            return []
+        tokens = [t.strip() for t in raw.split(",") if t.strip() != ""]
+        return list(range(len(tokens))) 
