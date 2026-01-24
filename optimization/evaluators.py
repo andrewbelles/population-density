@@ -589,9 +589,10 @@ class SpatialEvaluator(OptunaEvaluator):
     def build_worker_specs(self, params: Dict[str, Any], devices=None): 
         specs = []
 
-        splits, _, _ = _iter_spatial_splits(
+        splits_iter, _, _ = _iter_spatial_splits(
             self.data, self.dataset, self.labels, self.task, self.config)
-        
+        splits = list(splits_iter)
+
         device_ids = devices or [None]
         groups     = _split_device_groups(device_ids, len(splits))
 

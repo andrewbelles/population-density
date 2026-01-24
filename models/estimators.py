@@ -633,7 +633,7 @@ def _ddp_worker(
                 best_state = {k: v.detach().cpu() for k, v in ddp.module.state_dict().items()}
                 
                 bv_cpu     = val_loss  
-                print(f"[epoch {ep}] new best value: {bv_cpu}")
+                print(f"[gpu:{rank} - epoch {ep}] new best value: {bv_cpu}")
                 patience   = 0 
             else: 
                 patience  += 1 
