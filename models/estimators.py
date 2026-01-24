@@ -1162,6 +1162,21 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         world_size = len(self.ddp_devices)
 
+        if y is None: 
+            label_loader = self._as_eval_loader(X)
+            all_labels   = [np.asarray(b[3]).reshape(-1) for b in label_loader]
+            y_full       = np.concatenate(all_labels) if all_labels else np.asarray([], np.int64)
+        else: 
+            y_full       = np.asarray(y).reshape(-1)
+
+        self.classes_ = np.unique(y_full)  # or use class_values
+        self.n_classes_ = len(self.classes_)
+        class_counts = np.bincount(np.searchsorted(self.classes_, y_full), minlength=self.n_classes_)
+        self.class_counts_ = class_counts
+
+        class_weights = (class_counts.max() / np.clip(class_counts, 1, None))
+        self.loss_fn_ = CornLoss(n_classes=self.n_classes_, class_weights=class_weights)
+
         def _find_free_port(): 
             s = socket.socket() 
             s.bind(("", 0))
