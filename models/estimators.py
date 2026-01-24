@@ -735,7 +735,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         loader = self._ensure_loader(X, shuffle=self.shuffle)
         effective_batch  = loader.batch_size
         world_size       = getattr(self, "world_size_", 1)
-        self.accum_steps = self._resolve_accum_steps(world_size) 
+        self.accum_steps = self._resolve_accum_steps(effective_batch, world_size) 
 
         if y is None: 
             label_loader = self._as_eval_loader(X)
@@ -1195,7 +1195,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             self._build_model(in_channels=in_ch)
             break 
         if best_state is not None: 
-            self.model_.load_from_state_dict(best_state)
+            self.model_.load_state_dict(best_state)
         return self 
 
     @staticmethod 
