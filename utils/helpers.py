@@ -18,7 +18,6 @@ from abc import ABC, abstractmethod
 
 from sklearn.model_selection import StratifiedShuffleSplit, ShuffleSplit
 
-from preprocessing.loaders import load_oof_predictions
 
 NCLIMDIV_RE = re.compile(r"^climdiv-([a-z0-9]+)cy-v[0-9.]+-[0-9]{8}.*$")
 MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -68,6 +67,9 @@ def normalize_hidden_dims(value):
     return value 
 
 def load_probs_labels_fips(proba_path): 
+    # local import, avoids circular + I'm lazy 
+    from preprocessing.loaders import load_oof_predictions
+
     oof   = load_oof_predictions(proba_path) 
     probs = np.asarray(oof["probs"], dtype=np.float64)
     if probs.ndim != 3: 
