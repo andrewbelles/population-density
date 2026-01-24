@@ -7,6 +7,7 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
+import os
 import numpy as np 
 
 import time, copy, time, sys, socket  
@@ -536,6 +537,11 @@ def _ddp_worker(
     torch.cuda.set_device(device_id)
 
     clf.accum_steps = clf._resolve_accum_steps(world_size, batch_size)
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
+    os.environ.setdefault("NCCL_SOCKET_IFNAME", "lo")
 
     dist.init_process_group(
         backend=clf.ddp_backend,
