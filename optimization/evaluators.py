@@ -603,7 +603,6 @@ class SpatialEvaluator(OptunaEvaluator):
             fold_params = dict(params)
             fold_params["ddp_devices"] = ddp_devices
 
-            device_id = device_ids[fold_idx % len(device_ids)]
             specs.append(
                 WorkerSpec(
                     fn=_spatial_eval_worker,
@@ -611,7 +610,6 @@ class SpatialEvaluator(OptunaEvaluator):
                         "filepath": self.filepath,
                         "loader_func": self.loader,
                         "model_factory": self.factory,
-                        "params": params,
                         "train_idx": train_idx,
                         "test_idx": test_idx,
                         "batch_size": self.batch_size,

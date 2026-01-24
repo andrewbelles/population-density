@@ -948,6 +948,12 @@ class SpatialDatasetDict(TypedDict):
 
 SpatialDatasetLoader = Callable[[str], SpatialDatasetDict]
 
+def _collate_packed(batch): 
+    return batch[0]
+
+def _collate_spatial(batch, *, canvas_hw, tile_hw): 
+    return SpatialLazyLoader.pack(batch, canvas_hw=canvas_hw, tile_hw=tile_hw)
+
 def load_spatial_roi_manifest(
     root_dir: str, 
     *, 
@@ -978,9 +984,6 @@ def load_spatial_roi_manifest(
         
         with np.load(root / records[0]["path"]) as npz: 
             in_channels = int(npz["canvases"].shape[1])
-
-        def _collate_packed(batch): 
-            return batch[0]
 
         meta_path = root / "packed" / "meta.npz" 
         if meta_path.exists(): 
@@ -1038,15 +1041,12 @@ def load_spatial_roi_manifest(
     shape       = ds.records[0]["shape"]
     in_channels = shape[0] if len(shape) == 3 else 1 
 
-    def _collate(batch): 
-        return SpatialLazyLoader.pack(batch, canvas_hw=canvas_hw, tile_hw=tile_hw)
-
     return {
         "dataset": ds, 
         "labels": labels, 
         "coords": coords, 
         "sample_ids": fips, 
-        "collate_fn": _collate,
+        "collate_fn": bind(_collate_spatial, canvas_hw=canvas_hw, tile_hw=tile_hw),
         "in_channels": in_channels,
         "sample_labels": np.array([]),
         "sample_ids_full": np.array([]),
