@@ -851,45 +851,60 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         group_weights,
         n_groups
     ): 
-        gids = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
+        '''
+        Aggregates concatenated, pooled sums, generalized means, and maxes across all ROIs 
+        computed by backbone 
+        '''
+
+        gids     = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
+        feats_f  = feats.to(dtype=torch.float32)
         
-        dim      = feats.size(1) // 2 
-        avg_part = feats[:, :dim] 
-        max_part = feats[:, dim:]
+        dim      = feats_f.size(1) // 4 
+        log_part = feats_f[:, :dim]
+        gem_part = feats_f[:, dim:2*dim] 
+        max_part = feats_f[:, 2*dim:3*dim]
+        ent_part = feats_f[:, 3*dim:]
 
         if group_weights is None: 
-            ones      = torch.ones((avg_part.size(0), 1), device=feats.device)
-            sum_avg   = torch.zeros((n_groups, dim), device=feats.device)
-            counts    = torch.zeros((n_groups, 1), device=feats.device)
-            sum_avg.index_add_(0, gids, avg_part)
-            counts.index_add_(0, gids, ones)
-            agg_avg   = sum_avg / counts.clamp(min = 1.0)
+            w = torch.ones((log_part.size(0), 1), device=feats_f.device, dtype=feats_f.dtype)
+            denom_min = 1.0 
         else: 
-
             w = torch.as_tensor(
-                group_weights, dtype=avg_part.dtype, device=avg_part.device
+                group_weights, dtype=feats_f.dtype, device=feats_f.device 
             ).view(-1, 1)
-            sum_avg   = torch.zeros((n_groups, dim), device=feats.device)
-            sum_w     = torch.zeros((n_groups, 1), device=feats.device)
-            sum_avg.index_add_(0, gids, avg_part * w)
-            sum_w.index_add_(0, gids, w)
-            agg_avg   = sum_avg / sum_w.clamp(min=1e-6)
+            denom_min = 1e-6 
 
-        agg_max = torch.full((n_groups, dim), torch.finfo(max_part.dtype).min, 
-                             device=feats.device)
-        if hasattr(agg_max, "scatter_reduce_"): 
-            idx = gids.view(-1, 1).expand(-1, dim) 
-            agg_max.scatter_reduce_(0, idx, max_part, reduce="amax", include_self=True)
-        else: 
-            for i in range(max_part.size(0)):
-                g = gids[i].item() 
-                agg_max[g] = torch.maximum(agg_max[g], max_part[i])
+        sum_w   = torch.zeros((n_groups, 1), device=feats_f.device)
+        agg_log = torch.zeros((n_groups, dim), device=feats_f.device)
+        agg_gem = torch.zeros((n_groups, dim), device=feats_f.device)
+        agg_ent = torch.zeros((n_groups, dim), device=feats_f.device)
 
-        has_group = torch.zeros((n_groups, 1), dtype=torch.bool, device=feats.device)
-        has_group.index_fill_(0, gids, True)
+        sum_w.index_add_(0, gids, w)
+
+        sum_x = torch.expm1(log_part).clamp(min=0.0)
+        agg_log.index_add_(0, gids, sum_x * w)
+        agg_gem.index_add_(0, gids, gem_part * w)
+        agg_ent.index_add_(0, gids, ent_part * w)
+
+        denom   = sum_w.clamp(min=denom_min)
+        agg_log = torch.log1p(agg_log / denom)
+        agg_gem = agg_gem / denom 
+        agg_ent = agg_ent / denom 
+        
+        agg_max = torch.full(
+            (n_groups, dim), torch.finfo(max_part.dtype).min, device=feats_f.device
+        )
+
+        idx = gids.view(-1, 1).expand(-1, dim)
+        agg_max.scatter_reduce_(0, idx, max_part, reduce="amax", include_self=True)
+
+        has_group = sum_w > 0 
+        agg_log   = torch.where(has_group, agg_log, torch.zeros_like(agg_log))
+        agg_gem   = torch.where(has_group, agg_gem, torch.zeros_like(agg_gem))
         agg_max   = torch.where(has_group, agg_max, torch.zeros_like(agg_max))
+        agg_ent   = torch.where(has_group, agg_ent, torch.zeros_like(agg_ent))
 
-        return torch.cat([agg_avg, agg_max], dim=1)
+        return torch.cat([agg_log, agg_gem, agg_max, agg_ent], dim=1)
 
     def _eval_loss(self, loader): 
         self.model_.eval() 

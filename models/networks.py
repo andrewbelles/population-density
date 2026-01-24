@@ -189,6 +189,9 @@ class DilatedResidualBlock(nn.Module):
 
         res = x if self.proj is None else self.proj(x)
         out = out + res 
+
+        out = self.relu(out)
+
         return out, mask 
 
 
@@ -217,7 +220,7 @@ class SpatialBackbone(nn.Module):
         super().__init__()
 
         self.model_in_channels = in_channels 
-        self.out_dim           = conv_channels[-1] * 2 
+        self.out_dim           = conv_channels[-1] * 4 
         self.spatial_scale     = 1.0 
         self.roi_output_size   = roi_output_size
         self.sampling_ratio    = sampling_ratio 
@@ -319,7 +322,7 @@ class SpatialBackbone(nn.Module):
     ) -> torch.Tensor: 
         m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        return self.masked_avgmax(feats, m)
+        return self.masked_pooling_head(feats, m)
 
     def _roi_pool_chunk(
         self, 
@@ -361,7 +364,7 @@ class SpatialBackbone(nn.Module):
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
         mask_pooled = mask_pooled.to(dtype=pooled.dtype)
 
-        return self.masked_avgmax(pooled, mask_pooled)
+        return self.masked_pooling_head(pooled, mask_pooled)
 
     def _run_chunk(self, chunk, mask=None): 
         if self.categorical_input: 
@@ -413,7 +416,7 @@ class SpatialBackbone(nn.Module):
     ) -> torch.Tensor: 
         m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        return self.masked_avgmax(feats, m)
+        return self.masked_pooling_head(feats, m)
 
     @staticmethod 
     def prep_mask(
@@ -444,26 +447,42 @@ class SpatialBackbone(nn.Module):
         )
 
     @staticmethod
-    def masked_avgmax(
+    def masked_pooling_head(
         x: torch.Tensor, 
         mask: torch.Tensor, 
+        p: float = 3.0, 
         eps: float = 1e-6
     ) -> torch.Tensor: 
+        '''
+        Concatenates log sum, generalized mean, max, and shannon entropy 
+        of features over a block. 
+        '''
         mask     = mask.to(device=x.device, dtype=x.dtype)
-        sum_x    = (x * mask).flatten(2).sum(2)
-        sum_m    = mask.flatten(2).sum(2)
-        avg      = sum_x / (sum_m + eps)  
+        x_flat   = x.flatten(2)
+        m_flat   = mask.flatten(2)
+
+        sum_m    = m_flat.sum(2).clamp(min=eps)
+        has_mask = sum_m > eps 
+
+        sum_x_32 = (x_flat.float() * m_flat.float()).sum(2)
+        log_sum  = torch.log1p(sum_x_32).to(dtype=x.dtype)
+
+        x_clamp  = x_flat.clamp(min=eps)
+        sum_xp   = (x_clamp.pow(p) * m_flat).sum(2)
+        gem      = (sum_xp / sum_m).pow(1.0 / p)
+        gem      = torch.where(has_mask, gem, torch.zeros_like(gem))
 
         neg_inf  = torch.finfo(x.dtype).min 
-        mx       = torch.where(
-            mask > 0, 
-            x, 
-            torch.tensor(neg_inf, device=x.device, dtype=x.dtype)
+        mx_vals  = torch.where(
+            m_flat > 0, x_flat, torch.tensor(neg_inf, device=x.device, dtype=x.dtype)
         )
-        mx       = mx.flatten(2).max(2).values 
-
-        has_mask = sum_m > 0 
-        avg      = torch.where(has_mask, avg, torch.zeros_like(avg))
+        mx       = mx_vals.max(2).values 
         mx       = torch.where(has_mask, mx, torch.zeros_like(mx))
 
-        return torch.cat([avg, mx], dim=1)
+        norm     = sum_x_32.to(dtype=x.dtype).unsqueeze(2) + eps 
+        p_x      = (x_flat * m_flat) / norm 
+        entropy  = -(p_x * torch.log(p_x + eps)).sum(2)
+        entropy  = torch.where(has_mask, entropy, torch.zeros_like(entropy))
+
+        return torch.cat([log_sum, gem, mx, entropy], dim=1)
+

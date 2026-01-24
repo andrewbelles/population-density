@@ -182,14 +182,14 @@ models:
     focal_gamma: 0.9575971220937156
     gamma: 9.736111397862242
   Spatial/VIIRS_ROI:
-    conv_channels: 32-64-128
+    conv_channels: 24-48-96 
     fc_dim: 128
-    dropout: 0.21182739966945235
-    lr: 0.00019578897201212982
-    weight_decay: 2.054762512591135e-05
-    roi_output_size: 5
-    sampling_ratio: 1
-    aligned: false
+    dropout: 0.16  
+    lr: 0.0002  
+    weight_decay: 0.00016  
+    roi_output_size: 4
+    sampling_ratio: 0
+    accum_steps: 4 
   XGB/Ordinal:
     n_estimators: 754
     learning_rate: 0.005089553213697213
