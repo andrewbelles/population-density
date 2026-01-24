@@ -95,7 +95,7 @@ select_gpu_block() {
     fi 
   done 
 
-  print "%s\n" "${candidates[@]:0:$count}" | paste -sd, - 
+  printf "%s\n" "${candidates[@]:0:$count}" | paste -sd, - 
   return 0 
 }
 
