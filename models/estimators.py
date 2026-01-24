@@ -38,6 +38,8 @@ from models.networks import SpatialBackbone
 
 from sklearn.model_selection import StratifiedShuffleSplit 
 
+from utils.helpers import bind 
+
 # ---------------------------------------------------------
 # Regressors 
 # ---------------------------------------------------------
@@ -1434,14 +1436,15 @@ class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin):
 # ---------------------------------------------------------
 
 def make_linear(alpha: float = 1.0):
-    return lambda: LinearRegressor(alpha=alpha)
+    return bind(LinearRegressor, alpha=alpha)
 
 def make_rf_regressor(
     n_estimators: int = 400, 
     compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs
 ): 
-    return lambda: RFRegressor(
+    return bind(
+        RFRegressor,
         n_estimators=n_estimators, 
         n_jobs=compute_strategy.n_jobs,
         **kwargs
@@ -1453,7 +1456,8 @@ def make_xgb_regressor(
     compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs 
 ): 
-    return lambda: XGBRegressorWrapper(
+    return bind(
+        XGBRegressorWrapper,
         n_estimators=n_estimators, 
         early_stopping_rounds=early_stopping_rounds,
         n_jobs=compute_strategy.n_jobs,
@@ -1466,7 +1470,8 @@ def make_rf_classifier(
     compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
     **kwargs
 ):
-    return lambda: RFClassifierWrapper(
+    return bind(
+        RFClassifierWrapper,
         n_estimators=n_estimators, 
         n_jobs=compute_strategy.n_jobs,
         **kwargs
@@ -1478,7 +1483,8 @@ def make_xgb_classifier(
     compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs,
 ):
-    return lambda: XGBClassifierWrapper(
+    return bind(
+        XGBClassifierWrapper,
         n_estimators=n_estimators,
         early_stopping_rounds=early_stopping_rounds,
         n_jobs=compute_strategy.n_jobs,
@@ -1492,14 +1498,30 @@ def make_logistic(
     compute_strategy: ComputeStrategy | None = None, # doesn't require 
     **kwargs
 ):
-    return lambda: LogisticWrapper(C=C, **kwargs)
+    return bind(LogisticWrapper, C=C, **kwargs)
 
 def make_svm_classifier(
     probability=True, 
     compute_strategy: ComputeStrategy | None = None, # doesn't require 
     **kwargs
 ): 
-    return lambda: SVMClassifier(probability=probability, **kwargs)
+    return bind(SVMClassifier, probability=probability, **kwargs)
+
+def spatial_sfe_factory(
+    *,
+    collate_fn, 
+    compute_strategy,
+    fixed,
+    **params
+):
+    merged = dict(fixed)
+    merged.update(params) 
+    collate = merged.pop("collate_fn", collate_fn) 
+    return SpatialClassifier(
+        collate_fn=collate, 
+        compute_strategy=compute_strategy,
+        **merged
+    )
 
 def make_spatial_sfe(
     *,
@@ -1507,16 +1529,12 @@ def make_spatial_sfe(
     compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **fixed 
 ): 
-    def _factory(**params): 
-        merged = dict(fixed)
-        merged.update(params) 
-        collate = merged.pop("collate_fn", collate_fn) 
-        return SpatialClassifier(
-            collate_fn=collate, 
-            compute_strategy=compute_strategy,
-            **merged
-        )
-    return _factory 
+    return bind(
+        spatial_sfe_factory,
+        collate_fn=collate_fn,
+        compute_strategy=compute_strategy,
+        fixed=fixed
+    )
 
 def make_xgb_sfe(
     n_estimators: int = 400, 
@@ -1525,7 +1543,8 @@ def make_xgb_sfe(
     compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
     **kwargs
 ):
-    return lambda: XGBOrdinalRegressor(
+    return bind(
+        XGBOrdinalRegressor,
         n_estimators=n_estimators,
         early_stopping_rounds=early_stopping_rounds,
         eval_fraction=eval_fraction,

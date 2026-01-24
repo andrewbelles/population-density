@@ -21,7 +21,7 @@ from scipy.io import loadmat
 import utils.helpers as h 
 from preprocessing.loaders import load_oof_predictions
 
-from utils.helpers import _mat_str_vector
+from utils.helpers import _mat_str_vector, bind
 
 from utils.resources import ComputeStrategy
 
@@ -185,10 +185,10 @@ def make_queen_adjacency_factory(shapefile_path: str | None = None) -> Adjacency
         shapefile_path = h.project_path("data", "geography", "county_shapefile",
                                         "tl_2020_us_county.shp")
 
-    def _factory(fips_order: list[str]) -> sparse.csr_matrix: 
-        return build_queen_adjacency(shapefile_path, fips_order)
+    return bind(queen_adjacency_factory, shapefile_path=shapefile_path)
 
-    return _factory
+def queen_adjacency_factory(fips_order: list[str], *, shapefile_path: str) -> sparse.csr_matrix: 
+    return build_queen_adjacency(shapefile_path, fips_order)
 
 
 def make_mobility_adjacency_factory(
@@ -208,18 +208,27 @@ def make_mobility_adjacency_factory(
         k_neighbors=k_neighbors
     )
 
-    def _factory(fips_order: list[str]) -> sparse.csr_matrix: 
-        src_map = {f: i for i, f in enumerate(fips_parent)} 
-        indices = []
-        for f in fips_order: 
-            if f not in src_map: 
-                raise ValueError(f"target FIPS {f} not found in mobility graph")
-            indices.append(src_map[f])
+    return bind(
+        mobility_adjacency_factory,
+        adj_parent=adj_parent,
+        fips_parent=fips_parent
+    )
 
-        indices = np.array(indices, dtype=np.int64)
-        return adj_parent[indices][:, indices]
+def mobility_adjacency_factory(
+    fips_order: list[str], 
+    *, 
+    adj_parent, 
+    fips_parent
+) -> sparse.csr_matrix: 
+    src_map = {f: i for i, f in enumerate(fips_parent)} 
+    indices = []
+    for f in fips_order: 
+        if f not in src_map: 
+            raise ValueError(f"target FIPS {f} not found in mobility graph")
+        indices.append(src_map[f])
 
-    return _factory 
+    indices = np.array(indices, dtype=np.int64)
+    return adj_parent[indices][:, indices]
 
 
 def compute_probability_lag_matrix(

@@ -73,7 +73,7 @@ select_gpu_block() {
     mapfile -t candidates < <(nvidia-smi --query-gpu=index --format=csv,noheader)
   fi 
 
-  candidates=($(printf "%s\n" "${candidates[@]}" | sed '/ //g' | sort -n))
+  candidates=($(printf "%s\n" "${candidates[@]}" | sed 's/ //g' | sort -n))
   if [ "${#candidates[@]}" -lt "$count" ]; then 
     echo "not enought GPUs available for block size $count" >&2 
     return 1 

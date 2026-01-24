@@ -6,6 +6,8 @@
 # 
 # 
 
+from functools import partial 
+
 from pathlib import Path
 
 from utils.helpers import load_yaml_config 
@@ -70,6 +72,21 @@ def normalize_spatial_params(params, *, random_state: int, collate_fn):
     params.setdefault("accum_steps", 1) 
     return params 
 
-def with_spatial_channels(factory, spatial_data): 
+def _spatial_factory(
+    factory, 
+    in_ch,
+    **kwargs
+): 
+    return factory(
+        in_channels=in_ch
+        **kwargs 
+    )
+
+def with_spatial_channels(factory, spatial_data, **kwargs): 
     in_ch = spatial_data.get("in_channels")
-    return lambda **p: factory(in_channels=in_ch, **p)
+    return partial(
+        _spatial_factory,
+        factory=factory,
+        in_ch=in_ch,
+        **kwargs 
+    )

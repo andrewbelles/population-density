@@ -14,7 +14,7 @@ import pandas as pd
 
 from pathlib import Path 
 
-from utils.helpers import load_yaml_config
+from utils.helpers import bind, load_yaml_config
 
 from testbench.utils.paths import CONFIG_PATH
 
@@ -56,7 +56,10 @@ def get_factory(
         "Logistic": make_logistic,
     }
     factory_fn = mapping[model_type] 
-    return lambda **p: factory_fn(compute_strategy=strategy, **p)
+    return bind(_factory_with_strategy, factory_fn=factory_fn, strategy=strategy)
+
+def _factory_with_strategy(*, factory_fn, strategy, **p):
+    return factory_fn(compute_strategy=strategy, **p)
 
 def load_metric_params(model_key: str) -> dict: 
     cfg    = load_yaml_config(Path(CONFIG_PATH))

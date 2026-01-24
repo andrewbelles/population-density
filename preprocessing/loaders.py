@@ -23,6 +23,7 @@ from pathlib import Path
 from scipy.io import loadmat
 
 from utils.helpers import (
+    bind,
     _mat_str_vector,
     align_on_fips
 )
@@ -502,15 +503,21 @@ def make_pair_loader(
     target_idx: int, 
     feature_idx: int 
 ) -> Callable[[str], dict]: 
-    def _loader(_filepath: str): 
-        return {
-            "features": data.X[:, [feature_idx]], 
-            "labels": data.X[:, target_idx], 
-            "coords": data.coords, 
-            "feature_names": np.array([data.feature_names[feature_idx]]),
-            "sample_idx": data.sample_ids
-        }
-    return _loader 
+    return bind(
+        _pair_loader,
+        data=data,
+        target_idx=target_idx,
+        feature_idx=feature_idx
+    )
+
+def _pair_loader(_filepath: str, *, data: FeatureMatrix, target_idx: int, feature_idx: int): 
+    return {
+        "features": data.X[:, [feature_idx]], 
+        "labels": data.X[:, target_idx], 
+        "coords": data.coords, 
+        "feature_names": np.array([data.feature_names[feature_idx]]),
+        "sample_idx": data.sample_ids
+    }
 
 def load_tiger_nlcd_viirs_feature_matrix(filepaths: Sequence[str]): 
     if len(filepaths) != 3: 
@@ -837,35 +844,35 @@ def make_oof_dataset_loader(
     *,
     model_name: str | None = None 
 ) -> DatasetLoader: 
+    return bind(_oof_dataset_loader, model_name=model_name)
 
-    def _loader(path: str) -> DatasetDict: 
-        oof   = load_oof_predictions(path)
-        probs = np.asarray(oof["probs"], dtype=np.float64)
-        model_names  = oof["model_names"].tolist()
-        class_labels = np.asarray(oof["class_labels"]).reshape(-1)
-        labels       = np.asarray(oof["labels"]).reshape(-1)
+def _oof_dataset_loader(path: str, *, model_name: str | None) -> DatasetDict: 
+    oof   = load_oof_predictions(path)
+    probs = np.asarray(oof["probs"], dtype=np.float64)
+    model_names  = oof["model_names"].tolist()
+    class_labels = np.asarray(oof["class_labels"]).reshape(-1)
+    labels       = np.asarray(oof["labels"]).reshape(-1)
 
-        if probs.ndim == 3: 
-            if model_name is not None: 
-                if model_name not in model_names: 
-                    raise ValueError(f"oof model '{model_name}' not in {model_names}")
-                m_idx = model_names.index(model_name)
-                probs = probs[:, m_idx, :]
-                feature_names = _oof_feature_names([model_name], class_labels, probs.shape[1])
-            else: 
-                feature_names = _oof_feature_names(model_names, class_labels, probs.shape[2])
-                probs = probs.reshape(probs.shape[0], -1)
+    if probs.ndim == 3: 
+        if model_name is not None: 
+            if model_name not in model_names: 
+                raise ValueError(f"oof model '{model_name}' not in {model_names}")
+            m_idx = model_names.index(model_name)
+            probs = probs[:, m_idx, :]
+            feature_names = _oof_feature_names([model_name], class_labels, probs.shape[1])
         else: 
-            feature_names = _oof_feature_names(model_names, class_labels, probs.shape[1])
-        
-        return {
-            "features": probs, 
-            "labels": labels, 
-            "coords": np.zeros((probs.shape[0], 2), dtype=np.float64),
-            "feature_names": feature_names, 
-            "sample_ids": np.asarray(oof["fips_codes"]).astype("U5")
-        }
-    return _loader 
+            feature_names = _oof_feature_names(model_names, class_labels, probs.shape[2])
+            probs = probs.reshape(probs.shape[0], -1)
+    else: 
+        feature_names = _oof_feature_names(model_names, class_labels, probs.shape[1])
+    
+    return {
+        "features": probs, 
+        "labels": labels, 
+        "coords": np.zeros((probs.shape[0], 2), dtype=np.float64),
+        "feature_names": feature_names, 
+        "sample_ids": np.asarray(oof["fips_codes"]).astype("U5")
+    }
 
 def load_concat_datasets(
     specs: Sequence[ConcatSpec], 

@@ -11,6 +11,7 @@ import numpy as np
 from typing import Sequence
 
 from utils.helpers import (
+    bind,
     make_cfg_gap_factory, 
     project_path,
     _mat_str_vector
@@ -26,8 +27,6 @@ from testbench.utils.transforms import apply_transforms
 from testbench.utils.etc        import flatten_imaging
 
 from testbench.utils.paths      import keep_list
-
-from functools                  import partial 
 
 from scipy.io import loadmat 
 
@@ -127,16 +126,16 @@ def dataset_specs(dataset_key: str, proba_path: str):
     specs = select_specs_psv(dataset_key)
     return override_proba_path(specs, proba_path)
 
+def dataset_loader(specs):
+    return load_concat_datasets(
+        specs=specs,
+        labels_path=LABELS_PATH,
+        labels_loader=load_viirs_nchs
+    )
+
 def make_dataset_loader(dataset_key: str, proba_path: str): 
     specs = dataset_specs(dataset_key, proba_path)
-
-    def _loader(_): 
-        return load_concat_datasets(
-            specs=specs,
-            labels_path=LABELS_PATH,
-            labels_loader=load_viirs_nchs
-        )
-    return {dataset_key: _loader}
+    return {dataset_key: dataset_loader(specs)}
 
 def load_dataset_raw(dataset_key: str, proba_path: str): 
     specs = dataset_specs(dataset_key, proba_path)
@@ -173,10 +172,41 @@ def resolve_stacking_loader(prob_files, passthrough: bool, filter_dir: str | Non
         return passthrough_loader(prob_files, klist)
     return stacking_loader(prob_files)
 
+def _stacking_loader(_path, *, prob_files): 
+    return load_stacking(prob_files)
+
 def stacking_loader(prob_files): 
-    def _loader(_): 
-        return load_stacking(prob_files)
-    return _loader 
+    return bind(_stacking_loader, prob_files=prob_files)
+
+def _passthrough_loader(_path, *, prob_files, passthrough_specs, passthrough_features):
+    data = load_passthrough(
+        build_specs(prob_files),
+        label_path=LABELS_PATH,
+        label_loader=BASE["VIIRS"]["loader"],
+        passthrough_specs=passthrough_specs,
+        passthrough_features=None 
+    )
+    transforms = make_cfg_gap_factory(data.get("feature_names"))() 
+    if transforms: 
+        data["features"] = apply_transforms(data["features"], transforms)
+        
+        names = np.asarray(data.get("feature_names")) 
+        if names is None: 
+            names = np.array([], dtype="U64")
+        else: 
+            names = np.asarray(names, dtype="U64")
+
+        if names.size != data["features"].shape[1]: 
+            extra = data["features"].shape[1] - names.size 
+            if extra > 0: 
+                suffix = (["cfg_gap"] if extra == 1 else 
+                [f"cfg_gap_{i+1}" for i in range(extra)])
+
+                data["feature_names"] = np.concatenate(
+                    [names, np.asarray(suffix, dtype="U64")]
+                )
+
+    return data 
 
 def passthrough_loader(prob_files, passthrough_features = None):
     passthrough_base  = BASE["PASSTHROUGH"]
@@ -187,52 +217,28 @@ def passthrough_loader(prob_files, passthrough_features = None):
             "raw_loader": passthrough_base["loader"]
         }
     ] 
+    return bind(
+        _passthrough_loader,
+        prob_files=prob_files,
+        passthrough_specs=passthrough_specs,
+        passthrough_features=passthrough_features
+    )
 
-    def _loader(_): 
-        data = load_passthrough(
-            build_specs(prob_files),
-            label_path=LABELS_PATH,
-            label_loader=BASE["VIIRS"]["loader"],
-            passthrough_specs=passthrough_specs,
-            passthrough_features=None 
-        )
-        transforms = make_cfg_gap_factory(data.get("feature_names"))() 
-        if transforms: 
-            data["features"] = apply_transforms(data["features"], transforms)
-            
-            names = np.asarray(data.get("feature_names")) 
-            if names is None: 
-                names = np.array([], dtype="U64")
-            else: 
-                names = np.asarray(names, dtype="U64")
 
-            if names.size != data["features"].shape[1]: 
-                extra = data["features"].shape[1] - names.size 
-                if extra > 0: 
-                    suffix = (["cfg_gap"] if extra == 1 else 
-                    [f"cfg_gap_{i+1}" for i in range(extra)])
-
-                    data["feature_names"] = np.concatenate(
-                        [names, np.asarray(suffix, dtype="U64")]
-                    )
-
-        return data 
-    return _loader 
+def binary_loader(data, X, y):
+    return {
+        "features": X, 
+        "labels": y, 
+        "coords": data.get("coords"),
+        "feature_names": data.get("feature_names"),
+        "sample_ids": data.get("sample_ids")
+    }
 
 def make_binary_loader(data, label: int): 
     X     = data["features"]
     y     = np.asarray(data["labels"]).reshape(-1)
     y_bin = (y == label).astype(np.int64)
-
-    def _loader(_) -> DatasetDict: 
-        return {
-            "features": X, 
-            "labels": y_bin, 
-            "coords": data.get("coords"),
-            "feature_names": data.get("feature_names"),
-            "sample_ids": data.get("sample_ids")
-        }
-    return _loader 
+    return binary_loader(data, X, y_bin)
 
 def load_dataset(dataset_key: str): 
     spec = BASE[dataset_key] 
@@ -285,52 +291,73 @@ def filter_features(data: dict, keep_list: list[str] | None) -> dict:
 def make_filtered_loader(base_loader, keep_list: list[str] | None): 
     if not keep_list: 
         return base_loader 
-    def _loader(path): 
-        data = base_loader(path)
-        return filter_features(data, keep_list)
-    return _loader 
+    return bind(
+        _filtered_loader,
+        base_loader=base_loader,
+        keep_list=keep_list
+    )
+
+def _filtered_loader(path, *, base_loader, keep_list): 
+    data = base_loader(path)
+    return filter_features(data, keep_list)
 
 def make_tensor_loader(mode, canvas_h, canvas_w, gaf_size): 
-    def _loader(filepath): 
-        spatial, mask, gaf, labels, fips = load_tensor_data(filepath)
-        X = flatten_imaging(spatial, mask, gaf, mode)
-        
-        coords = np.zeros((X.shape[0], 2), dtype=np.float64)
-        return {
-            "features": X, 
-            "labels": labels, 
-            "coords": coords, 
-            "feature_names": np.array([], dtype="U"),
-            "sample_ids": fips 
-        }
-    return _loader 
+    return bind(
+        _tensor_loader,
+        mode=mode,
+        canvas_h=canvas_h,
+        canvas_w=canvas_w,
+        gaf_size=gaf_size
+    )
+
+def _tensor_loader(filepath, *, mode, canvas_h, canvas_w, gaf_size): 
+    spatial, mask, gaf, labels, fips = load_tensor_data(filepath)
+    X = flatten_imaging(spatial, mask, gaf, mode)
+    
+    coords = np.zeros((X.shape[0], 2), dtype=np.float64)
+    return {
+        "features": X, 
+        "labels": labels, 
+        "coords": coords, 
+        "feature_names": np.array([], dtype="U"),
+        "sample_ids": fips 
+    }
 
 def make_tensor_adapter(mode, canvas_h, canvas_w, gaf_size): 
     n_pix = canvas_h * canvas_w 
     g_pix = gaf_size * gaf_size 
 
-    def _adapter(X): 
-        X = np.asarray(X, dtype=np.float32)
-        n = X.shape[0]
+    return bind(
+        _tensor_adapter,
+        mode=mode,
+        canvas_h=canvas_h,
+        canvas_w=canvas_w,
+        gaf_size=gaf_size
+    )
 
-        if mode == "spatial": 
-            spatial = X[:, :n_pix].reshape(n, 1, canvas_h, canvas_w)
-            mask    = X[:, n_pix:2*n_pix].reshape(n, 1, canvas_h, canvas_w)
-            return np.concatenate([spatial, mask], axis=1)
+def _tensor_adapter(X, *, mode, canvas_h, canvas_w, gaf_size): 
+    n_pix = canvas_h * canvas_w 
+    g_pix = gaf_size * gaf_size 
 
-        if mode == "gaf": 
-            return X[:, :g_pix].reshape(n, 1, gaf_size, gaf_size)
+    X = np.asarray(X, dtype=np.float32)
+    n = X.shape[0]
 
-        if mode == "dual": 
-            spatial = X[:, :n_pix].reshape(n, 1, canvas_h, canvas_w)
-            mask    = X[:, n_pix:2*n_pix].reshape(n, 1, canvas_h, canvas_w)
-            x_main  = np.concatenate([spatial, mask], axis=1)
-            x_aux   = X[:, 2*n_pix:2*n_pix + g_pix].reshape(n, 1, gaf_size, gaf_size)
-            return x_main, x_aux 
+    if mode == "spatial": 
+        spatial = X[:, :n_pix].reshape(n, 1, canvas_h, canvas_w)
+        mask    = X[:, n_pix:2*n_pix].reshape(n, 1, canvas_h, canvas_w)
+        return np.concatenate([spatial, mask], axis=1)
 
-        raise ValueError("mode must be spatial/gaf/dual")
+    if mode == "gaf": 
+        return X[:, :g_pix].reshape(n, 1, gaf_size, gaf_size)
 
-    return _adapter 
+    if mode == "dual": 
+        spatial = X[:, :n_pix].reshape(n, 1, canvas_h, canvas_w)
+        mask    = X[:, n_pix:2*n_pix].reshape(n, 1, canvas_h, canvas_w)
+        x_main  = np.concatenate([spatial, mask], axis=1)
+        x_aux   = X[:, 2*n_pix:2*n_pix + g_pix].reshape(n, 1, gaf_size, gaf_size)
+        return x_main, x_aux 
+
+    raise ValueError("mode must be spatial/gaf/dual")
 
 def _roi_loader(
     path,
@@ -352,7 +379,7 @@ def make_roi_loader(
     cache_mb: int | None = None, 
     cache_items: int | None = None
 ): 
-    return partial(
+    return bind(
         _roi_loader,
         canvas_hw=canvas_hw,
         cache_mb=cache_mb,

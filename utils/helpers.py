@@ -14,6 +14,8 @@ from numpy.typing import ArrayLike, NDArray
 from typing import Any, Callable, Sequence, Dict  
 from sklearn.preprocessing import StandardScaler
 
+from functools import partial 
+
 from abc import ABC, abstractmethod
 
 from sklearn.model_selection import StratifiedShuffleSplit, ShuffleSplit
@@ -25,6 +27,9 @@ MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "o
 # ---------------------------------------------------------
 # Generic Helper Functions 
 # ---------------------------------------------------------
+
+def bind(fn, **kwargs):
+    return partial(fn, **kwargs)
 
 def project_path(*args):
     root = os.environ.get("PROJECT_ROOT", os.path.dirname(os.path.abspath(__file__)))
