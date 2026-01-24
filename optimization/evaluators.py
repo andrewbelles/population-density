@@ -466,7 +466,7 @@ def _spatial_eval_fold(
 # Spatial SFE Evaluator 
 # ---------------------------------------------------------
 
-def _split_device_groups(devices: list[int], n_groups: int) -> lsit[list[int]]: 
+def _split_device_groups(devices: list[int], n_groups: int) -> list[list[int]]: 
     if not devices: 
         return [[] for _ in range(n_groups)]
 
@@ -478,6 +478,7 @@ def _split_device_groups(devices: list[int], n_groups: int) -> lsit[list[int]]:
         group = devices[start:end]
         if not group: 
             group = [devices[-1]]
+        groups.append(group)
 
     leftover = devices[chunk * n_groups:]
     if leftover: 
