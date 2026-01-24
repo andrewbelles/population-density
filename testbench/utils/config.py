@@ -78,7 +78,7 @@ def _spatial_factory(
     **kwargs
 ): 
     return factory(
-        in_channels=in_ch
+        in_channels=in_ch,
         **kwargs 
     )
 

@@ -22,7 +22,7 @@ from analysis.graph_metrics import MetricAnalyzer
 
 from utils.resources import ComputeStrategy
 
-from analysis.hyperparameter import (
+from optimization.spaces import (
     define_xgb_space,
     define_rf_space,
     define_svm_space,
