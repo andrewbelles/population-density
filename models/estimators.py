@@ -9,7 +9,7 @@
 
 import numpy as np 
 
-import time, copy, time, sys 
+import time, copy, time, sys, socket  
 
 from utils.resources import ComputeStrategy
 
@@ -39,6 +39,19 @@ from models.networks import SpatialBackbone
 from sklearn.model_selection import StratifiedShuffleSplit 
 
 from utils.helpers import bind 
+
+# Multi-GPU training 
+
+import torch.distributed as dist 
+
+import torch.multiprocessing as mp 
+
+from torch.utils.data.distributed import DistributedSampler 
+
+from torch.nn.parallel import DistributedDataParallel as DDP 
+
+from contextlib import nullcontext 
+
 
 # ---------------------------------------------------------
 # Regressors 
@@ -507,6 +520,133 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
 # Supervised Feature Extraction based Models  
 # ---------------------------------------------------------
 
+def _ddp_worker(
+    rank,
+    world_size,
+    ddp_devices,
+    port,
+    clf, # spatial classifier instance 
+    train_ds,
+    val_ds,
+    collate_fn,
+    batch_size,
+    result_q
+):
+    device_id = int(ddp_devices[rank])
+    torch.cuda.set_device(device_id)
+
+    clf.accum_steps = clf._resolve_accum_steps(world_size, batch_size)
+
+    dist.init_process_group(
+        backend=clf.ddp_backend,
+        init_method=f"tcp://127.0.0.1:{port}",
+        world_size=world_size,
+        rank=rank
+    )
+
+    clf.device = torch.device("cuda", device_id)
+
+    in_ch = clf.in_channels 
+    if in_ch is None: 
+        sample = train_ds[0]
+        packed = sample[0]
+        in_ch  = packed.shape[0] if packed.ndim == 3 else packed.shape[1]
+    clf._build_model(in_channels=in_ch)
+
+    clf.model_ = clf.model_.to(clf.device)
+
+    ddp = DDP(
+        clf.model_,
+        device_ids=[device_id],
+        output_device=device_id,
+        find_unused_parameters=clf.ddp_find_unused_params
+    )
+
+    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=clf.shuffle)
+    train_loader  = DataLoader(
+        train_ds, batch_size=batch_size, sampler=train_sampler,
+        num_workers=clf.compute_strategy.n_jobs, pin_memory=True,
+        collate_fn=collate_fn, persistent_workers=False
+    )
+
+    val_loader = None 
+    if val_ds is not None: 
+        val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False)
+        val_loader  = DataLoader(
+            val_ds, batch_size=batch_size, sampler=val_sampler, 
+            num_workers=clf.compute_strategy.n_jobs, pin_memory=True,
+            collate_fn=collate_fn, persistent_workers=False 
+        )
+
+    opt    = torch.optim.AdamW(ddp.parameters(), lr=clf.lr, weight_decay=clf.weight_decay)
+    scaler = torch.amp.GradScaler("cuda", enabled=True)
+
+    best_state = None 
+    best_val   = float("inf")
+    patience   = 0
+
+    for ep in range(clf.epochs): 
+        ddp.train() 
+        train_sampler.set_epoch(ep)
+
+        accum = max(1, int(clf.accum_steps))
+        opt.zero_grad()
+
+        step_idx = -1 
+        for step_idx, batch in enumerate(train_loader): 
+            use_sync = ((step_idx + 1) % accum) == 0 
+            context  = nullcontext() if use_sync else ddp.no_sync()
+
+            with context, torch.amp.autocast("cuda", enabled=True): 
+                loss, _ = clf._process_batch(batch)
+                loss    = loss / accum 
+
+            scaler.scale(loss).backward() 
+            if use_sync: 
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad()
+
+        if step_idx >= 0 and (step_idx + 1) % accum != 0: 
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad() 
+
+        val_loss = None 
+        if val_loader is not None: 
+            ddp.eval() 
+            total = torch.zeros(1, device=clf.device)
+            count = torch.zeros(1, device=clf.device)
+            with torch.no_grad():
+                for batch in val_loader: 
+                    vloss, bsz = clf._process_batch(batch)
+                    total += vloss.detach() * bsz 
+                    count += bsz 
+
+            dist.all_reduce(total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
+            val_loss = (total / count.clamp_min(1.0)).item() 
+
+        if rank == 0 and val_loss is not None: 
+            if val_loss < best_val - clf.min_delta:
+                best_val   = val_loss 
+                best_state = {k: v.detach().cpu() for k, v in ddp.module.state_dict().items()}
+                
+                bv_cpu     = val_loss  
+                print(f"[epoch {ep}] new best value: {bv_cpu}")
+                patience   = 0 
+            else: 
+                patience  += 1 
+                if clf.early_stopping_rounds and patience >= clf.early_stopping_rounds:
+                    break 
+
+        dist.barrier()
+
+    if rank == 0: 
+        result_q.put(best_state)
+    dist.destroy_process_group()
+
+
 class SpatialClassifier(BaseEstimator, ClassifierMixin): 
 
     def __init__(
@@ -525,19 +665,23 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         pretrain_epochs: int = 10, 
         epochs: int = 100, 
         lr: float = 1e-3, 
-        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
         weight_decay: float = 0.0, 
         random_state: int = 0, 
         early_stopping_rounds: int | None = 15, 
         eval_fraction: float = 0.1,
         min_delta: float = 1e-4,
         batch_size: int = 2,
-        accum_steps: int = 2, 
+        target_global_batch: int = 16, 
         shuffle: bool = True, 
         in_channels: int | None = None, 
         categorical_input: bool = False, 
         collate_fn=None,
-        class_values: list[int] | None = None
+        class_values: list[int] | None = None,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+        ddp_devices: list[int] | None = None, 
+        ddp_backend: str = "nccl",
+        ddp_port: int | None = None, 
+        ddp_find_unused_params: bool = False 
     ): 
         self.conv_channels     = conv_channels
         self.kernel_size       = kernel_size
@@ -554,12 +698,12 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.lr                = lr
         self.weight_decay      = weight_decay
         self.random_state      = random_state
-        self.accum_steps       = accum_steps
         self.in_channels       = in_channels
         self.categorical_input = categorical_input
         self.class_values      = class_values
         self.device            = self._resolve_device(compute_strategy.device)
 
+        self.target_global_batch   = target_global_batch
         self.early_stopping_rounds = early_stopping_rounds 
         self.min_delta             = min_delta
         self.eval_fraction         = eval_fraction
@@ -569,10 +713,19 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.batch_size       = batch_size 
         self.collate_fn       = collate_fn
 
+        self.ddp_devices            = ddp_devices 
+        self.ddp_backend            = ddp_backend
+        self.ddp_port               = ddp_port
+        self.ddp_find_unused_params = ddp_find_unused_params 
+
         self.classes_: NDArray | None = None 
         self.n_classes_: int | None   = None 
 
     def fit(self, X, y=None, val_loader=None): 
+        
+        if self.ddp_devices is not None and len(self.ddp_devices) > 1 and self.device.type == "cuda":
+            return self._fit_ddp(X, y, val_loader)
+
         torch.manual_seed(self.random_state)
         if self.device.type == "cuda":
              torch.backends.cudnn.benchmark = True
@@ -580,6 +733,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
              torch.backends.cudnn.allow_tf32 = True
 
         loader = self._ensure_loader(X, shuffle=self.shuffle)
+        effective_batch  = loader.batch_size
+        world_size       = getattr(self, "world_size_", 1)
+        self.accum_steps = self._resolve_accum_steps(world_size) 
 
         if y is None: 
             label_loader = self._as_eval_loader(X)
@@ -777,6 +933,11 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             persistent_workers=(num_workers > 0), 
             prefetch_factor=prefetch_factor  
         )
+
+    def _resolve_accum_steps(self, world_size, effective_batch):
+        world_size   = max(1, int(world_size))
+        local_global = max(1, int(effective_batch) * world_size)
+        return max(1, int(np.ceil(self.target_global_batch / local_global)))
 
     def _ensure_loader(self, X, shuffle: bool): 
         if isinstance(X, DataLoader): 
@@ -987,6 +1148,55 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 collate_fn=X.collate_fn
             )
         return X 
+
+    def _fit_ddp(self, X, y, val_loader):
+
+        train_loader = self._ensure_loader(X, shuffle=self.shuffle)
+        train_ds     = train_loader.dataset 
+        collate_fn   = train_loader.collate_fn 
+        batch_size   = train_loader.batch_size
+
+        val_ds = None 
+        if val_loader is not None: 
+            val_ds = val_loader.dataset 
+
+        world_size = len(self.ddp_devices)
+
+        def _find_free_port(): 
+            s = socket.socket() 
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+            s.close()
+            return port 
+
+        port     = self.ddp_port or _find_free_port()
+        result_q = mp.SimpleQueue() 
+
+        mp.spawn(
+            _ddp_worker, 
+            nprocs=world_size,
+            join=True,
+            args=(
+                world_size,
+                self.ddp_devices,
+                port,
+                self,
+                train_ds,
+                val_ds,
+                collate_fn,
+                batch_size,
+                result_q
+            )
+        )
+
+        best_state = result_q.get() 
+        for batch in train_loader: 
+            in_ch = self.in_channels or batch[0].shape[1]
+            self._build_model(in_channels=in_ch)
+            break 
+        if best_state is not None: 
+            self.model_.load_from_state_dict(best_state)
+        return self 
 
     @staticmethod 
     def _ordinal_targets(y: torch.Tensor, n_classes: int) -> torch.Tensor: 

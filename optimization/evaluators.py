@@ -466,6 +466,24 @@ def _spatial_eval_fold(
 # Spatial SFE Evaluator 
 # ---------------------------------------------------------
 
+def _split_device_groups(devices: list[int], n_groups: int) -> lsit[list[int]]: 
+    if not devices: 
+        return [[] for _ in range(n_groups)]
+
+    chunk  = max(1, len(devices) // n_groups) 
+    groups = [] 
+    for i in range(n_groups):
+        start = i * chunk 
+        end   = start + chunk 
+        group = devices[start:end]
+        if not group: 
+            group = [devices[-1]]
+
+    leftover = devices[chunk * n_groups:]
+    if leftover: 
+        groups[-1].extend(leftover)
+    return groups 
+
 def _spatial_eval_worker(
     *,
     filepath: str, 
@@ -574,8 +592,15 @@ class SpatialEvaluator(OptunaEvaluator):
             self.data, self.dataset, self.labels, self.task, self.config)
         
         device_ids = devices or [None]
+        groups     = _split_device_groups(device_ids, len(splits))
 
         for fold_idx, (train_idx, test_idx) in enumerate(splits): 
+            ddp_devices = groups[fold_idx] 
+            device_id   = ddp_devices[0] if ddp_devices else None 
+
+            fold_params = dict(params)
+            fold_params["ddp_devices"] = ddp_devices
+
             device_id = device_ids[fold_idx % len(device_ids)]
             specs.append(
                 WorkerSpec(
@@ -589,6 +614,7 @@ class SpatialEvaluator(OptunaEvaluator):
                         "test_idx": test_idx,
                         "batch_size": self.batch_size,
                         "compute_strategy": self.compute_strategy,
+                        "params": fold_params, 
                         "device_id": device_id
                     },
                     device_id=device_id
