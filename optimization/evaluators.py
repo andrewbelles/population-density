@@ -594,15 +594,9 @@ class SpatialEvaluator(OptunaEvaluator):
         splits = list(splits_iter)
 
         device_ids = devices or [None]
-        groups     = _split_device_groups(device_ids, len(splits))
 
         for fold_idx, (train_idx, test_idx) in enumerate(splits): 
-            ddp_devices = groups[fold_idx] 
-            device_id   = ddp_devices[0] if ddp_devices else None 
-
-            fold_params = dict(params)
-            fold_params["ddp_devices"] = ddp_devices
-
+            device_id = device_ids[fold_idx % len(device_ids)]
             specs.append(
                 WorkerSpec(
                     fn=_spatial_eval_worker,
@@ -610,11 +604,11 @@ class SpatialEvaluator(OptunaEvaluator):
                         "filepath": self.filepath,
                         "loader_func": self.loader,
                         "model_factory": self.factory,
+                        "params": params,
                         "train_idx": train_idx,
                         "test_idx": test_idx,
                         "batch_size": self.batch_size,
                         "compute_strategy": self.compute_strategy,
-                        "params": fold_params, 
                         "device_id": device_id
                     },
                     device_id=device_id
