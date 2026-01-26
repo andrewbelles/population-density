@@ -182,14 +182,13 @@ models:
     focal_gamma: 0.9575971220937156
     gamma: 9.736111397862242
   Spatial/VIIRS_ROI:
-    conv_channels: 24-48-96 
-    fc_dim: 128
-    dropout: 0.16  
-    lr: 0.0002  
-    weight_decay: 0.00016  
-    roi_output_size: 4
+    conv_channels: 16-32-64
+    fc_dim: 64
+    dropout: 0.37
+    lr: 0.000846
+    weight_decay: 1.414e-05
+    roi_output_size: 3
     sampling_ratio: 0
-    accum_steps: 4 
   XGB/Ordinal:
     n_estimators: 754
     learning_rate: 0.005089553213697213
@@ -221,3 +220,13 @@ models:
     max_delta_step: 6
     focal_gamma: 3.3220605945994635
     gamma: 1.2276734933370124
+  SAIPE/Manifold:
+    hidden_dim: 128
+    dropout: 0.20022812748236773
+    lr: 0.0045712404673608495
+    weight_decay: 0.044050898561637186
+    eval_fraction: 0.15
+    batch_size: 128
+    epochs: 300
+    early_stopping_rounds: 10
+    out_dim: 64
