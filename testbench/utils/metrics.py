@@ -21,7 +21,7 @@ from analysis.cross_validation import (
 ) 
 from sklearn.metrics import log_loss, cohen_kappa_score
 
-OPT_TASK = TaskSpec("classification", ("log_loss",))
+OPT_TASK = TaskSpec("classification", ("qwk",))
 
 def _softmax_rows(probs: NDArray) -> NDArray: 
     probs   = np.asarray(probs, dtype=np.float64)

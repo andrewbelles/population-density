@@ -158,21 +158,21 @@ def define_projector_space(trial):
         "batch_size": trial.suggest_categorical("batch_size", [128, 256]),
         "epochs": trial.suggest_categorical("epochs", [300]),
         "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [15]),
-        "out_dim": trial.suggest_categorical("out_dim", [64]),
+        "out_dim": trial.suggest_categorical("out_dim", [5]),
     }
 
 def define_manifold_projector_space(trial):
     return {
         "mode": "manifold",     
-        "hidden_dim": trial.suggest_categorical("hidden_dim", [128, 256]),
+        "hidden_dim": trial.suggest_categorical("hidden_dim", [32]),
         "dropout": trial.suggest_float("dropout", 0.15, 0.7),
         "lr": trial.suggest_float("lr", 5e-6, 5e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-4, 5e-2, log=True),
         "eval_fraction": trial.suggest_categorical("eval_fraction", [0.15]),
         "batch_size": trial.suggest_categorical("batch_size", [128, 256, 512]),
-        "epochs": trial.suggest_categorical("epochs", [300, 500]),
+        "epochs": trial.suggest_categorical("epochs", [300]),
         "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [10]),
-        "out_dim": trial.suggest_categorical("out_dim", [64]),
+        "out_dim": trial.suggest_categorical("out_dim", [5]),
     }
 
 # ---------------------------------------------------------

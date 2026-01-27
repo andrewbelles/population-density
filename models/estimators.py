@@ -7,39 +7,62 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
-import os
 import numpy as np 
 
-import time, copy, time, sys, socket  
+import time, copy, time, sys, torch   
 
-from utils.resources import ComputeStrategy
+from utils.resources         import ComputeStrategy
 
-from numpy.typing import NDArray
-from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier 
-from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegression 
+from numpy.typing            import NDArray
 
-from xgboost import XGBClassifier, XGBRegressor  
+from sklearn.base            import (
+    BaseEstimator, 
+    RegressorMixin, 
+    ClassifierMixin, 
+    clone
+)
 
-from utils.loss_funcs import (
-    WassersteinLoss,
+from sklearn.ensemble        import (
+    RandomForestRegressor, 
+    RandomForestClassifier 
+)
+
+from sklearn.svm             import SVC
+
+from sklearn.linear_model    import LogisticRegression 
+
+from xgboost                 import (
+    XGBClassifier, 
+    XGBRegressor  
+)
+
+from utils.loss_funcs        import (
     CornLoss
 )
 
-from scipy.sparse import csr_matrix
+from scipy.sparse            import csr_matrix
 
-from torch import nn 
+from torch                   import nn 
 
-import torch 
+from torch.utils.data        import (
+    DataLoader, 
+    TensorDataset, 
+    random_split, 
+    Subset 
+)
 
-from torch.utils.data import DataLoader, TensorDataset, random_split, Subset 
+from models.networks         import SpatialBackbone
 
-from models.networks import SpatialBackbone
+from sklearn.model_selection import (
+    StratifiedShuffleSplit,
+    StratifiedKFold
+)
 
-from sklearn.model_selection import StratifiedShuffleSplit 
+from sklearn.metrics         import (
+    cohen_kappa_score
+)
 
-from utils.helpers import bind 
+from utils.helpers           import bind 
 
 # ---------------------------------------------------------
 # Regressors 
@@ -538,6 +561,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         categorical_input: bool = False, 
         collate_fn=None,
         class_values: list[int] | None = None,
+        features: list[str] | None = None, 
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
     ): 
         self.conv_channels     = conv_channels
@@ -558,6 +582,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.in_channels       = in_channels
         self.categorical_input = categorical_input
         self.class_values      = class_values
+        self.features          = features 
         self.device            = self._resolve_device(compute_strategy.device)
 
         self.target_global_batch   = target_global_batch
@@ -737,7 +762,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 feats  = self.model_.backbone(xb, mask=mb, rois=rois)
                 if group_ids is not None: 
                     feats = self._aggregate_tiles(
-                        feats, group_ids, group_weights, n_groups=len(labels)
+                        feats, group_ids, group_weights, len(labels), self.features
                     )
 
                 emb = self.fc_(feats)
@@ -745,6 +770,92 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 outs.append(emb.cpu().numpy())
 
         return np.vstack(outs)
+
+    def logits(self, X) -> NDArray: 
+        loader = self._ensure_loader(X, shuffle=False)
+        outs   = []
+
+        self.model_.eval() 
+        with torch.no_grad(): 
+            for batch in loader:
+                packed, masks, rois, labels, *extra = batch 
+                if packed.ndim == 3: 
+                    packed = packed[:, None, ...]
+                if masks.ndim == 3: 
+                    masks = masks[:, None, ...]
+
+                if rois is not None and len(rois) == 0: 
+                    rois = None 
+
+                group_ids = group_weights = None 
+                if len(extra) >= 2: 
+                    group_ids, group_weights = extra[-2], extra[-1]
+
+                if self.categorical_input: 
+                    xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
+                    mask_dtype = torch.float32
+                else: 
+                    xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
+                    mask_dtype = xb.dtype 
+
+                mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+
+                feats = self.model_.backbone(xb, mask=mb, rois=rois)
+                if group_ids is not None: 
+                    feats = self._aggregate_tiles(
+                        feats, group_ids, group_weights, len(labels), self.features
+                    )
+
+                emb    = self.fc_(feats)
+                emb    = self.act_(emb)
+                logits = self.out_(self.drop_(emb))
+                outs.append(logits.cpu().numpy())
+
+        return np.vstack(outs)
+
+    def extract_pooled(self, X) -> NDArray: 
+        loader = self._ensure_loader(X, shuffle=False)
+        outs   = []
+
+        self.model_.eval() 
+        with torch.no_grad(): 
+            for batch in loader: 
+                packed, masks, rois, labels, *extra = batch  
+                if packed.ndim == 3: 
+                    packed = packed[:, None, ...]
+                if masks.ndim == 3: 
+                    masks = masks[:, None, ...]
+
+                if rois is not None and len(rois) == 0:
+                    rois = None 
+
+                group_ids = group_weights = None 
+                if len(extra) >= 2: 
+                    group_ids, group_weights = extra[-2], extra[-1] 
+
+                if self.categorical_input: 
+                    xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
+                    mask_dtype = torch.float32
+                else: 
+                    xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
+                    mask_dtype = xb.dtype 
+
+                mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+
+                feats = self.model_.backbone(xb, mask=mb, rois=rois)
+                if group_ids is not None: 
+                    feats = self._aggregate_tiles(
+                        feats, group_ids, group_weights, len(labels), self.features
+                    )
+
+                outs.append(feats.cpu().numpy())
+
+        return np.vstack(outs)
+
+    def extract_with_logits(self, X) -> NDArray:
+        emb    = self.extract(X)
+        logits = self.logits(X)
+        return np.concatenate([emb, logits], axis=1)
 
     def _resolve_device(self, device: str | None): 
         if device is not None: 
@@ -861,7 +972,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         feats, 
         group_ids,
         group_weights,
-        n_groups
+        n_groups,
+        features: list[str] | None = None 
     ): 
         '''
         Aggregates concatenated, pooled sums, generalized means, and maxes across all ROIs 
@@ -871,14 +983,18 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         gids     = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
         feats_f  = feats.to(dtype=torch.float32)
         
-        dim      = feats_f.size(1) // 4 
-        log_part = feats_f[:, :dim]
-        gem_part = feats_f[:, dim:2*dim] 
-        max_part = feats_f[:, 2*dim:3*dim]
-        ent_part = feats_f[:, 3*dim:]
+        if features is None: 
+            features = ["logsum", "gem", "max", "entropy", "var"]
+
+        n_blocks = len(features)
+        dim      = feats_f.size(1) // n_blocks 
+
+        parts = {}
+        for i, name in enumerate(features): 
+            parts[name] = feats_f[:, i*dim:(i+1)*dim]
 
         if group_weights is None: 
-            w = torch.ones((log_part.size(0), 1), device=feats_f.device, dtype=feats_f.dtype)
+            w = torch.ones((feats_f.size(0), 1), device=feats_f.device, dtype=feats_f.dtype)
             denom_min = 1.0 
         else: 
             w = torch.as_tensor(
@@ -886,37 +1002,47 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             ).view(-1, 1)
             denom_min = 1e-6 
 
-        sum_w   = torch.zeros((n_groups, 1), device=feats_f.device)
-        agg_log = torch.zeros((n_groups, dim), device=feats_f.device)
-        agg_gem = torch.zeros((n_groups, dim), device=feats_f.device)
-        agg_ent = torch.zeros((n_groups, dim), device=feats_f.device)
-
+        sum_w      = torch.zeros((n_groups, 1), device=feats_f.device)
         sum_w.index_add_(0, gids, w)
+        denom      = sum_w.clamp(min=denom_min)
+        has_group  = sum_w > 0
+        out_blocks = []
 
-        sum_x = torch.expm1(log_part).clamp(min=0.0)
-        agg_log.index_add_(0, gids, sum_x * w)
-        agg_gem.index_add_(0, gids, gem_part * w)
-        agg_ent.index_add_(0, gids, ent_part * w)
+        for name in features: 
+            if name == "logsum": 
+                sum_x = torch.expm1(parts[name]).clamp(min=0.0)
+                agg   = torch.zeros((n_groups, dim), device=feats_f.device)
+                agg.index_add_(0, gids, sum_x * w)
+                agg = torch.log1p(agg / denom)
+                agg = torch.where(has_group, agg, torch.zeros_like(agg))
+            elif name == "gem":
+                agg = torch.zeros((n_groups, dim), device=feats_f.device)
+                agg.index_add_(0, gids, parts[name] * w)
+                agg = agg / denom
+                agg = torch.where(has_group, agg, torch.zeros_like(agg))
+            elif name == "max":
+                agg = torch.full(
+                    (n_groups, dim), torch.finfo(parts[name].dtype).min, device=feats_f.device
+                )
+                idx = gids.view(-1, 1).expand(-1, dim)
+                agg.scatter_reduce_(0, idx, parts[name], reduce="amax", include_self=True)
+                agg = torch.where(has_group, agg, torch.zeros_like(agg))
+            elif name == "entropy":
+                agg = torch.zeros((n_groups, dim), device=feats_f.device)
+                agg.index_add_(0, gids, parts[name] * w)
+                agg = agg / denom
+                agg = torch.where(has_group, agg, torch.zeros_like(agg))
+            elif name == "var": 
+                agg = torch.zeros((n_groups, dim), device=feats_f.device)
+                agg.index_add_(0, gids, parts[name] * w) 
+                agg = agg / denom 
+                agg = torch.where(has_group, agg, torch.zeros_like(agg))
+            else:
+                raise ValueError(f"unknown pooling feature: {name}")
 
-        denom   = sum_w.clamp(min=denom_min)
-        agg_log = torch.log1p(agg_log / denom)
-        agg_gem = agg_gem / denom 
-        agg_ent = agg_ent / denom 
-        
-        agg_max = torch.full(
-            (n_groups, dim), torch.finfo(max_part.dtype).min, device=feats_f.device
-        )
+            out_blocks.append(agg.to(dtype=feats.dtype))
 
-        idx = gids.view(-1, 1).expand(-1, dim)
-        agg_max.scatter_reduce_(0, idx, max_part, reduce="amax", include_self=True)
-
-        has_group = sum_w > 0 
-        agg_log   = torch.where(has_group, agg_log, torch.zeros_like(agg_log))
-        agg_gem   = torch.where(has_group, agg_gem, torch.zeros_like(agg_gem))
-        agg_max   = torch.where(has_group, agg_max, torch.zeros_like(agg_max))
-        agg_ent   = torch.where(has_group, agg_ent, torch.zeros_like(agg_ent))
-
-        return torch.cat([agg_log, agg_gem, agg_max, agg_ent], dim=1)
+        return torch.cat(out_blocks, dim=1)
 
     def _eval_loss(self, loader): 
         self.model_.eval() 
@@ -977,7 +1103,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                     feats, 
                     group_ids, 
                     group_weights, 
-                    n_groups=len(labels)
+                    len(labels),
+                    self.features
                 )
             logits = self.model_.head(feats)
             loss   = self.loss_fn_(logits, yb)
@@ -1014,7 +1141,7 @@ class EmbeddingProjector(BaseEstimator):
     def __init__(
         self,
         in_dim: int, 
-        out_dim: int = 64, 
+        out_dim: int = 5, 
         hidden_dim: int | None = None, 
         mode: str = "single",
         dropout: float = 0.1, 
@@ -1464,6 +1591,169 @@ class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin):
     def _prob_gt(self, X): 
         X = np.asarray(X, dtype=np.float32)
         return np.column_stack([m.predict_proba(X)[:, 1] for m in self.models_])
+
+# ---------------------------------------------------------
+# Spatial Ablation Study 
+# ---------------------------------------------------------
+
+class SpatialAblation: 
+
+    def __init__(
+        self, 
+        classifier_factory, 
+        classifier_kwargs: dict, 
+        *,
+        pooling_features: list[str], 
+        ablation_mode: str = "one_vs_rest", 
+        device: str = "cuda", 
+        batch_size: int = 128, 
+        epochs: int = 100,
+        lr: float = 5e-3, 
+        weight_decay: float = 1.5e-5,
+        early_stopping_rounds: int = 15, 
+        random_state: int = 0
+    ): 
+        self.classifier_factory    = classifier_factory
+        self.classifier_kwargs     = dict(classifier_kwargs)
+        self.pooling_features      = pooling_features
+        self.ablation_mode         = ablation_mode
+        self.device                = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.batch_size            = batch_size
+        self.epochs                = epochs
+        self.lr                    = lr
+        self.weight_decay          = weight_decay
+        self.early_stopping_rounds = early_stopping_rounds
+        self.random_state          = random_state
+
+    def run(self, X, y): 
+        clf = self.classifier_factory(**self.classifier_kwargs)
+        clf.pooling_features = list(self.pooling_features)
+        clf.fit(X, y)
+
+        pooled = clf.extract_pooled(X)
+        pooled = np.asarray(pooled, dtype=np.float32)
+
+        n_blocks = len(self.pooling_features) 
+        dim      = pooled.shape[1] // n_blocks 
+
+        blocks   = [(i*dim, (i+1)*dim) for i in range(n_blocks)]
+
+        ablations = []
+        if self.ablation_mode == "one_vs_rest": 
+            for k in range(n_blocks): 
+                keep = [i for i in range(n_blocks) if i != k]
+                ablations.append(("drop_" + str(k), keep))
+        else: 
+            ablations.append(("all", list(range(n_blocks))))
+
+        results = []
+        for name, keep_blocks in ablations: 
+            cols = np.concatenate([np.arange(a, b) for i, (a,b) in enumerate(blocks) 
+                                   if i in keep_blocks])
+            X_ablate = pooled[:, cols]
+            head, val_loss, qwk = self._fit_head(X_ablate, y, in_dim=X_ablate.shape[1])
+
+            results.append({
+                "name": name, 
+                "val_loss": float(val_loss), 
+                "qwk": float(qwk),
+                "dim": X_ablate.shape[1]
+            })
+
+        return results 
+
+    def _fit_head(self, X, y, in_dim): 
+        y         = np.asarray(y, dtype=np.int64).reshape(-1)
+        classes   = np.unique(y)
+        n_classes = len(classes)
+        y_idx     = np.searchsorted(classes, y)
+
+        class_counts  = np.bincount(y_idx, minlength=n_classes)
+        class_weights = class_counts.max() / np.clip(class_counts, 1, None)
+
+        head    = nn.Linear(in_dim, n_classes - 1).to(self.device)
+        loss_fn = CornLoss(n_classes=n_classes, class_weights=class_weights)
+        opt     = torch.optim.AdamW(
+            head.parameters(), 
+            lr=self.lr, 
+            weight_decay=self.weight_decay
+        )
+
+        splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
+        train_idx, val_idx = next(splitter.split(X, y))
+
+        X_train, y_train = X[train_idx], y_idx[train_idx]
+        X_val, y_val     = X[val_idx], y_idx[val_idx]
+
+        train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
+        val_ds   = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
+
+        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
+        val_loader   = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
+
+        best_state = None
+        best_val   = float("inf")
+        patience   = 0
+        qwk        = float("nan") 
+
+        for _ in range(self.epochs):
+            head.train()
+            for xb, yb in train_loader:
+                xb = xb.to(self.device, dtype=torch.float32)
+                yb = yb.to(self.device, dtype=torch.int64)
+                logits = head(xb)
+                loss = loss_fn(logits, yb)
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+
+            head.eval()
+            total = 0.0
+            count = 0
+            with torch.no_grad():
+                for xb, yb in val_loader:
+                    xb = xb.to(self.device, dtype=torch.float32)
+                    yb = yb.to(self.device, dtype=torch.int64)
+                    logits = head(xb)
+                    loss = loss_fn(logits, yb)
+                    total += loss.item() * yb.size(0)
+                    count += yb.size(0)
+            val_loss = total / max(count, 1)
+
+            head.eval() 
+            with torch.no_grad(): 
+                xb = torch.from_numpy(X_val).to(self.device, dtype=torch.float32) 
+                logits = head(xb) 
+                probs  = self._corn_probs(logits)
+                preds  = probs.argmax(axis=1)
+                qwk    = cohen_kappa_score(y_val, preds, weights="quadratic")
+
+            if val_loss < best_val - 1e-4:
+                best_val = val_loss
+                best_state = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
+                patience = 0
+            else:
+                patience += 1
+                if patience >= self.early_stopping_rounds:
+                    break
+
+        if best_state is not None:
+            head.load_state_dict(best_state)
+
+        return head, best_val, float(qwk)
+
+    def _corn_probs(self, logits):
+        prob_gt = torch.sigmoid(logits).cpu().numpy() 
+        n, k    = prob_gt.shape 
+        probs   = np.zeros((n, k + 1), dtype=np.float32) 
+        probs[:, 0] = 1.0 - prob_gt[:, 0]
+        for i in range(1, k): 
+            probs[:, i] = prob_gt[:, i - 1] - prob_gt[:, i] 
+        probs[:, -1] = prob_gt[:, -1]
+        probs = np.clip(probs, 1e-9, 1.0)
+        probs = probs / probs.sum(axis=1, keepdims=True)
+        return probs 
 
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)

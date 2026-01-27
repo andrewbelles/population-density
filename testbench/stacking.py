@@ -102,6 +102,8 @@ EXPERT_PROBA    = {
     "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat"),
     "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat"),
     "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"),
+    "VIIRS_MANIFOLD_LOGITS": project_path("data", "stacking", 
+                                          "viirs_pooled_with_logits_probs.mat"),
     "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat")
 }
 
@@ -223,7 +225,8 @@ def _optimize_dataset(
             param_space=get_param_space(model_name),
             task=OPT_TASK,
             config=inner_config,
-            outer_config=outer_config
+            outer_config=outer_config,
+            metric="qwk"
         )
 
         config = EngineConfig(
@@ -300,7 +303,7 @@ def _optimize_cs(
     )
 
     with contextlib.redirect_stdout(sys.stderr):
-        best_params, best_value = run_optimization(
+        best_params, best_value, _ = run_optimization(
             name=key,
             evaluator=evaluator,
             config=config,
@@ -415,7 +418,7 @@ def test_expert_optimize(
             name, 
             base["path"],
             loader, 
-            direction="minimize",
+            direction="maximize",
             n_trials=EXPERT_TRIALS,
             config_path=config_path,
             parallel_outer=False, 

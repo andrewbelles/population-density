@@ -72,6 +72,11 @@ BASE: dict[str, ConcatSpec] = {
         "path": project_path("data", "datasets", "viirs_pooled.mat"),
         "loader": load_compact_dataset
     },
+    "VIIRS_MANIFOLD_LOGITS": {
+        "name": "VIIRS_MANIFOLD_LOGITS",
+        "path": project_path("data", "datasets", "viirs_pooled_with_logits.mat"),
+        "loader": load_compact_dataset
+    },
     "TIGER": {
         "name": "tiger",
         "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),

@@ -6,6 +6,7 @@
 # 
 # 
 
+from sklearn.model_selection import StratifiedGroupKFold
 import argparse, io, torch, gc
 
 import numpy as np
@@ -19,6 +20,8 @@ from umap                      import UMAP
 from scipy.io                  import savemat 
 
 from sklearn.preprocessing     import StandardScaler
+
+from sklearn.decomposition     import PCA 
 
 from preprocessing.loaders     import load_spatial_roi_manifest
 
@@ -65,8 +68,13 @@ from testbench.utils.etc       import (
     format_metric 
 )
 
+from testbench.utils.oof       import (
+    holdout_embeddings
+)
+
 from models.estimators         import (
-    EmbeddingProjector, 
+    EmbeddingProjector,
+    SpatialAblation, 
     SpatialClassifier, 
     make_spatial_sfe,
 )
@@ -86,8 +94,10 @@ NLCD_ROOT  = project_path("data", "tensors", "nlcd_roi")
 VIIRS_KEY  = "Spatial/VIIRS_ROI"
 NLCD_KEY   = "Spatial/NLCD_ROI"
 
-VIIRS_OUT  = project_path("data", "datasets", "viirs_pooled.mat")
-NLCD_OUT   = project_path("data", "datasets", "nlcd_pooled.mat")
+# Out Paths 
+VIIRS_OUT             = project_path("data", "datasets", "viirs_pooled.mat")
+VIIRS_OUT_WITH_LOGITS = project_path("data", "datasets", "viirs_pooled_with_logits.mat")
+NLCD_OUT              = project_path("data", "datasets", "nlcd_pooled.mat")
 
 # ---------------------------------------------------------
 # Test Helpers 
@@ -101,37 +111,65 @@ def _row_score(name: str, score: float):
     return {"Name": name, "Loss": format_metric(score)}
 
 def _projector_fold_factory(name: str, proj_trials: int, random_state: int): 
+    cached_params = None 
+
     def _projector_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
+        nonlocal cached_params
 
-        config = EngineConfig(
-            n_trials=proj_trials, 
-            direction="minimize", 
-            random_state=random_state
-        )
+        if cached_params is None: 
+            config = EngineConfig(
+                n_trials=proj_trials, 
+                direction="minimize", 
+                random_state=random_state
+            )
 
-        proj_eval = ProjectorEvaluator(
-            train_emb, 
-            train_y, 
-            define_projector_space, 
-            random_state=random_state + fold,
-            compute_strategy=strategy
-        )
+            proj_eval = ProjectorEvaluator(
+                train_emb, 
+                train_y, 
+                define_projector_space, 
+                random_state=random_state + fold,
+                compute_strategy=strategy
+            )
 
-        best_params, _, _ = run_optimization(
-            name="Spatial/VIIRS_ROI_Projector",
-            evaluator=proj_eval,
-            config=config
-        )
+            cached_params, _, _ = run_optimization(
+                name="Spatial/VIIRS_ROI_Projector",
+                evaluator=proj_eval,
+                config=config
+            )
+            cached_params = dict(cached_params)
 
         proj = EmbeddingProjector(
             in_dim=train_emb.shape[1],
-            **best_params,
+            **cached_params,
             random_state=random_state + fold,
             device=strategy.device
         )
         proj.fit(train_emb, train_y)
         return proj.transform(val_emb)
+
     return _projector_fold
+
+def _pca_logits_fold_factory(n_components: int = 11): 
+    stats = []
+
+    def _pca_logits_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
+        n_classes = len(np.unique(train_y))
+        logit_dim = max(1, n_classes - 1) 
+
+        if train_emb.shape[1] <= logit_dim or val_emb.shape[1] <= logit_dim: 
+            raise ValueError("expected embeddings concatenated with logits")
+
+        train_feats = train_emb[:, :-logit_dim]
+        val_feats   = val_emb[:, :-logit_dim]
+        val_logits  = val_emb[:, -logit_dim:]
+
+        pca = PCA(n_components=n_components, random_state=random_state + fold)
+        pca.fit(train_feats)
+        stats.append(float(np.sum(pca.explained_variance_ratio_)))
+
+        val_pca = pca.transform(val_feats)
+        return np.concatenate([val_pca, val_logits], axis=1)
+    return _pca_logits_fold, stats
 
 def _holdout_embeddings(
     ds,
@@ -369,7 +407,7 @@ def test_saipe_extract(
     params = load_model_params(config_path, model_key)
     params = dict(params)
     params["mode"]    = "manifold"
-    params["out_dim"] = 64
+    params["out_dim"] = 5
 
     splitter      = cv_config(folds, random_state).get_splitter(OPT_TASK)
     model_factory = lambda: EmbeddingProjector(
@@ -516,6 +554,145 @@ def test_viirs_extract(
         proj_trials=proj_trials,
     )
 
+def test_viirs_extract_with_logits(
+    *,
+    data_path: str = VIIRS_ROOT, 
+    model_key: str = VIIRS_KEY,
+    out_path: str = VIIRS_OUT_WITH_LOGITS,
+    canvas_hw: tuple[int, int] = (512, 512),
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH,
+    n_components: int = 11,
+    folds: int = 5,
+    **_
+): 
+    ds, labels, fips, collate_fn, in_channels, sample_labels, sample_ids_full, sample_groups = \
+        load_spatial_dataset(data_path, canvas_hw)
+
+    params = load_model_params(config_path, model_key)
+    params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
+
+    is_packed = sample_groups.size > 0 and sample_labels.size > 0 
+    if is_packed: 
+        splitter = StratifiedGroupKFold(
+            n_splits=folds,
+            shuffle=True,
+            random_state=random_state
+        )
+        splits = (
+            (np.sort(tr), np.sort(va)) 
+            for tr, va in splitter.split(
+                np.zeros_like(sample_labels),
+                sample_labels,
+                groups=sample_groups
+            )
+        )
+        subset_fn = lambda data, idx: Subset(data, np.unique(sample_groups[idx]))
+        fit_fn    = lambda model, data, idx: model.fit(data, y=None)
+        labels_in = sample_labels 
+        fips_out  = sample_ids_full 
+    else: 
+        splitter  = cv_config(folds, random_state).get_splitter(OPT_TASK)
+        splits    = splitter.split(np.arange(len(labels)), labels)
+        subset_fn = None 
+        fit_fn    = None 
+        labels_in = labels 
+        fips_out  = fips 
+
+    model_factory = lambda: SpatialClassifier(
+        in_channels=in_channels,
+        compute_strategy=strategy,
+        **params
+    )
+
+    projector, pca_stats = _pca_logits_fold_factory(n_components=n_components)
+
+    embs = holdout_embeddings(
+        ds, labels_in, splits, 
+        model_factory=model_factory,
+        extract_fn=lambda m, subset: m.extract_with_logits(subset),
+        postprocess=projector,
+        random_state=random_state,
+        subset_fn=subset_fn,
+        fit_fn=fit_fn 
+    )
+
+    logit_dim = embs.shape[1] - n_components 
+    feature_names = np.array(
+        [f"{model_key.split('/')[-1].lower()}_pca_{i}" for i in range(n_components)] +
+        [f"{model_key.split('/')[-1].lower()}_logit_{i}" for i in range(logit_dim)],
+        dtype="U32"
+    )
+
+    evr = float(np.mean(pca_stats)) if pca_stats else float("nan")
+
+    savemat(out_path, {
+        "features": embs,
+        "labels": labels_in.reshape(-1, 1),
+        "fips_codes": fips_out, 
+        "feature_names": feature_names,
+        "n_counties": np.array([len(labels_in)], dtype=np.int64)
+    })
+
+    return {
+        "header": ["Name", "Logits Dim", "Emb Dim", "EVR"],
+        "row": {
+            "Name": model_key, 
+            "Logits Dim": logit_dim, 
+            "Emb Dim": n_components,
+            "EVR": evr
+        }
+    }
+
+def test_viirs_cnn_ablation(
+    *,
+    data_path: str = VIIRS_ROOT,
+    model_key: str = VIIRS_KEY, 
+    canvas_hw: tuple[int, int] = (512, 512),
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH,
+    pooling_features: list[str] | None = None, 
+    **_
+): 
+
+    ds, labels, fips, collate_fn, in_channels, sample_labels, sample_ids_full, sample_groups = \
+        load_spatial_dataset(data_path, canvas_hw)
+
+    params = load_model_params(config_path, model_key)
+    params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
+
+    if pooling_features is None: 
+        pooling_features = ["logsum", "gem", "max", "entropy", "var"]
+
+    ab = SpatialAblation(
+        classifier_factory=SpatialClassifier,
+        classifier_kwargs={
+            "in_channels": in_channels,
+            "compute_strategy": strategy,
+            **params
+        },
+        pooling_features=pooling_features,
+        device=strategy.device,
+        random_state=random_state
+    )
+
+    results = ab.run(ds, labels)
+
+    rows = []
+    for r in results: 
+        rows.append({
+            "Name": r["name"],
+            "Loss": format_metric(r["val_loss"]),
+            "QWK": format_metric(r["qwk"]),
+            "Dim": r["dim"]
+        })
+
+    return {
+        "header": ["Ablation", "Loss", "QWK", "Dim"],
+        "rows": rows
+    }
+
+
 def test_nlcd_opt(
     *,
     data_path: str = NLCD_ROOT, 
@@ -569,7 +746,9 @@ TESTS = {
     "nlcd-extract": test_nlcd_extract,
     "saipe-opt": test_saipe_opt,
     "saipe-extract": test_saipe_extract,
-    "reduce-all": test_reduce_all
+    "reduce-all": test_reduce_all,
+    "viirs-extract-with-logits": test_viirs_extract_with_logits,
+    "viirs-ablation": test_viirs_cnn_ablation
 }
 
 def _call_test(fn, name, **kwargs): 

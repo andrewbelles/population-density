@@ -222,16 +222,20 @@ class SpatialBackbone(nn.Module):
         use_bn: bool = True, 
         roi_output_size: int | tuple[int, int] = 7, 
         sampling_ratio: int = 2, 
-        aligned: bool = False 
+        aligned: bool = True,
+        features: list[str] | None = None         
     ): 
         super().__init__()
 
         self.model_in_channels = in_channels 
-        self.out_dim           = conv_channels[-1] * 4 
         self.spatial_scale     = 1.0 
         self.roi_output_size   = roi_output_size
         self.sampling_ratio    = sampling_ratio 
         self.aligned           = aligned 
+        if features is None: 
+            features = ["logsum", "gem", "max", "entropy", "var"]
+        self.features          = features 
+        self.out_dim           = conv_channels[-1] * len(self.features)
 
         # Categorical information for NLCD
         self.categorical_input       = categorical_input
@@ -336,7 +340,7 @@ class SpatialBackbone(nn.Module):
     ) -> torch.Tensor: 
         m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        return self.masked_pooling_head(feats, m)
+        return self.masked_pooling_head(feats, m, features=self.features)
 
     def _roi_pool_chunk(
         self, 
@@ -378,7 +382,7 @@ class SpatialBackbone(nn.Module):
         mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
         mask_pooled = mask_pooled.to(dtype=pooled.dtype)
 
-        return self.masked_pooling_head(pooled, mask_pooled)
+        return self.masked_pooling_head(pooled, mask_pooled, features=self.features)
 
     def _run_chunk(self, chunk, mask=None): 
         if self.categorical_input: 
@@ -443,7 +447,7 @@ class SpatialBackbone(nn.Module):
     ) -> torch.Tensor: 
         m = self.prep_mask(x, mask).to(dtype=feats.dtype)
         m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        return self.masked_pooling_head(feats, m)
+        return self.masked_pooling_head(feats, m, features=self.features)
 
     def _build_masks(self, mask, sizes, device): 
         if mask is None: 
@@ -493,7 +497,8 @@ class SpatialBackbone(nn.Module):
         x: torch.Tensor, 
         mask: torch.Tensor, 
         p: float = 3.0, 
-        eps: float = 1e-6
+        eps: float = 1e-6,
+        features: list[str] | None = None 
     ) -> torch.Tensor: 
         '''
         Concatenates log sum, generalized mean, max, and shannon entropy 
@@ -524,10 +529,26 @@ class SpatialBackbone(nn.Module):
         mx       = mx_vals.max(2).values 
         mx       = torch.where(has_mask, mx, torch.zeros_like(mx)).to(dtype=x.dtype)
 
+        sum_x2   = (x_flat * x_flat * m_flat).sum(2)
+        mean     = sum_x / sum_m 
+        var      = (sum_x2 / sum_m) - (mean * mean) 
+        var      = torch.where(has_mask, var, torch.zeros_like(var)).to(dtype=x.dtype)
+
         norm     = sum_x.to(dtype=x.dtype).unsqueeze(2) + eps 
         p_x      = (x_flat * m_flat) / norm 
         entropy  = torch.special.entr(p_x).sum(2)
         entropy  = torch.where(has_mask, entropy, torch.zeros_like(entropy)).to(dtype=x.dtype)
 
-        return torch.cat([log_sum, gem, mx, entropy], dim=1)
+        blocks = {
+            "logsum": log_sum, 
+            "gem": gem, 
+            "max": mx, 
+            "entropy": entropy,
+            "var": var 
+        }
+        
+        if features is None: 
+            features = ["logsum", "gem", "max", "entropy", "var"]
+
+        return torch.cat([blocks[f] for f in features], dim=1)
 

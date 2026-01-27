@@ -100,6 +100,8 @@ class TaskSpec:
         n_classes = len(np.unique(y_true))
         results = {}
 
+        y_idx, labels = as_label_indices(y_true)
+
         if self.task_type == "regression": 
             for m in self.metrics: 
                 if m == "r2":
@@ -108,12 +110,9 @@ class TaskSpec:
                     results["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
         else: 
             y_prob_arr = None
-            y_idx = None
-            labels = None
             if y_prob is not None:
                 y_prob_arr = np.asarray(y_prob)
                 # Align label indices with prob columns (0..K-1)
-                y_idx, labels = as_label_indices(y_true)
 
                 # Normalize row-wise if needed (prevents log_loss warnings)
                 if y_prob_arr.ndim > 1:
@@ -158,7 +157,7 @@ class TaskSpec:
                     results["brier"] = brier_multiclass(y_prob_arr, y_idx, labels.size)
                 elif m == "ece" and y_prob_arr is not None:
                     results["ece"] = ece(y_prob_arr, y_idx, labels.size)
-                elif m == "qwk" and y_prob_arr is not None:
+                elif m == "qwk":
                     p_idx, _ = as_label_indices(y_pred)
                     results["qwk"] = float(cohen_kappa_score(y_idx, p_idx, weights="quadratic"))
                 elif m == "ord_mae" and y_prob_arr is not None:
