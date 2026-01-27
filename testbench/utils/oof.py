@@ -8,18 +8,22 @@
 
 import numpy as np 
 
-import gc, torch
+import multiprocessing as mp 
 
+import gc, torch, itertools
+
+from torch.cuda import is_available
 from torch.utils.data        import Subset 
 
 from sklearn.model_selection import StratifiedGroupKFold
-
 
 from preprocessing.loaders   import (
     load_oof_predictions
 )
 
 from numpy.typing            import NDArray
+
+from models.estimators       import SpatialClassifier
 
 from testbench.utils.paths   import (
     PROBA_PATH,
@@ -59,6 +63,34 @@ def stacking_metadata(proba_path: str):
         "class_labels": class_labels 
     }
 
+def make_spatial_classifier(
+    in_channels,
+    compute_strategy,
+    params,
+    features=None
+): 
+    kwargs = dict(params)
+    kwargs["in_channels"] = in_channels 
+    kwargs["compute_strategy"] = compute_strategy 
+    if features is not None: 
+        kwargs["features"] = features 
+    return SpatialClassifier(**kwargs)
+
+def extract_pooled(model, subset): 
+    return model.extract_pooled(subset)
+
+def extract_with_logits(model, subset): 
+    return model.extract_with_logits(subset)
+
+def subset_by_groups(data, idx, groups): 
+    return Subset(data, np.unique(groups[idx]))
+
+def fit_with_labels(model, data, labels, idx): 
+    return model.fit(data, labels[idx])
+
+def fit_without_labels(model, data, idx): 
+    return model.fit(data, y=None)
+
 # ---------------------------------------------------------
 # Holdout Dataset Generation
 # ---------------------------------------------------------
@@ -89,6 +121,61 @@ class PackedGroupSplitter:
             va_g = np.unique(self.groups[va])
             yield np.sort(tr_g), np.sort(va_g)
 
+def _holdout_worker(
+    ds, 
+    labels,
+    jobs,
+    results,
+    model_factory,
+    extract_fn,
+    postprocess,
+    random_state,
+    subset_fn,
+    fit_fn,
+    device_id
+):
+    if device_id is not None and torch.cuda.is_available(): 
+        torch.cuda.set_device(device_id)
+
+    while True: 
+        item = jobs.get() 
+        if item is None: 
+            break 
+
+        fold_idx, (train_idx, val_idx) = item 
+        train_data = subset_fn(ds, train_idx)
+        val_data   = subset_fn(ds, val_idx)
+
+        model = model_factory()
+        if callable(model) and not hasattr(model, "fit"): 
+            model = model() 
+
+        if device_id is not None: 
+            if hasattr(model, "device"): 
+                model.device = torch.device(f"cuda:{device_id}")
+            if hasattr(model, "compute_strategy"): 
+                    model.compute_strategy.device = "cuda"
+                    model.compute_strategy.gpu_id = device_id
+
+        fit_fn(model, train_data, train_idx)
+
+        train_emb = extract_fn(model, train_data) if postprocess else None 
+        val_emb   = extract_fn(model, val_data)
+
+        if postprocess:
+            val_emb = postprocess(
+                train_emb, labels[train_idx],
+                val_emb, labels[val_idx],
+                random_state=random_state, 
+                fold=fold_idx 
+            )
+
+        results.put((val_idx, val_emb))
+
+        del model, train_emb, val_emb 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect() 
 
 def holdout_embeddings(
     ds,
@@ -99,7 +186,8 @@ def holdout_embeddings(
     postprocess=None,
     random_state: int = 0, 
     subset_fn=None,
-    fit_fn=None 
+    fit_fn=None,
+    devices: list[int] | None = None 
 ):
     n   = len(labels)
     out = None 
@@ -109,7 +197,56 @@ def holdout_embeddings(
     if fit_fn is None: 
         fit_fn = lambda model, data, idx: model.fit(data, labels[idx])
 
-    for fold_idx, (train_idx, val_idx) in enumerate(splits):
+    splits_list = list(splits)
+
+    if devices is not None and len(devices) > 1 and torch.cuda.is_available():
+        context = mp.get_context("spawn")
+        jobs    = context.Queue()
+        results = context.Queue()
+
+        for fold_idx, (train_idx, val_idx) in enumerate(splits_list): 
+            jobs.put((fold_idx, train_idx, val_idx))
+
+        for _ in devices: 
+            jobs.put(None)
+
+        procs = []
+        for dev in devices: 
+            p = context.Process(
+                target=_holdout_worker,
+                args=(
+                    ds, labels, jobs,
+                    model_factory,
+                    extract_fn,
+                    postprocess,
+                    random_state,
+                    subset_fn,
+                    fit_fn, 
+                    dev
+                )
+            )
+            p.start() 
+            procs.append(p)
+
+        out = None 
+        received = 0 
+        while received < len(splits_list): 
+            val_idx, val_emb = results.get() 
+            if out is None: 
+                out = np.zeros((n, val_emb.shape[1]), dtype=val_emb.dtype)
+            out[val_idx] = val_emb 
+            received += 1 
+
+        for p in procs: 
+            p.join()
+
+        if out is None: 
+            raise ValueError("no embeddings returned")
+        return out 
+
+    out = None 
+    
+    for fold_idx, (train_idx, val_idx) in enumerate(splits_list): 
         train_data = subset_fn(ds, train_idx)
         val_data   = subset_fn(ds, val_idx)
 
@@ -134,7 +271,7 @@ def holdout_embeddings(
         out[val_idx] = val_emb 
 
         del model, train_emb, val_emb 
-        if torch.cuda.is_available(): 
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect() 
 

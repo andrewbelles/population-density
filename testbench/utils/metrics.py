@@ -21,6 +21,12 @@ from analysis.cross_validation import (
 ) 
 from sklearn.metrics import log_loss, cohen_kappa_score
 
+from sklearn.decomposition       import PCA 
+
+from sklearn.cross_decomposition import CCA 
+
+from sklearn.feature_selection   import mutual_info_regression
+
 OPT_TASK = TaskSpec("classification", ("qwk",))
 
 def _softmax_rows(probs: NDArray) -> NDArray: 
@@ -111,3 +117,56 @@ def summarize_boruta(path: str) -> pd.DataFrame:
     if missing: 
         raise ValueError(f"boruta summary missing columns: {sorted(missing)}")
     return df 
+
+def linear_cka(X, Y): 
+    Xc = X - X.mean(axis=0, keepdims=True)
+    Yc = Y - Y.mean(axis=0, keepdims=True)
+
+    xy = Xc.T @ Yc 
+    xx = Xc.T @ Xc 
+    yy = Yc.T @ Yc 
+    num = (xy * xy).sum() 
+    den = np.sqrt((xx * xx).sum() * (yy * yy).sum()) + 1e-12 
+    return float(num / den)
+
+def cca_score(X, Y, n_components=3):
+    n = X.shape[0]
+    k = min(n_components, X.shape[1], Y.shape[1], n - 1) 
+    if k <= 0: 
+        return float("nan")
+    cca = CCA(n_components=k, max_iter=1000)
+    Xc, Yc = cca.fit_transform(X, Y)
+    corrs = [np.corrcoef(Xc[:, i], Yc[:, i])[0, 1] for i in range(k)]
+    return float(np.nanmean(np.abs(corrs)))
+
+def block_mi(X, Y, n_components=1, random_state=0): 
+    if X.shape[1] > n_components:
+        Xr = PCA(n_components=n_components, random_state=random_state).fit_transform(X)
+    else: 
+        Xr = X 
+
+    if Y.shape[1] > n_components:
+        Yr = PCA(n_components=n_components, random_state=random_state).fit_transform(Y)
+    else: 
+        Yr = Y 
+
+    mi_xy = mutual_info_regression(Xr, Yr[:, 0], random_state=random_state)
+    mi_yx = mutual_info_regression(Yr, Xr[:, 0], random_state=random_state)
+    return float(0.5 * (np.mean(mi_xy) + np.mean(mi_yx)))
+
+def distance_correlation(X, Y): 
+    X = np.asarray(X, dtype=np.float32)
+    Y = np.asarray(Y, dtype=np.float32)
+
+    a = np.linalg.norm(X[:, None, :] - X[None, :, :], axis=2)
+    b = np.linalg.norm(Y[:, None, :] - Y[None, :, :], axis=2)
+
+    A = a - a.mean(axis=0, keepdims=True) - a.mean(axis=1, keepdims=True) + a.mean() 
+    B = b - b.mean(axis=0, keepdims=True) - b.mean(axis=1, keepdims=True) + b.mean() 
+
+    dcov  = (A * B).mean() 
+    dvarx = (A * A).mean() 
+    dvary = (B * B).mean() 
+
+    denom = np.sqrt(dvarx * dvary) + 1e-12 
+    return float(dcov / denom)

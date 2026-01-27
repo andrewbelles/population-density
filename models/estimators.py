@@ -1790,9 +1790,6 @@ class SpatialAblation:
         clf.fit(X, y)
 
         pooled = clf.extract_pooled(X)
-        if pooled.shape[1] % len(feature_names) != 0: 
-            raise ValueError(f"pooled dim {pooled.shape[1]} not divisible by n_blocks "
-                             f"{len(feature_names)}")
         pooled = np.asarray(pooled, dtype=np.float32)
 
         X_ablate = pooled

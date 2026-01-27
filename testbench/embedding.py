@@ -6,6 +6,7 @@
 # 
 # 
 
+from numba import np_complex128
 from sklearn.model_selection import StratifiedGroupKFold
 import argparse, io, torch, gc
 
@@ -18,6 +19,8 @@ from torch.utils.data          import Subset
 from umap                      import UMAP
 
 from scipy.io                  import savemat 
+
+from functools                 import partial 
 
 from sklearn.preprocessing     import StandardScaler
 
@@ -61,7 +64,13 @@ from testbench.utils.config    import (
     with_spatial_channels
 )
 
-from testbench.utils.metrics   import OPT_TASK
+from testbench.utils.metrics   import (
+    OPT_TASK,
+    linear_cka,
+    cca_score,
+    block_mi,
+    distance_correlation
+)
 
 from testbench.utils.etc       import (
     run_tests_table,
@@ -69,7 +78,13 @@ from testbench.utils.etc       import (
 )
 
 from testbench.utils.oof       import (
-    holdout_embeddings
+    extract_pooled,
+    extract_with_logits,
+    fit_without_labels,
+    holdout_embeddings,
+    PackedGroupSplitter,
+    make_spatial_classifier,
+    subset_by_groups
 )
 
 from models.estimators         import (
@@ -587,8 +602,8 @@ def test_viirs_extract_with_logits(
                 groups=sample_groups
             )
         )
-        subset_fn = lambda data, idx: Subset(data, np.unique(sample_groups[idx]))
-        fit_fn    = lambda model, data, idx: model.fit(data, y=None)
+        subset_fn = partial(subset_by_groups, groups=sample_groups) 
+        fit_fn    = fit_without_labels 
         labels_in = sample_labels 
         fips_out  = sample_ids_full 
     else: 
@@ -599,10 +614,11 @@ def test_viirs_extract_with_logits(
         labels_in = labels 
         fips_out  = fips 
 
-    model_factory = lambda: SpatialClassifier(
-        in_channels=in_channels,
-        compute_strategy=strategy,
-        **params
+    model_factory = partial(
+        make_spatial_classifier,
+        in_channels,
+        strategy,
+        params,
     )
 
     projector, pca_stats = _pca_logits_fold_factory(n_components=n_components)
@@ -610,11 +626,12 @@ def test_viirs_extract_with_logits(
     embs = holdout_embeddings(
         ds, labels_in, splits, 
         model_factory=model_factory,
-        extract_fn=lambda m, subset: m.extract_with_logits(subset),
+        extract_fn=extract_with_logits,
         postprocess=projector,
         random_state=random_state,
         subset_fn=subset_fn,
-        fit_fn=fit_fn 
+        fit_fn=fit_fn,
+        devices=strategy.visible_devices()
     )
 
     logit_dim = embs.shape[1] - n_components 
@@ -678,7 +695,8 @@ def test_viirs_cnn_ablation(
         random_state=random_state
     )
 
-    results = ab.run(ds, labels, devices=devices if devices else None)
+    labels_in = sample_labels if sample_labels.size else labels
+    results = ab.run(ds, labels_in, devices=devices if devices else None)
 
     rows = []
     for r in results: 
@@ -694,6 +712,91 @@ def test_viirs_cnn_ablation(
         "rows": rows
     }
 
+def test_viirs_pooled_dependence(
+    *,
+    data_path: str = VIIRS_ROOT,
+    model_key: str = VIIRS_KEY, 
+    canvas_hw: tuple[int, int] = (512, 512),
+    folds: int = 5, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH,
+    pooling_features: list[str] | None = None, 
+    cca_components: int = 3, 
+    mi_components: int = 1, 
+    **_
+):
+    ds, labels, fips, collate_fn, in_channels, sample_labels, sample_ids_full, sample_groups = \
+        load_spatial_dataset(data_path, canvas_hw)
+
+    params = load_model_params(config_path, model_key)
+    params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
+
+    if pooling_features is None: 
+        pooling_features = ["logsum", "gem", "max", "entropy", "var"]
+
+    base = getattr(ds, "dataset", ds) 
+    is_packed = hasattr(base, "is_packed") and base.is_packed
+    if is_packed: 
+        splitter = PackedGroupSplitter(
+            sample_labels,
+            sample_groups,
+            n_splits=folds,
+            random_state=random_state
+        )
+        splits = splitter.split()
+    else: 
+        splitter = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=random_state)
+        splits   = splitter.split(np.zeros(len(labels)), labels, fips)
+
+    embs, labels_out = holdout_embeddings(
+        ds, labels, splits, 
+        model_factory=partial(
+            make_spatial_classifier,
+            in_channels,
+            strategy,
+            params,
+            pooling_features,
+        ),
+        extract_fn=extract_pooled,
+        devices=strategy.visible_devices()
+    )
+
+    X = np.asarray(embs, dtype=np.float32)
+    n_blocks = len(pooling_features)
+    dim = X.shape[1] // n_blocks 
+   
+    blocks = {}
+    for i, name in enumerate(pooling_features):
+        blocks[name] = X[:, i * dim:(i + 1) * dim]
+    rows = []
+    names = list(pooling_features)
+    for i in range(len(names)): 
+        for j in range(i + 1, len(names)): 
+            a, b = names[i], names[j]
+            Xa   = blocks[a] 
+            Xb   = blocks[b]
+
+            Xa   = StandardScaler().fit_transform(Xa)
+            Xb   = StandardScaler().fit_transform(Xb)
+
+            cka  = linear_cka(Xa, Xb)
+            cca  = cca_score(Xa, Xb, n_components=cca_components)
+            mi   = block_mi(Xa, Xb, n_components=mi_components, random_state=random_state)
+            dcor = distance_correlation(Xa, Xb)
+
+            rows.append({
+                "A": a,
+                "B": b,
+                "CKA": f"{cka:.4f}",
+                "CCA": f"{cca:.4f}",
+                "MI": f"{mi:.4f}",
+                "dCor": f"{dcor:.4f}"
+            })
+
+    return {
+        "header": ["A", "B", "CKA", "CCA", "MI", "dCor"],
+        "rows": rows 
+    }
 
 def test_nlcd_opt(
     *,
