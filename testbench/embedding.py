@@ -736,17 +736,27 @@ def test_viirs_pooled_dependence(
 
     base = getattr(ds, "dataset", ds) 
     is_packed = hasattr(base, "is_packed") and base.is_packed
+
     if is_packed: 
-        splitter = PackedGroupSplitter(
-            sample_labels,
-            sample_groups,
+        splitter = StratifiedGroupKFold(
             n_splits=folds,
+            shuffle=True, 
             random_state=random_state
         )
-        splits = splitter.split()
+        labels_in = sample_labels 
+        splits    = splitter.split(
+            np.zeros(len(sample_labels)),
+            sample_labels,
+            sample_groups 
+        )
+        subset_fn = partial(subset_by_groups, groups=sample_groups)
+        fit_fn    = fit_without_labels
     else: 
-        splitter = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=random_state)
-        splits   = splitter.split(np.zeros(len(labels)), labels, fips)
+        splitter  = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=random_state)
+        labels_in = labels 
+        splits    = splitter.split(np.zeros(len(labels)), labels, fips)
+        subset_fn = None 
+        fit_fn    = None 
 
     embs = holdout_embeddings(
         ds, labels, splits, 
@@ -758,6 +768,9 @@ def test_viirs_pooled_dependence(
             pooling_features,
         ),
         extract_fn=extract_pooled,
+        random_state=random_state,
+        subset_fn=subset_fn,
+        fit_fn=fit_fn,
         devices=strategy.visible_devices()
     )
 
@@ -768,6 +781,7 @@ def test_viirs_pooled_dependence(
     blocks = {}
     for i, name in enumerate(pooling_features):
         blocks[name] = X[:, i * dim:(i + 1) * dim]
+
     rows = []
     names = list(pooling_features)
     for i in range(len(names)): 
