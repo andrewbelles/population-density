@@ -1006,8 +1006,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 class EmbeddingProjector(BaseEstimator): 
 
     '''
-    Shallow non-linear projection for embedding compression. Trains with Wasserstein loss 
-    on a small classification head, returning only the projected embeddings. 
+    Projection head for embedding compression. Trains with CORN loss on a small ordinal head 
+    and returns only learned embeddings. Supports a single-layer projector or a 3-layer 
+    manifold learner.  
     '''
 
     def __init__(
@@ -1015,6 +1016,7 @@ class EmbeddingProjector(BaseEstimator):
         in_dim: int, 
         out_dim: int = 64, 
         hidden_dim: int | None = None, 
+        mode: str = "single",
         dropout: float = 0.1, 
         epochs: int = 200, 
         lr: float = 1e-3, 
@@ -1025,35 +1027,23 @@ class EmbeddingProjector(BaseEstimator):
         random_state: int = 0, 
         device: str | None = None 
     ): 
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.hidden_dim = hidden_dim
-        self.dropout = dropout
-        self.epochs = epochs
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.batch_size = batch_size
+        self.in_dim                = in_dim
+        self.out_dim               = out_dim
+        self.hidden_dim            = hidden_dim
+        self.mode                  = mode 
+        self.dropout               = dropout
+        self.epochs                = epochs
+        self.lr                    = lr
+        self.weight_decay          = weight_decay
+        self.batch_size            = batch_size
         self.early_stopping_rounds = early_stopping_rounds
-        self.eval_fraction = eval_fraction
-        self.random_state = random_state
-        self.device = torch.device(device) if device else (
-            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        )
+        self.eval_fraction         = eval_fraction
+        self.random_state          = random_state
 
-    def _build(self, n_classes: int): 
-        hidden = self.hidden_dim or max(self.out_dim, min(self.in_dim, 128))
-        self.proj_ = nn.Sequential(
-            nn.Linear(self.in_dim, hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout),
-            nn.Linear(hidden, self.out_dim)
-        )
-
-        self.head_  = nn.Linear(self.out_dim, n_classes)
-        self.model_ = nn.Module() 
-        self.model_.proj = self.proj_ 
-        self.model_.head = self.head_ 
-        self.model_.to(self.device)
+        if device == "cuda" and torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else: 
+            self.device = torch.device("cpu")
 
     def fit(self, X, y): 
         X = np.asarray(X, dtype=np.float32)
@@ -1063,7 +1053,12 @@ class EmbeddingProjector(BaseEstimator):
         self.n_classes_ = len(self.classes_)
 
         self._build(self.n_classes_)
-        loss_fn  = WassersteinLoss(n_classes=self.n_classes_)
+
+        y_idx         = np.searchsorted(self.classes_, y)
+        class_counts  = np.bincount(y_idx, minlength=self.n_classes_)
+        class_weights = class_counts.max() / np.clip(class_counts, 1, None)
+        loss_fn       = CornLoss(n_classes=self.n_classes_, class_weights=class_weights)
+
         opt      = torch.optim.AdamW(
             self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
@@ -1165,6 +1160,35 @@ class EmbeddingProjector(BaseEstimator):
                 count += yb.size(0)
         return total / max(count, 1)
 
+    def _build(self, n_classes: int): 
+
+        if self.mode == "single": 
+            if self.dropout > 0: 
+                self.proj_ = nn.Sequential(
+                    nn.Dropout(self.dropout),
+                    nn.Linear(self.in_dim, self.out_dim)
+                )
+            else: 
+                self.proj_ = nn.Linear(self.in_dim, self.out_dim)
+        elif self.mode == "manifold": 
+            hidden = self.hidden_dim or max(self.out_dim, min(self.in_dim, 256))
+            self.proj_ = nn.Sequential(
+                nn.Linear(self.in_dim, hidden // 2),
+                nn.ReLU(inplace=True),
+                nn.Dropout(self.dropout),
+                nn.Linear(hidden // 2, hidden),
+                nn.ReLU(inplace=True),
+                nn.Dropout(self.dropout),
+                nn.Linear(hidden, self.out_dim)
+            )
+        else: 
+            raise ValueError(f"unknown projector mode: {self.mode}")
+
+        self.head_  = nn.Linear(self.out_dim, n_classes - 1)
+        self.model_ = nn.Module() 
+        self.model_.proj = self.proj_ 
+        self.model_.head = self.head_ 
+        self.model_.to(self.device)
 
 class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin): 
 

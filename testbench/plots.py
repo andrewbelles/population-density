@@ -26,9 +26,7 @@ from typing import Callable, Mapping
 from preprocessing.loaders import load_oof_predictions
 
 import testbench.adjacency    as adjacency 
-import testbench.downstream   as downstream
 import testbench.stacking     as stacking 
-import testbench.round_robin  as round_robin
 
 from testbench.utils.oof   import load_probs_labels_fips 
 from testbench.utils.graph import coords_for_fips 
@@ -52,7 +50,8 @@ from testbench.utils.plotting import (
 
 from utils.helpers import (
     project_path,
-    _mat_str_vector
+    _mat_str_vector,
+    _mat_scalar
 )
 
 from scipy.io import loadmat 
@@ -67,17 +66,12 @@ def _log(msg, quiet=False):
 # Testbench Data Fetchers 
 # ---------------------------------------------------------
 
-def build_stacking_data(*, cross: str = "off", round_robin_stack: bool = False, **_):
+def build_stacking_data(*, cross: str = "off", **_):
 
     buf = io.StringIO() 
 
     expert_data  = stacking.test_expert_oof(buf)
     expert_paths = expert_data["experts"] 
-
-    if round_robin_stack:
-        stack = round_robin.test_round_robin_stacking(buf, n_trials=200, quiet=True)
-        cs    = round_robin.test_round_robin_cs(buf, n_trials=200)
-        return {"base": {"stacking": stack["metadata"], "cs": cs["metadata"]}}
 
     def _run(passthrough: bool): 
         return {
@@ -109,20 +103,6 @@ def build_adjacency_data(*, metric_keys=None, **_):
 
     return {"graphs": graphs, "learned": learned}
 
-def build_downstream_data(*, cross: str = "off", **_): 
-
-    buf = io.StringIO() 
-
-    def _run(passthrough: bool): 
-        return {
-            "stacking": downstream.test_metric(buf, passthrough),
-            "cs": downstream.test_cs(buf, passthrough)
-        }
-
-    if cross == "both":
-        return {"base": _run(False), "passthrough": _run(True)}
-    return {("passthrough" if cross == "on" else "base"): _run(cross == "on")}
-
 def build_embedding_data(*, embedding_dir: str | None = None, embedding_paths=None, **_): 
     if embedding_paths is None: 
         base  = embedding_dir or project_path("testbench", "local")
@@ -145,15 +125,12 @@ def build_embedding_data(*, embedding_dir: str | None = None, embedding_paths=No
         else: 
             name = _mat_str_vector(name)[0]
 
-        n_neighbors = mat["n_neighbors"]
-        min_dist    = mat["min_dist"]
-
         entries.append({
             "name": name, 
             "coords": coords,
             "labels": labels,
-            "n_neighbors": n_neighbors,
-            "min_dist": min_dist
+            "n_neighbors": int(_mat_scalar(mat.get("n_neighbors"))),
+            "min_dist": float(_mat_scalar(mat.get("min_dist")))
         })
 
     return {"embeddings": entries}
@@ -349,61 +326,6 @@ def plot_edge_weight_distribution(data, log_hist: bool = False):
     return fig 
 
 # --------------------------------------------------------- 
-# Downstream
-# ---------------------------------------------------------
-
-def plot_edge_keep_ratio(data): 
-    names   = []
-    ratios  = []
-    for variant, split in data.items(): 
-        m = split["metric"]["metadata"]
-        names.append(variant)
-        ratios.append(m["edge_keep_ratio"])
-
-    fig, ax = plt.subplots()
-    ax.bar(names, ratios)
-    ax.set_title("Edge Keep Ratio")
-    ax.set_xlabel("variant")
-    ax.set_ylabel("kept / base") 
-    return fig 
-
-def plot_edge_weight_hist(data): 
-    fig, ax = plt.subplots() 
-    for variant, split in data.items(): 
-        w = split["metric"]["metadata"]["edge_weights"]
-        if w.size == 0: 
-            continue 
-        ax.hist(w, bins=30, alpha=0.5, label=variant)
-
-    ax.set_title("Learned Edge Weights")
-    ax.set_xlabel("weight")
-    ax.set_ylabel("count")
-    ax.legend()
-    return fig 
-
-def plot_cs_distance(data, log_hist: bool = False): 
-    fig, ax = plt.subplots() 
-    for variant, split in data.items(): 
-        m      = split["cs"]["metadata"]
-        labels = get_labels(m["class_labels"], m["probs"].shape[1])
-        y_true = np.asarray(m["labels"]).reshape(-1)
-
-        for key, P in (("base", m["probs"]), ("cs", m["probs_corr"])): 
-            y_pred = get_pred_labels(P, labels)
-            y_idx  = get_label_indices(y_true, labels)
-            p_idx  = get_label_indices(y_pred, labels)
-            dist   = p_idx - y_idx 
-            ax.hist(dist, bins=25, alpha=0.5, label=f"{variant}-{key}")
-
-    ax.set_title("Signed Class Distance (Downstream C+S)")
-    ax.set_xlabel("pred - true")
-    ax.set_ylabel("count")
-    if log_hist: 
-        ax.set_yscale("log")
-    ax.legend() 
-    return fig 
-
-# --------------------------------------------------------- 
 # Plot Calls 
 # ---------------------------------------------------------
 
@@ -545,15 +467,6 @@ PLOT_GROUPS = {
             "weight_dist": plot_edge_weight_distribution,
         },
     ),
-    "downstream": PlotGroup(
-        name="downstream",
-        build=build_downstream_data,
-        plots={
-            "edge_keep": plot_edge_keep_ratio,
-            "edge_weights": plot_edge_weight_hist,
-            "cs_distance": plot_cs_distance,
-        },
-    ),
     "embeddings": PlotGroup(
         name="embeddings",
         build=build_embedding_data,
@@ -578,31 +491,30 @@ def main():
     parser.add_argument("--metric-keys", nargs="*", default=None)
     parser.add_argument("--log-hist", action="store_true")
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--round-robin", action="store_true")
+    parser.add_argument("--embedding-paths", nargs="*", default=None)
     args = parser.parse_args()
+
+    plot_kwargs = dict(
+        cross=args.cross, 
+        out_dir=args.out,
+        log_hist=args.log_hist, 
+        quiet=args.quiet, 
+        metric_keys=args.metric_keys,
+        embedding_paths=args.embedding_paths
+    )
 
     if args.group == "all": 
         for group in PLOT_GROUPS.values(): 
             plotter = Plotter(
                 group,
-                cross=args.cross,
-                out_dir=args.out,
-                log_hist=args.log_hist, 
-                quiet=args.quiet, 
-                metric_keys=args.metric_keys,
-                round_robin_stack=args.round_robin
+                **plot_kwargs 
             )
             plotter.run()
     else: 
         group   = PLOT_GROUPS[args.group]
         plotter = Plotter(
             group,
-            cross=args.cross,
-            out_dir=args.out,
-            log_hist=args.log_hist, 
-            quiet=args.quiet, 
-            metric_keys=args.metric_keys,
-            round_robin_stack=args.round_robin
+            **plot_kwargs 
         )
         plotter.run()
 

@@ -36,13 +36,12 @@ from testbench.utils.data      import (
 
 from optimization.evaluators   import (
     ProjectorEvaluator,
-    XGBOrdinalEvaluator,
     SpatialEvaluator
 )
 
 from optimization.spaces       import (
     define_projector_space,
-    define_xgb_ordinal_space,
+    define_manifold_projector_space,
     define_spatial_space
 )
 
@@ -70,7 +69,6 @@ from models.estimators         import (
     EmbeddingProjector, 
     SpatialClassifier, 
     make_spatial_sfe,
-    make_xgb_sfe 
 )
 
 from utils.helpers             import (
@@ -119,7 +117,7 @@ def _projector_fold_factory(name: str, proj_trials: int, random_state: int):
             compute_strategy=strategy
         )
 
-        best_params, _ = run_optimization(
+        best_params, _, _ = run_optimization(
             name="Spatial/VIIRS_ROI_Projector",
             evaluator=proj_eval,
             config=config
@@ -221,7 +219,7 @@ def _spatial_opt(
         devices=(devices if devices else None)
     )
 
-    best_params, best_value = run_optimization(
+    best_params, best_value, _ = run_optimization(
         name=model_key,
         evaluator=evaluator,
         config=config
@@ -251,7 +249,7 @@ def _spatial_extract(
     params = load_model_params(config_path, model_key)
     params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
 
-    splitter      = eval_config().get_splitter(OPT_TASK) 
+    splitter      = eval_config(random_state).get_splitter(OPT_TASK) 
     model_factory = lambda: SpatialClassifier(
         in_channels=in_channels, 
         compute_strategy=strategy, 
@@ -303,33 +301,39 @@ def test_saipe_opt(
     data_path: str = project_path("data", "datasets"),
     dataset_key: str = "SAIPE",
     proba_path: str = PROBA_PATH,
-    model_key: str = "XGB/Ordinal",
+    model_key: str = "SAIPE/Manifold",
     trials: int = 50, 
-    folds: int = 2,
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
 ): 
-    loader = make_dataset_loader(dataset_key, proba_path)[dataset_key]
-    config = cv_config(folds, random_state) 
+    loader = make_dataset_loader(dataset_key, proba_path)[dataset_key] 
+    data   = loader(data_path) if callable(loader) else loader 
+    X      = np.asarray(data["features"], dtype=np.float32)
+    y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1) 
 
-    evaluator = XGBOrdinalEvaluator(
-        filepath=data_path,
-        loader_func=loader,
-        model_factory=make_xgb_sfe,
-        compute_strategy=strategy,
-        param_space=define_xgb_ordinal_space,
-        config=config
+    evaluator = ProjectorEvaluator(
+        X, y,
+        define_manifold_projector_space,
+        random_state=random_state,
+        compute_strategy=strategy
     )
+
+    prior_params = None 
+    try: 
+        prior_params = load_model_params(config_path, model_key)
+    except Exception: 
+        prior_params = None 
 
     config  = EngineConfig(
         n_trials=trials,
         direction="minimize",
         random_state=random_state,
-        sampler_type="multivariate-tpe"
+        sampler_type="multivariate-tpe",
+        enqueue_trials=[prior_params] if prior_params else None 
     )
 
-    best_params, best_value = run_optimization(
+    best_params, best_value, _ = run_optimization(
         name=model_key,
         evaluator=evaluator,
         config=config
@@ -346,44 +350,51 @@ def test_saipe_opt(
 
 def test_saipe_extract(
     *,
-    root_dir: str, 
-    out_path: str, 
-    canvas_hw: tuple[int, int] = (512, 512),
-    model_key: str = "XGB/Ordinal",
+    data_path: str = project_path("data", "datasets"), 
+    dataset_key: str = "SAIPE",
+    model_key: str = "SAIPE/Manifold",
+    out_path: str = project_path("data", "datasets", "saipe_pooled.mat"),
+    proba_path: str = PROBA_PATH,
+    folds: int = 5,
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
-    proj_trials: int = 50,
     **_ 
 ): 
-    ds, labels, fips, collate_fn, _ = load_spatial_dataset(root_dir, canvas_hw)
-    
-    params = load_model_params(config_path, model_key)
-    params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
+    loader = make_dataset_loader(dataset_key, proba_path)[dataset_key] 
+    data   = loader(data_path) if callable(loader) else loader 
+    X      = np.asarray(data["features"], dtype=np.float32)
+    y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1) 
+    fips   = np.asarray(data["sample_ids"])
 
-    splitter      = eval_config(random_state).get_splitter(OPT_TASK)
-    model_factory = lambda **kw: make_xgb_sfe(compute_strategy=strategy, **params, **kw)
-    projector     = _projector_fold_factory(
-        f"{model_key}_Projector",
-        proj_trials,
-        random_state 
+    params = load_model_params(config_path, model_key)
+    params = dict(params)
+    params["mode"]    = "manifold"
+    params["out_dim"] = 64
+
+    splitter      = cv_config(folds, random_state).get_splitter(OPT_TASK)
+    model_factory = lambda: EmbeddingProjector(
+        in_dim=X.shape[1],
+        random_state=random_state,
+        device=strategy.device,
+        **params
     )
 
     embs = _holdout_embeddings(
-        ds, labels, splitter, 
-        model_factory=model_factory, 
-        extract_fn=lambda m, subset: m.leaf_matrix(subset, dense=True), 
-        postprocess=projector, 
+        X, y, splitter, 
+        model_factory=model_factory,
+        extract_fn=lambda m, subset: m.transform(subset),
         subset_fn=lambda data, idx: data[idx]
     )
 
-    feature_names = np.array([f"saipe_leaf_{i}" for i in range(embs.shape[1])], dtype="U32")
+    feature_names = np.array([f"saipe_manifold_{i}" for i in range(embs.shape[1])],
+                             dtype="U32")
 
     savemat(out_path, {
         "features": embs,
-        "labels": labels.reshape(-1, 1),
+        "labels": y.reshape(-1, 1),
         "fips_codes": fips,
         "feature_names": feature_names,
-        "n_counties": np.array([len(labels)], dtype=np.int64)
+        "n_counties": np.array([len(y)], dtype=np.int64)
     })
 
     return {
@@ -552,13 +563,13 @@ def test_nlcd_extract(
 # ---------------------------------------------------------
 
 TESTS = {
-    "viirs_opt": test_viirs_opt, 
-    "viirs_extract": test_viirs_extract,
-    "nlcd_opt": test_nlcd_opt,
-    "nlcd_extract": test_nlcd_extract,
-    "saipe_opt": test_saipe_opt,
-    "saipe_extract": test_saipe_extract,
-    "reduce_all": test_reduce_all
+    "viirs-opt": test_viirs_opt, 
+    "viirs-extract": test_viirs_extract,
+    "nlcd-opt": test_nlcd_opt,
+    "nlcd-extract": test_nlcd_extract,
+    "saipe-opt": test_saipe_opt,
+    "saipe-extract": test_saipe_extract,
+    "reduce-all": test_reduce_all
 }
 
 def _call_test(fn, name, **kwargs): 
@@ -572,6 +583,7 @@ def main():
     parser.add_argument("--folds", type=int, default=2)
     parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
     parser.add_argument("--random-state", default=0)
+    parser.add_argument("--embedding-paths", default=None)
     args = parser.parse_args()
 
     buf = io.StringIO() 
@@ -587,6 +599,7 @@ def main():
         ),
         trials=args.trials,
         folds=args.folds,
+        embedding_paths=args.embedding_paths,
         random_state=args.random_state,
         canvas_hw=tuple(args.canvas_hw)
     )

@@ -75,16 +75,20 @@ class OptunaEvaluator(ABC):
 # ---------------------------------------------------------
 
 def predict_proba_if_any(model, X, coords=None): 
-    if not hasattr(model, "predict_proba"): 
+    if hasattr(model, "predict_proba"):
+        try:
+            proba = model.predict_proba(X, coords=coords)
+        except TypeError: 
+            proba = model.predict_proba(X)
+    elif hasattr(model, "load_oof_predictions"):
+        proba = model.load_oof_predictions(X, coords)
+    else: 
         return None 
-    proba = model.load_oof_predictions(X, coords)
-    if proba is None: 
-        return None 
-    proba = np.asarray(proba, np.float32)
-    if proba.ndim == 2 and proba.shape[1] == 2: 
-        return proba[:, 1]
-    return proba
 
+    proba = np.asarray(proba, np.float32)
+    if proba.ndim == 2 and proba.shape[1] == 2:
+        return proba[:, 1]
+    return proba 
 
 def select_metric_value(metrics, task, metric): 
     if metric is not None and metric in metrics and not np.isnan(metrics[metric]):
@@ -152,7 +156,8 @@ def _nested_standard_worker(
     )
 
     best_params, _, _ = run_optimization(f"{name}_fold{fold_idx}", inner_eval, inner_cfg)
-    return evaluator.outer_score(best_params, train_idx, test_idx)
+    score = evaluator.outer_score(best_params, train_idx, test_idx)
+    return score, best_params 
 
 
 class StandardEvaluator(OptunaEvaluator): 
@@ -186,6 +191,7 @@ class StandardEvaluator(OptunaEvaluator):
         self.scale_y            = scale_y 
         self.metric             = metric 
         self.param_transform    = param_transform
+        self._data_cache        = None 
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]: 
         return self.param_space_fn(trial)

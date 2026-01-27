@@ -52,6 +52,13 @@ def _mat_str_vector(x) -> np.ndarray:
         out.append(str(vv[0]) if vv.size > 0 else str(v))
     return np.asarray(out, dtype=str)
 
+def _mat_scalar(value):
+    if value is None: 
+        return None 
+    arr = np.asarray(value).reshape(-1)
+    if arr.size == 0: 
+        return None 
+    return arr[0]
 
 def _as_tuple_str(x: str | Sequence[str] | None) -> tuple[str, ...]: 
     if x is None: 

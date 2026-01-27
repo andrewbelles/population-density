@@ -200,7 +200,9 @@ def _optimize_dataset(
     n_trials,
     direction: Literal["minimize", "maximize"] = "maximize",
     *,
-    config_path: str = CONFIG_PATH
+    config_path: str = CONFIG_PATH,
+    parallel_outer: bool = False, 
+    devices: list[int] | None = None
 ): 
 
     outer_config = eval_config(RANDOM_STATE)
@@ -227,18 +229,18 @@ def _optimize_dataset(
         config = EngineConfig(
             n_trials=n_trials,
             direction=direction,
-            random_state=RANDOM_STATE 
+            random_state=RANDOM_STATE, 
             nested=NestedCVConfig(
                 inner_n_trials=n_trials,
                 inner_sampler_type="multivariate-tpe",
                 inner_early_stopping_rounds=EARLY_STOP,
                 inner_early_stopping_delta=EARLY_STOP_EPS,
-                parallel_outer=False 
+                parallel_outer=parallel_outer 
             )
         )
 
         with contextlib.redirect_stdout(sys.stderr): 
-            best_params, mean_score, _ = run_optimization(
+            best_params, mean_score, _, _ = run_optimization(
                 name=f"{dataset_key}_{model_name}",
                 evaluator=evaluator,
                 config=config
@@ -415,7 +417,9 @@ def test_expert_optimize(
             loader, 
             direction="minimize",
             n_trials=EXPERT_TRIALS,
-            config_path=config_path 
+            config_path=config_path,
+            parallel_outer=False, 
+            devices=[0]
         )
 
         best = max(results["leaderboard"], key=lambda r: r["mean_score"])

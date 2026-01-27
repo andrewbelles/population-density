@@ -401,5 +401,8 @@ def load_spatial_dataset(root_dir: str, canvas_hw: tuple[int, int]):
         data["labels"], 
         data["sample_ids"], 
         data["collate_fn"], 
-        data["in_channels"]
+        data["in_channels"],
+        data.get("sample_labels", np.array([])), 
+        data.get("sample_ids_full", np.array([])),
+        data.get("sample_groups", np.array([]))
     )

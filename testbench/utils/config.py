@@ -69,7 +69,6 @@ def normalize_spatial_params(params, *, random_state: int, collate_fn):
     params.setdefault("eval_fraction", 0.15)
     params.setdefault("min_delta", 1e-3)
     params.setdefault("batch_size", 32)
-    params.setdefault("accum_steps", 1) 
     return params 
 
 def _spatial_factory(

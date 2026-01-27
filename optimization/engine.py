@@ -83,6 +83,7 @@ class EngineConfig:
     mp_start_method: str = "spawn"
     mp_enabled: bool = False 
     devices: Optional[List[int]] = None 
+    enqueue_trials: Optional[List[Dict[str, Any]]] = None 
 
     nested: Optional[NestedCVConfig] = None 
 
@@ -201,7 +202,7 @@ def run_workers(
                     p.terminate() 
             raise RuntimeError(f"worker failed: {err}")
 
-        results.append(float(val))
+        results.append(val)
 
         if on_result is not None: 
             try: 
@@ -233,11 +234,20 @@ def run_nested_cv(
     if nested_config.parallel_outer and hasattr(evaluator, "build_nested_worker_specs"): 
         specs = evaluator.build_nested_worker_specs(name, nested_config, base_config)
         if specs: 
-            scores     = run_workers(specs, base_config.mp_start_method)
+            results = run_workers(specs, base_config.mp_start_method)
+            
+            if results and isinstance(results[0], tuple):
+                scores = [float(r[0]) for r in results]
+                fold_params = [r[1] for r in results]
+            else: 
+                scores = [float(r) for r in results]
+                fold_params = None 
+
             mean_score = float(np.mean(scores))
-            best_idx   = (int(np.argmin(scores)) if base_config.direction == "minimize" else 
-                           int(np.argmax(scores))) 
-            return None, mean_score, scores, best_idx 
+            best_idx   = (int(np.argmin(scores)) if base_config.direction == "minimize" else
+                          int(np.argmax(scores)))
+            best_params = fold_params[best_idx] if fold_params else None 
+            return best_params, mean_score, scores, best_idx 
 
     fold_scores = []
     fold_params = []
@@ -303,6 +313,10 @@ def run_optimization(
         sampler=sampler,
         pruner=pruner
     )
+
+    if config.enqueue_trials:
+        for params in config.enqueue_trials:
+            study.enqueue_trial(dict(params))
 
     def objective(trial: optuna.Trial): 
         params = evaluator.suggest_params(trial)
