@@ -89,7 +89,7 @@ def subset_default(data, idx):
 def subset_by_groups(data, idx, groups): 
     return Subset(data, np.unique(groups[idx]))
 
-def fit_with_labels(model, data, labels, idx): 
+def fit_with_labels(model, data, idx, labels): 
     return model.fit(data, labels[idx])
 
 def fit_without_labels(model, data, idx): 
