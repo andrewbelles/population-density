@@ -952,7 +952,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             use_bn=self.use_bn,
             roi_output_size=self.roi_output_size,
             sampling_ratio=self.sampling_ratio,
-            aligned=self.aligned
+            aligned=self.aligned,
+            features=self.features
         )
         self.fc_       = nn.Linear(self.backbone_.out_dim, self.fc_dim)
         self.act_      = nn.ReLU(inplace=True)
@@ -1783,7 +1784,7 @@ class SpatialAblation:
     def _run_single_ablation(self, X, y, keep_blocks, feature_names, name): 
         clf = self.classifier_factory(**self.classifier_kwargs)
         if self.pooling_features is not None: 
-            clf.pooling_features = list(self.pooling_features)
+            clf.features = list(self.pooling_features)
         clf.fit(X, y)
 
         pooled = clf.extract_pooled(X)
