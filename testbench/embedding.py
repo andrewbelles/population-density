@@ -669,6 +669,7 @@ def test_viirs_cnn_ablation(
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     pooling_features: list[str] | None = None, 
+    ablation_groups: list[list[str]] | None = None, 
     **_
 ): 
 
@@ -691,6 +692,7 @@ def test_viirs_cnn_ablation(
             **params
         },
         pooling_features=pooling_features,
+        ablation_groups=ablation_groups,
         device=strategy.device,
         random_state=random_state
     )
@@ -701,7 +703,7 @@ def test_viirs_cnn_ablation(
     rows = []
     for r in results: 
         rows.append({
-            "Name": r["name"],
+            "Ablation": r["name"],
             "Loss": format_metric(r["val_loss"]),
             "QWK": format_metric(r["qwk"]),
             "Dim": r["dim"]
@@ -759,7 +761,7 @@ def test_viirs_pooled_dependence(
         fit_fn    = None 
 
     embs = holdout_embeddings(
-        ds, labels, splits, 
+        ds, labels_in, splits, 
         model_factory=partial(
             make_spatial_classifier,
             in_channels,
@@ -875,6 +877,13 @@ def _call_test(fn, name, **kwargs):
     print(f"[{name}] starting...")
     return fn(**kwargs)
 
+ablation_groups=[
+    ["gem","entropy","var"],
+    ["max","entropy","var"],
+    ["logsum","entropy","var"],
+    ["gem","entropy"]
+]
+
 def main(): 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--tests", nargs="*", default=None)
@@ -900,6 +909,7 @@ def main():
         folds=args.folds,
         embedding_paths=args.embedding_paths,
         random_state=args.random_state,
+        ablation_groups=ablation_groups,
         canvas_hw=tuple(args.canvas_hw)
     )
 

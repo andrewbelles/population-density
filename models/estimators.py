@@ -1607,6 +1607,7 @@ class SpatialAblation:
         classifier_kwargs: dict, 
         *,
         pooling_features: list[str], 
+        ablation_groups: list[list[str]] | None = None, 
         ablation_mode: str = "one_vs_rest", 
         device: str = "cuda", 
         batch_size: int = 128, 
@@ -1619,6 +1620,7 @@ class SpatialAblation:
         self.classifier_factory    = classifier_factory
         self.classifier_kwargs     = dict(classifier_kwargs)
         self.pooling_features      = pooling_features
+        self.ablation_groups       = ablation_groups
         self.ablation_mode         = ablation_mode
         self.device                = torch.device(device if torch.cuda.is_available() else "cpu")
         self.batch_size            = batch_size
@@ -1759,6 +1761,15 @@ class SpatialAblation:
         return probs 
 
     def _build_ablations(self, feature_names): 
+        
+        if self.ablation_groups is not None: 
+            ablations = []
+            for group in self.ablation_groups: 
+                keep = [feature_names.index(f) for f in group] 
+                name = "keep=" + "+".join(group) 
+                ablations.append((name, keep))
+            return ablations 
+
         n_blocks  = len(feature_names)
         ablations = [("keep=all", list(range(n_blocks)))]
 
