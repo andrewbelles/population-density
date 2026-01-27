@@ -146,7 +146,7 @@ def _holdout_worker(
         if item is None: 
             break 
 
-        fold_idx, (train_idx, val_idx) = item 
+        fold_idx, train_idx, val_idx = item 
         train_data = subset_fn(ds, train_idx)
         val_data   = subset_fn(ds, val_idx)
 
@@ -220,6 +220,7 @@ def holdout_embeddings(
                 target=_holdout_worker,
                 args=(
                     ds, labels, jobs,
+                    results,
                     model_factory,
                     extract_fn,
                     postprocess,
