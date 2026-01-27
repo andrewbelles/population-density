@@ -10,9 +10,10 @@ import numpy as np
 
 import multiprocessing as mp 
 
-import gc, torch, itertools
+import gc, torch
 
-from torch.cuda import is_available
+from functools               import partial
+
 from torch.utils.data        import Subset 
 
 from sklearn.model_selection import StratifiedGroupKFold
@@ -81,6 +82,9 @@ def extract_pooled(model, subset):
 
 def extract_with_logits(model, subset): 
     return model.extract_with_logits(subset)
+
+def subset_default(data, idx): 
+    return Subset(data, idx)
 
 def subset_by_groups(data, idx, groups): 
     return Subset(data, np.unique(groups[idx]))
@@ -193,9 +197,9 @@ def holdout_embeddings(
     out = None 
 
     if subset_fn is None: 
-        subset_fn = lambda data, idx: Subset(data, idx)
+        subset_fn = subset_default  
     if fit_fn is None: 
-        fit_fn = lambda model, data, idx: model.fit(data, labels[idx])
+        fit_fn = partial(fit_with_labels, labels=labels)
 
     splits_list = list(splits)
 

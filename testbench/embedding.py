@@ -748,7 +748,7 @@ def test_viirs_pooled_dependence(
         splitter = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=random_state)
         splits   = splitter.split(np.zeros(len(labels)), labels, fips)
 
-    embs, labels_out = holdout_embeddings(
+    embs = holdout_embeddings(
         ds, labels, splits, 
         model_factory=partial(
             make_spatial_classifier,
