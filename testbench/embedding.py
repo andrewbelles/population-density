@@ -853,7 +853,8 @@ TESTS = {
     "saipe-extract": test_saipe_extract,
     "reduce-all": test_reduce_all,
     "viirs-extract-with-logits": test_viirs_extract_with_logits,
-    "viirs-ablation": test_viirs_cnn_ablation
+    "viirs-ablation": test_viirs_cnn_ablation,
+    "viirs-pooled-dependence": test_viirs_pooled_dependence
 }
 
 def _call_test(fn, name, **kwargs): 
