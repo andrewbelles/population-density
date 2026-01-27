@@ -9,6 +9,8 @@
 
 import numpy as np 
 
+import multiprocessing as mp
+
 import time, copy, time, sys, torch   
 
 from utils.resources         import ComputeStrategy
@@ -1625,40 +1627,38 @@ class SpatialAblation:
         self.early_stopping_rounds = early_stopping_rounds
         self.random_state          = random_state
 
-    def run(self, X, y): 
-        clf = self.classifier_factory(**self.classifier_kwargs)
-        clf.pooling_features = list(self.pooling_features)
-        clf.fit(X, y)
+    def run(self, X, y, devices: list[int] | None = None): 
+        feature_names = self.pooling_features 
+        ablations     = self._build_ablations(feature_names)
 
-        pooled = clf.extract_pooled(X)
-        pooled = np.asarray(pooled, dtype=np.float32)
+        if devices is None or len(devices) <= 1: 
+            results = []
+            for name, keep_blocks in ablations: 
+                results.append(self._run_single_ablation(X, y, keep_blocks, feature_names, name))
+            return results 
 
-        n_blocks = len(self.pooling_features) 
-        dim      = pooled.shape[1] // n_blocks 
+        context = mp.get_context("spawn")
+        q       = context.Queue()
+        procs   = []
 
-        blocks   = [(i*dim, (i+1)*dim) for i in range(n_blocks)]
+        chunks  = [[] for _ in devices] 
+        for i, item in enumerate(ablations):
+            chunks[i % len(devices)].append(item)
 
-        ablations = []
-        if self.ablation_mode == "one_vs_rest": 
-            for k in range(n_blocks): 
-                keep = [i for i in range(n_blocks) if i != k]
-                ablations.append(("drop_" + str(k), keep))
-        else: 
-            ablations.append(("all", list(range(n_blocks))))
-
+        for dev, chunk in zip(devices, chunks): 
+            p = context.Process(
+                target=self._run_subset,
+                args=(X, y, chunk, feature_names, dev, q)
+            )
+            p.start() 
+            procs.append(p)
+        
         results = []
-        for name, keep_blocks in ablations: 
-            cols = np.concatenate([np.arange(a, b) for i, (a,b) in enumerate(blocks) 
-                                   if i in keep_blocks])
-            X_ablate = pooled[:, cols]
-            head, val_loss, qwk = self._fit_head(X_ablate, y, in_dim=X_ablate.shape[1])
+        for _ in procs: 
+            results.extend(q.get())
 
-            results.append({
-                "name": name, 
-                "val_loss": float(val_loss), 
-                "qwk": float(qwk),
-                "dim": X_ablate.shape[1]
-            })
+        for p in procs: 
+            p.join() 
 
         return results 
 
@@ -1754,6 +1754,55 @@ class SpatialAblation:
         probs = np.clip(probs, 1e-9, 1.0)
         probs = probs / probs.sum(axis=1, keepdims=True)
         return probs 
+
+    def _build_ablations(self, feature_names): 
+        n_blocks  = len(feature_names)
+        ablations = [("keep=all", list(range(n_blocks)))]
+
+        if self.ablation_mode == "one_vs_rest": 
+            for k in range(n_blocks): 
+                keep = [i for i in range(n_blocks) if i != k]
+                ablations.append(("drop_" + str(k), keep))
+        
+        return ablations 
+
+    def _run_subset(self, X, y, ablations, feature_names, device_id, q): 
+        if device_id is not None and torch.cuda.is_available(): 
+            torch.cuda.set_device(device_id)
+
+        self.device = torch.device(f"cuda:{device_id}" if device_id is not None 
+            and torch.cuda.is_available() else "cpu") 
+
+        results = []
+        for name, keep_blocks in ablations: 
+            result = self._run_single_ablation(X, y, keep_blocks, feature_names, name)
+            results.append(result)
+
+        q.put(results)
+
+    def _run_single_ablation(self, X, y, keep_blocks, feature_names, name): 
+        clf = self.classifier_factory(**self.classifier_kwargs)
+        if self.pooling_features is not None: 
+            clf.pooling_features = list(self.pooling_features)
+        clf.fit(X, y)
+
+        pooled = clf.extract_pooled(X)
+        pooled = np.asarray(pooled, dtype=np.float32)
+
+        n_blocks = len(feature_names)
+        dim      = pooled.shape[1] // n_blocks 
+        cols     = np.concatenate([np.arange(i*dim, (i+1)*dim) for i in keep_blocks])
+        X_ablate = pooled[:, cols]
+
+        head, val_loss, qwk = self._fit_head(X_ablate, y, in_dim=X_ablate.shape[1])
+
+        return {
+            "name": name, 
+            "val_loss": float(val_loss),
+            "qwk": float(qwk), 
+            "dim": int(X_ablate.shape[1]),
+            "features": ",".join([feature_names[i] for i in keep_blocks])
+        }
 
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)

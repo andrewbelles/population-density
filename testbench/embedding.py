@@ -664,6 +664,8 @@ def test_viirs_cnn_ablation(
     if pooling_features is None: 
         pooling_features = ["logsum", "gem", "max", "entropy", "var"]
 
+    devices = strategy.visible_devices()
+
     ab = SpatialAblation(
         classifier_factory=SpatialClassifier,
         classifier_kwargs={
@@ -676,7 +678,7 @@ def test_viirs_cnn_ablation(
         random_state=random_state
     )
 
-    results = ab.run(ds, labels)
+    results = ab.run(ds, labels, devices=devices if devices else None)
 
     rows = []
     for r in results: 
