@@ -1647,6 +1647,8 @@ class SpatialAblation:
             chunks[i % len(devices)].append(item)
 
         for dev, chunk in zip(devices, chunks): 
+            if not chunk: 
+                continue 
             p = context.Process(
                 target=self._run_subset,
                 args=(X, y, chunk, feature_names, dev, q)
@@ -1783,17 +1785,17 @@ class SpatialAblation:
 
     def _run_single_ablation(self, X, y, keep_blocks, feature_names, name): 
         clf = self.classifier_factory(**self.classifier_kwargs)
-        if self.pooling_features is not None: 
-            clf.features = list(self.pooling_features)
+        active_features = [feature_names[i] for i in keep_blocks]
+        clf.features    = list(active_features)
         clf.fit(X, y)
 
         pooled = clf.extract_pooled(X)
+        if pooled.shape[1] % len(feature_names) != 0: 
+            raise ValueError(f"pooled dim {pooled.shape[1]} not divisible by n_blocks "
+                             f"{len(feature_names)}")
         pooled = np.asarray(pooled, dtype=np.float32)
 
-        n_blocks = len(feature_names)
-        dim      = pooled.shape[1] // n_blocks 
-        cols     = np.concatenate([np.arange(i*dim, (i+1)*dim) for i in keep_blocks])
-        X_ablate = pooled[:, cols]
+        X_ablate = pooled
 
         head, val_loss, qwk = self._fit_head(X_ablate, y, in_dim=X_ablate.shape[1])
 
@@ -1802,7 +1804,7 @@ class SpatialAblation:
             "val_loss": float(val_loss),
             "qwk": float(qwk), 
             "dim": int(X_ablate.shape[1]),
-            "features": ",".join([feature_names[i] for i in keep_blocks])
+            "features": ",".join(active_features)
         }
 
 # ---------------------------------------------------------
