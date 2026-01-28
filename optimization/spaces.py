@@ -134,9 +134,8 @@ def define_spatial_space(trial):
         "sampling_ratio": trial.suggest_categorical("sampling_ratio", [0]),
 
         # hardcoded 
-        "aligned": False,
         "batch_size": 8,
-        "kernel_size": 3,
+        "kernel_size": 7,
         "use_bn": True,
         "epochs": 150, 
         "early_stopping_rounds": 10, 

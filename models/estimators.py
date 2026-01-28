@@ -698,8 +698,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                     loss, bsz, lc, ls = self._process_batch(batch)
                     total_loss += loss.item() * bsz 
 
-                    total_corn += lc 
-                    total_sup  += ls 
+                    total_corn += lc * bsz  
+                    total_sup  += ls * bsz 
 
                     total_count += bsz
                     loss = loss / accum 

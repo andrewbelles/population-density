@@ -158,7 +158,7 @@ class DilatedResidualBlock(nn.Module):
 
         for i in range(num_convs):
             d = dilation if i == 0 else 1 
-            p = d 
+            p = d * (kernel_size // 2)  
             in_i = in_ch if i == 0 else out_ch 
             conv = nn.Conv2d(
                 in_i,
@@ -190,6 +190,8 @@ class DilatedResidualBlock(nn.Module):
                 norm_mask = mask 
                 if norm_mask is not None and norm_mask.ndim == 3: 
                     norm_mask = norm_mask.unsqueeze(1)
+                if norm_mask is not None and norm_mask.shape[-2:] != out.shape[-2:]: 
+                    norm_mask = F.interpolate(norm_mask, size=out.shape[-2:], mode="nearest") 
                 out = self.norms[i](out, norm_mask)
             if i < self.num_convs - 1: 
                 out = self.relu(out)
