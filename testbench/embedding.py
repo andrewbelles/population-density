@@ -381,10 +381,11 @@ def test_saipe_opt(
 
     config  = EngineConfig(
         n_trials=trials,
-        direction="minimize",
+        direction="maximize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
-        enqueue_trials=[prior_params] if prior_params else None 
+        enqueue_trials=[prior_params] if prior_params else None,
+        devices=strategy.visible_devices()
     )
 
     best_params, best_value, _ = run_optimization(
@@ -396,7 +397,7 @@ def test_saipe_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "Loss"],
+        "header": ["Name", "QWK"],
         "row": _row_score(model_key, best_value),
         "params": best_params 
     }

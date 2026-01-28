@@ -947,4 +947,6 @@ class ProjectorEvaluator(OptunaEvaluator):
             device=self.compute_strategy.device
         )
         proj.fit(self.X[train_idx], self.y[train_idx])
-        return float(proj.loss(self.X[val_idx], self.y[val_idx]))
+        preds = proj.predict(self.X[val_idx])
+        qwk   = cohen_kappa_score(self.y[val_idx], preds, weights="quadratic")
+        return float(qwk)

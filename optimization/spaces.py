@@ -169,15 +169,40 @@ def define_projector_space(trial):
     }
 
 def define_manifold_projector_space(trial):
+    n_layers   = trial.suggest_int("n_layers", 2, 4)
+    base_width = trial.suggest_categorical("base_width", [32, 64, 128, 256]) 
+    shaping    = trial.suggest_categorical("shaping", ["constant", "funnel", "diamond"])
+
+    hidden_dims = []
+
+    if shaping == "constant": 
+        hidden_dims = [base_width] * n_layers 
+    elif shaping == "funnel": 
+        current = base_width 
+        for _ in range(n_layers): 
+            hidden_dims.append(current)
+            current = max(16, current // 2)
+    elif shaping == "diamond": 
+        hidden_dims.append(base_width)
+        for _ in range(n_layers - 2): 
+            hidden_dims.append(base_width * 2)
+        hidden_dims.append(base_width)
+
     return {
         "mode": "manifold",     
-        "hidden_dim": trial.suggest_categorical("hidden_dim", [32]),
-        "dropout": trial.suggest_float("dropout", 0.15, 0.7),
+        "hidden_dims": tuple(hidden_dims),
+        
+        "dropout": trial.suggest_float("dropout", 0.15, 0.5),
         "lr": trial.suggest_float("lr", 5e-6, 5e-3, log=True),
-        "weight_decay": trial.suggest_float("weight_decay", 1e-4, 5e-2, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-4, 1e-2, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [256, 512]),
+        "epochs": trial.suggest_categorical("epochs", [400]),
+
+        "lambda_supcon": trial.suggest_float("lambda_supcon", 0.1, 1.0),
+        "temperature": trial.suggest_float("temperature", 0.07, 0.2),
+
+        "use_residual": trial.suggest_categorical("use_residual", [True, False]),
         "eval_fraction": trial.suggest_categorical("eval_fraction", [0.15]),
-        "batch_size": trial.suggest_categorical("batch_size", [128, 256, 512]),
-        "epochs": trial.suggest_categorical("epochs", [300]),
         "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [10]),
         "out_dim": trial.suggest_categorical("out_dim", [5]),
     }

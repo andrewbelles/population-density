@@ -1236,6 +1236,21 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         thresholds = torch.arange(n_classes - 1, device=y.device).view(1, -1)
         return (y.view(-1, 1) > thresholds).to(dtype=torch.float32)
 
+# ---------------------------------------------------------
+# Scalar Embedding Learner 
+# ---------------------------------------------------------
+
+class ResidualMLPBlock(nn.Module): 
+    def __init__(self, dim: int, dropout: float): 
+        super().__init__()
+        self.fc1  = nn.Linear(dim, dim)
+        self.act  = nn.ReLU(inplace=True)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
+
+    def forward(self, x): 
+        return x + self.drop(self.act(self.fc1(x)))
+
+
 class EmbeddingProjector(BaseEstimator): 
 
     '''
@@ -1248,12 +1263,15 @@ class EmbeddingProjector(BaseEstimator):
         self,
         in_dim: int, 
         out_dim: int = 5, 
-        hidden_dim: int | None = None, 
+        hidden_dims: tuple[int, ...] | None = None, 
         mode: str = "single",
         dropout: float = 0.1, 
         epochs: int = 200, 
         lr: float = 1e-3, 
         weight_decay: float = 1e-4, 
+        use_residual: bool = False, 
+        lambda_supcon: float = 0.5, 
+        temperature: float = 0.1, 
         batch_size: int = 128, 
         early_stopping_rounds: int = 30, 
         eval_fraction: int = 0, 
@@ -1262,18 +1280,23 @@ class EmbeddingProjector(BaseEstimator):
     ): 
         self.in_dim                = in_dim
         self.out_dim               = out_dim
-        self.hidden_dim            = hidden_dim
+        self.hidden_dims           = hidden_dims
         self.mode                  = mode 
         self.dropout               = dropout
         self.epochs                = epochs
         self.lr                    = lr
         self.weight_decay          = weight_decay
+        self.use_residual          = use_residual 
+        self.lambda_supcon         = lambda_supcon 
+        self.temperature           = temperature 
         self.batch_size            = batch_size
         self.early_stopping_rounds = early_stopping_rounds
         self.eval_fraction         = eval_fraction
         self.random_state          = random_state
 
-        if device == "cuda" and torch.cuda.is_available():
+        if isinstance(device, str) and device.startswith("cuda") and torch.cuda.is_available():
+            self.device = torch.device(device) 
+        elif device == "cuda" and torch.cuda.is_available(): 
             self.device = torch.device("cuda")
         else: 
             self.device = torch.device("cpu")
@@ -1290,20 +1313,24 @@ class EmbeddingProjector(BaseEstimator):
         y_idx         = np.searchsorted(self.classes_, y)
         class_counts  = np.bincount(y_idx, minlength=self.n_classes_)
         class_weights = class_counts.max() / np.clip(class_counts, 1, None)
-        loss_fn       = CornLoss(n_classes=self.n_classes_, class_weights=class_weights)
+        
+        self.corn_loss_   = CornLoss(n_classes=self.n_classes_, class_weights=class_weights)
+        self.supcon_loss_ = SupConLoss(temperature=self.temperature)
 
         opt      = torch.optim.AdamW(
             self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-        self.loss_fn_ = loss_fn
 
-        splitter = StratifiedShuffleSplit(
-            n_splits=1, test_size=self.eval_fraction, random_state=self.random_state
-        ) 
-
-        train_idx, val_idx = next(splitter.split(X, y))
-        X_train, y_train   = X[train_idx], y[train_idx] 
-        X_val, y_val       = X[val_idx], y[val_idx]
+        if self.eval_fraction and self.eval_fraction > 0:
+            splitter = StratifiedShuffleSplit(
+                n_splits=1, test_size=self.eval_fraction, random_state=self.random_state
+            )
+            train_idx, val_idx = next(splitter.split(X, y))
+            X_train, y_train = X[train_idx], y[train_idx]
+            X_val, y_val = X[val_idx], y[val_idx]
+        else:
+            X_train, y_train = X, y
+            X_val, y_val = X, y
 
         train_ds = TensorDataset(
             torch.from_numpy(X_train), torch.from_numpy(y_train)
@@ -1325,9 +1352,13 @@ class EmbeddingProjector(BaseEstimator):
             for xb, yb in train_loader: 
                 xb     = xb.to(self.device)
                 yb     = yb.to(self.device)
+
                 emb    = self.proj_(xb)
                 logits = self.head_(emb)
-                loss   = loss_fn(logits, yb)
+
+                lc   = self.corn_loss_(logits, yb)
+                ls   = self.supcon_loss_(F.normalize(emb, dim=1), yb)
+                loss = lc + self.lambda_supcon * ls  
 
                 opt.zero_grad()
                 loss.backward()
@@ -1336,19 +1367,36 @@ class EmbeddingProjector(BaseEstimator):
             self.model_.eval()
             total = 0.0 
             count = 0 
+
+            y_true_all = []
+            y_pred_all = []
+
             with torch.no_grad():
                 for xb, yb in val_loader:
                     xb = xb.to(self.device)
                     yb = yb.to(self.device)
                     emb = self.proj_(xb)
                     logits = self.head_(emb)
-                    loss = loss_fn(logits, yb)
-                    total += loss.item() * yb.size(0)
-                    count += yb.size(0)
-            val_loss = total / max(count, 1)
 
-            if val_loss < best_val - 1e-4:
-                best_val = val_loss
+                    lc   = self.corn_loss_(logits, yb)
+                    total += lc.item() * yb.size(0)
+                    count += yb.size(0)
+                    
+                    probs = torch.sigmoid(logits)
+                    preds = (probs > 0.5).sum(dim=1)
+                    y_true_all.append(yb.cpu().numpy())
+                    y_pred_all.append(preds.cpu().numpy())
+
+            val_corn = total / max(count, 1)
+            if y_true_all: 
+                y_true  = np.concatenate(y_true_all)
+                y_pred  = np.concatenate(y_pred_all)
+                val_qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic")
+            else: 
+                val_qwk = None   
+
+            if val_corn < best_val - 1e-4:
+                best_val = val_corn
                 best_state = copy.deepcopy(self.model_.state_dict())
                 patience = 0
             else:
@@ -1388,10 +1436,26 @@ class EmbeddingProjector(BaseEstimator):
                 yb = yb.to(self.device)
                 emb = self.proj_(xb)
                 logits = self.head_(emb)
-                loss = self.loss_fn_(logits, yb)
+                loss = self.corn_loss_(logits, yb)
                 total += loss.item() * yb.size(0)
                 count += yb.size(0)
         return total / max(count, 1)
+
+    def predict(self, X): 
+        X = np.asarray(X, dtype=np.float32) 
+        self.model_.eval() 
+        outs = []
+
+        with torch.no_grad(): 
+            for i in range(0, X.shape[0], self.batch_size): 
+                xb = torch.from_numpy(X[i:i+self.batch_size]).to(self.device)
+                emb = self.proj_(xb)
+                logits = self.head_(emb)
+                probs = torch.sigmoid(logits)
+                preds = (probs > 0.5).sum(dim=1)
+                outs.append(preds.cpu().numpy())
+
+        return np.concatenate(outs)
 
     def _build(self, n_classes: int): 
 
@@ -1404,16 +1468,34 @@ class EmbeddingProjector(BaseEstimator):
             else: 
                 self.proj_ = nn.Linear(self.in_dim, self.out_dim)
         elif self.mode == "manifold": 
-            hidden = self.hidden_dim or max(self.out_dim, min(self.in_dim, 256))
-            self.proj_ = nn.Sequential(
-                nn.Linear(self.in_dim, hidden // 2),
-                nn.ReLU(inplace=True),
-                nn.Dropout(self.dropout),
-                nn.Linear(hidden // 2, hidden),
-                nn.ReLU(inplace=True),
-                nn.Dropout(self.dropout),
-                nn.Linear(hidden, self.out_dim)
-            )
+            dims = [self.in_dim]
+            if self.hidden_dims is not None: 
+                dims += list(self.hidden_dims)
+            dims += [self.out_dim]
+
+            residual_dim = None 
+            if len(dims) > 2: 
+                residual_dim = max(dims[1:-1])
+
+            layers = []
+            inserted_residual = False 
+
+            for i in range(len(dims) - 1): 
+                layers.append(nn.Linear(dims[i], dims[i + 1])) 
+                
+                if (self.use_residual and not inserted_residual and 
+                    residual_dim is not None and dims[i + 1] == residual_dim): 
+                    layers.append(nn.ReLU(inplace=True))
+                    if self.dropout > 0: 
+                        layers.append(nn.Dropout(self.dropout))
+                    layers.append(ResidualMLPBlock(residual_dim, self.dropout))
+                    inserted_residual = True 
+                elif i < len(dims) - 2: 
+                    layers.append(nn.ReLU(inplace=True))
+                    if self.dropout > 0: 
+                        layers.append(nn.Dropout(self.dropout))
+
+            self.proj_ = nn.Sequential(*layers)
         else: 
             raise ValueError(f"unknown projector mode: {self.mode}")
 
