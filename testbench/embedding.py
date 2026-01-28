@@ -264,7 +264,7 @@ def _spatial_opt(
     devices = strategy.visible_devices()
     config  = EngineConfig(
         n_trials=trials,
-        direction="minimize",
+        direction="maximize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
         mp_enabled=(True if devices else False),

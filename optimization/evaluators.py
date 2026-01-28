@@ -18,7 +18,7 @@ from typing                    import Any, Callable, Dict
 
 from numpy.typing              import NDArray
 
-from sklearn.metrics           import accuracy_score 
+from sklearn.metrics           import accuracy_score, cohen_kappa_score  
 
 from sklearn.model_selection   import StratifiedShuffleSplit, StratifiedGroupKFold 
 
@@ -454,14 +454,36 @@ def _spatial_eval_fold(
     if is_packed: 
         train_loader = _make_spatial_loader(
             train_ds, collate_fn, batch_size, compute_strategy, shuffle=True)
-        val_loader   = _make_spatial_loader(
-            test_ds, collate_fn, batch_size, compute_strategy, shuffle=False)
         model.fit(train_loader, y=None, val_loader=val_loader)
         val_loss     = model.loss(val_loader)
 
     else: 
         model.fit(train_ds, labels[train_idx])
         val_loss     = model.loss(test_ds)
+
+    val_loader   = _make_spatial_loader(
+        test_ds, collate_fn, batch_size, compute_strategy, shuffle=False)
+
+    y_true_list = []
+    y_pred_list = [] 
+
+    model.eval() 
+    with torch.no_grad(): 
+        for batch in val_loader: 
+            if isinstance(batch, (tuple, list)): 
+                xb, mb, rois, yb = batch[0], batch[1], batch[2], batch[3] 
+            else: 
+                yb = batch["labels"]
+
+            preds = model.predict_step(batch) 
+
+            y_true_list.append(yb.cpu().numpy().flatten()) 
+            y_pred_list.append(preds.cpu().numpy().flatten())
+
+    y_true = np.concatenate(y_true_list) 
+    y_pred = np.concatenate(y_pred_list) 
+
+    qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic") 
 
     del model 
     _cleanup_cuda()

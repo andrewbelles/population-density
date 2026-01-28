@@ -13,6 +13,8 @@ import multiprocessing as mp
 
 import time, copy, time, sys, torch   
 
+import torch.nn.functional as F 
+
 from utils.resources         import ComputeStrategy
 
 from numpy.typing            import NDArray
@@ -558,7 +560,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         eval_fraction: float = 0.1,
         min_delta: float = 1e-4,
         batch_size: int = 2,
-        target_global_batch: int = 16, 
+        target_global_batch: int = 1, 
         shuffle: bool = True, 
         in_channels: int | None = None, 
         categorical_input: bool = False, 
@@ -613,6 +615,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         effective_batch  = loader.batch_size
         world_size       = getattr(self, "world_size_", 1)
         self.accum_steps = self._resolve_accum_steps(effective_batch, world_size) 
+        print(f"tgb: {self.target_global_batch}, accum: {self.accum_steps}") 
 
         if y is None: 
             label_loader = self._as_eval_loader(X)
@@ -854,6 +857,56 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 outs.append(feats.cpu().numpy())
 
         return np.vstack(outs)
+
+    def predict(self, batch) -> torch.Tensor: 
+        self.model_.eval() 
+
+        packed, masks, rois, labels, *extra = batch 
+
+        if packed.ndim == 3: 
+            packed = packed[:, None, ...] 
+        if masks.ndim == 3: 
+            masks = masks[:, None, ...] 
+
+        if rois is not None and len(rois) == 0: 
+            rois = None 
+
+        group_ids = group_weights = None 
+        if len(extra) >= 2: 
+            group_ids, group_weights = extra[-2], extra[-1]
+
+        xb = torch.as_tensor(packed, device=self.device)
+        if xb.ndim == 4: 
+            xb = xb.contiguous(memory_format=torch.channels_last)
+
+        if self.categorical_input: 
+            if xb.dtype != torch.uint8: 
+                xb = xb.to(dtype=torch.uint8)
+            mask_dtype = torch.float32 
+        else: 
+            if xb.dtype != torch.float32: 
+                xb = xb.to(dtype=torch.float32)
+            mask_dtype = xb.dtype 
+
+        mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+
+        with torch.amp.autocast("cuda", enabled=True): 
+            feats  = self.model_.backbone(xb, mask=mb, rois=rois)
+
+            if group_ids is not None and rois is not None: 
+                feats = self._aggregate_tiles(
+                    feats, 
+                    group_ids, 
+                    group_weights, 
+                    len(labels),
+                    self.features
+                )
+
+            logits = self.model_.head(feats)
+            probs  = torch.sigmoid(logits)
+            preds  = (probs > 0.5).sum(dim=1) 
+
+        return preds 
 
     def extract_with_logits(self, X) -> NDArray:
         emb    = self.extract(X)
