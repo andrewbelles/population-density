@@ -182,10 +182,10 @@ models:
   Spatial/VIIRS_ROI:
     conv_channels: 16-32-64
     fc_dim: 64
-    dropout: 0.35
-    lr: 0.0008
-    weight_decay: 1.5e-05
-    roi_output_size: 3
+    dropout: 0.367531900234624
+    lr: 0.0008459126528049375
+    weight_decay: 1.4135935551752307e-05
+    roi_output_size: 16
     sampling_ratio: 0
   XGB/Ordinal:
     n_estimators: 754
