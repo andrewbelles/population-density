@@ -280,7 +280,7 @@ def _spatial_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "Loss"],
+        "header": ["Name", "QWK"],
         "row": _row_score(model_key, best_value),
         "params": best_params
     }

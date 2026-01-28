@@ -690,10 +690,17 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             total_loss  = 0.0
             total_count = 0
 
+            total_corn  = 0.0 
+            total_sup   = 0.0 
+
             for step_idx, batch in enumerate(loader): 
                 with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-                    loss, bsz = self._process_batch(batch)
+                    loss, bsz, lc, ls = self._process_batch(batch)
                     total_loss += loss.item() * bsz 
+
+                    total_corn += lc 
+                    total_sup  += ls 
+
                     total_count += bsz
                     loss = loss / accum 
 
@@ -724,8 +731,12 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                         break 
 
             avg_loss = total_loss / max(total_count, 1)
+            avg_corn = total_corn / max(total_count, 1) 
+            avg_sup  = total_sup / max(total_count, 1)
+
             avg_dt   = (time.perf_counter() - start) / (ep + 1)
-            msg      = f"[epoch {ep}] {avg_dt:.2f}s avg, training_loss={avg_loss:.4f}"
+            msg      = (f"[epoch {ep}] {avg_dt:.2f}s avg, training_loss={avg_loss:.4f} " + 
+                f"corn={avg_corn:.4f} supcon={avg_sup:.4f}")
             if ep % 5 == 0: 
                 if val_loss is not None: 
                     msg += f" val_loss={val_loss:.4f}"
@@ -1115,7 +1126,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         count = 0 
         with torch.no_grad(): 
             for batch in loader: 
-                loss, bsz = self._process_batch(batch)
+                loss, bsz, _, _ = self._process_batch(batch)
                 total    += loss.item() * bsz 
                 count    += bsz 
 
@@ -1186,7 +1197,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             loss = loss_corn + (lambda_supcon * loss_supcon)
 
         bsz    = yb.size(0)
-        return loss, bsz  
+        return loss, bsz, loss_corn.detach(), loss_supcon.detach() 
 
     def _as_eval_loader(self, X): 
         if isinstance(X, DataLoader):
