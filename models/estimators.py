@@ -39,7 +39,8 @@ from xgboost                 import (
 )
 
 from utils.loss_funcs        import (
-    CornLoss
+    CornLoss,
+    SupConLoss
 )
 
 from scipy.sparse            import csr_matrix
@@ -956,14 +957,22 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             features=self.features
         )
         self.fc_       = nn.Linear(self.backbone_.out_dim, self.fc_dim)
+
         self.act_      = nn.ReLU(inplace=True)
         self.drop_     = nn.Dropout(self.dropout)
         self.out_      = nn.Linear(self.fc_dim, self.n_classes_ - 1)
         self.head_     = nn.Sequential(self.fc_, self.act_, self.drop_, self.out_) 
 
+        self.proj_head_ = nn.Sequential(
+            nn.Linear(self.backbone_.out_dim, self.backbone_.out_dim), 
+            nn.ReLU(inplace=True), 
+            nn.Linear(self.backbone_.out_dim, 128)
+        )
+
         self.model_          = nn.Module() 
         self.model_.backbone = self.backbone_ 
         self.model_.head     = self.head_ 
+        self.model_.proj     = self.proj_head_
         self.model_.to(self.device)
 
         if self.device.type == "cuda": 
@@ -1110,7 +1119,18 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                     self.features
                 )
             logits = self.model_.head(feats)
-            loss   = self.loss_fn_(logits, yb)
+            loss_corn = self.loss_fn_(logits, yb)
+
+            proj   = self.model_.proj(feats)
+            proj   = F.normalize(proj, dim=1)
+
+            if not hasattr(self, "supcon_fn_"): 
+                self.supcon_fn_ = SupConLoss(temperature=0.1)
+
+            loss_supcon = self.supcon_fn_(proj, yb)
+
+            lambda_supcon = 0.5 
+            loss = loss_corn + (lambda_supcon * loss_supcon)
 
         bsz    = yb.size(0)
         return loss, bsz  

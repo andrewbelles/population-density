@@ -130,7 +130,7 @@ def define_spatial_space(trial):
         "dropout": trial.suggest_float("dropout", 0.1, 0.4),
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
-        "roi_output_size": trial.suggest_categorical("roi_output_size", [3, 4, 5]),
+        "roi_output_size": trial.suggest_categorical("roi_output_size", [16, 64, 128]),
         "sampling_ratio": trial.suggest_categorical("sampling_ratio", [0]),
 
         # hardcoded 

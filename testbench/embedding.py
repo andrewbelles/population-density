@@ -82,7 +82,6 @@ from testbench.utils.oof       import (
     extract_with_logits,
     fit_without_labels,
     holdout_embeddings,
-    PackedGroupSplitter,
     make_spatial_classifier,
     subset_by_groups
 )

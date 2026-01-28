@@ -91,3 +91,48 @@ class CornLoss(nn.Module):
     def _ordinal_targets(y: torch.Tensor, n_classes: int) -> torch.Tensor: 
         thresholds = torch.arange(n_classes - 1, device=y.device).view(1, -1)
         return (y.view(-1, 1) > thresholds).to(dtype=torch.float32)
+
+
+class SupConLoss(nn.Module): 
+    '''
+    Supervised Contrastive Loss meant to augment/regularize CORN Loss (Khosla et. al)
+    '''
+
+    def __init__(self, temperature=0.07): 
+        super().__init__() 
+        self.temperature = temperature 
+
+    def forward(self, features, labels): 
+
+        device     = features.device 
+        batch_size = features.shape[0]
+
+        labels     = labels.contiguous().view(-1, 1)
+        if labels.shape[0] != batch_size: 
+            raise ValueError("num labels must match num features")
+
+        mask = torch.eq(labels, labels.T).float().to(device)
+
+        # Similarity matrix via cosine similarity
+        anchor_dot_contrast = torch.div(
+            torch.matmul(features, features.T),
+            self.temperature
+        )
+
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits        = anchor_dot_contrast - logits_max.detach() 
+
+        logits_mask = torch.scatter(
+            torch.ones_like(mask), 0, 
+            torch.arange(batch_size).view(-1, 1).to(device), 0 
+        )
+
+        mask = mask * logits_mask 
+
+        exp_logits = torch.exp(logits) * logits_mask 
+        log_prob   = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-6)
+
+        mean_log_prob = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-6)
+
+        loss = -mean_log_prob.mean() 
+        return loss

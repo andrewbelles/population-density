@@ -24,7 +24,7 @@ CMD=()
 
 export TOPG_PACK_CACHE_MB=4096
 export TOPG_PACK_CACHE_ITEMS=1200
-export TOPG_GPU_MAX_USED_MB=4
+export TOPG_GPU_MAX_USED_MB=100
 
 ###########################################################
 # Usage information
