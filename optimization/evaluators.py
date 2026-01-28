@@ -477,8 +477,18 @@ def _spatial_eval_fold(
 
             preds = model.predict(batch) 
 
-            y_true_list.append(yb.cpu().numpy().flatten()) 
-            y_pred_list.append(preds.cpu().numpy().flatten())
+            if hasattr(yb, "cpu"): 
+                y_true = yb.cpu().numpy() 
+            else: 
+                y_true = np.asarray(yb) 
+
+            if hasattr(preds, "cpu"): 
+                y_pred = preds.cpu().numpy() 
+            else: 
+                y_pred = np.asarray(preds) 
+
+            y_true_list.append(y_true.flatten()) 
+            y_pred_list.append(y_pred.flatten())
 
     y_true = np.concatenate(y_true_list) 
     y_pred = np.concatenate(y_pred_list) 

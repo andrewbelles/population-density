@@ -924,6 +924,11 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         logits = self.logits(X)
         return np.concatenate([emb, logits], axis=1)
 
+    def eval(self): 
+        if hasattr(self, "model_"): 
+            self.model_.eval() 
+        return self 
+
     def _resolve_device(self, device: str | None): 
         if device is not None: 
             return torch.device(device)
