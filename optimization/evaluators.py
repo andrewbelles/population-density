@@ -451,6 +451,9 @@ def _spatial_eval_fold(
 
     model = model_factory(collate_fn=collate_fn, **params)
 
+    val_loader   = _make_spatial_loader(
+        test_ds, collate_fn, batch_size, compute_strategy, shuffle=False)
+
     if is_packed: 
         train_loader = _make_spatial_loader(
             train_ds, collate_fn, batch_size, compute_strategy, shuffle=True)
@@ -460,9 +463,6 @@ def _spatial_eval_fold(
     else: 
         model.fit(train_ds, labels[train_idx])
         val_loss     = model.loss(test_ds)
-
-    val_loader   = _make_spatial_loader(
-        test_ds, collate_fn, batch_size, compute_strategy, shuffle=False)
 
     y_true_list = []
     y_pred_list = [] 
@@ -488,7 +488,7 @@ def _spatial_eval_fold(
     del model 
     _cleanup_cuda()
 
-    return float(val_loss)
+    return float(qwk)
 
 # ---------------------------------------------------------
 # Spatial SFE Evaluator 
