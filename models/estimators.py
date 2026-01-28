@@ -698,8 +698,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                     loss, bsz, lc, ls = self._process_batch(batch)
                     total_loss += loss.item() * bsz 
 
-                    total_corn += lc * bsz  
-                    total_sup  += ls * bsz 
+                    total_corn += lc.item() * bsz  
+                    total_sup  += ls.item() * bsz 
 
                     total_count += bsz
                     loss = loss / accum 
@@ -735,7 +735,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             avg_sup  = total_sup / max(total_count, 1)
 
             avg_dt   = (time.perf_counter() - start) / (ep + 1)
-            msg      = (f"[epoch {ep}] {avg_dt:.2f}s avg, training_loss={avg_loss:.4f} " + 
+            msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg, training_loss={avg_loss:.4f} " + 
                 f"corn={avg_corn:.4f} supcon={avg_sup:.4f}")
             if ep % 5 == 0: 
                 if val_loss is not None: 
@@ -1126,19 +1126,22 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         return torch.cat(out_blocks, dim=1)
 
     def _eval_loss(self, loader): 
+        '''
+        Evaluation loss is corn loss, not the total loss from SupCon regularization. 
+        '''
         self.model_.eval() 
         total = 0.0 
         count = 0 
         with torch.no_grad(): 
             for batch in loader: 
-                loss, bsz, _, _ = self._process_batch(batch)
-                total    += loss.item() * bsz 
+                _, bsz, lc, _ = self._process_batch(batch)
+                total    += lc.item() * bsz 
                 count    += bsz 
 
         return total / max(count, 1)
 
     def _process_batch(self, batch):
-        if self.n_classes_ is None or self.classes_ is None: 
+        if self.n_classes_ is None or self.classes_ is None:
             raise TypeError
 
         packed, masks, rois, labels, *extra = batch
@@ -1202,7 +1205,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             loss = loss_corn + (lambda_supcon * loss_supcon)
 
         bsz    = yb.size(0)
-        return loss, bsz, loss_corn.detach(), loss_supcon.detach() 
+        return loss, bsz, loss_corn, loss_supcon 
 
     def _as_eval_loader(self, X): 
         if isinstance(X, DataLoader):
