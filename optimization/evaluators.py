@@ -475,7 +475,7 @@ def _spatial_eval_fold(
             else: 
                 yb = batch["labels"]
 
-            preds = model.predict_step(batch) 
+            preds = model.predict(batch) 
 
             y_true_list.append(yb.cpu().numpy().flatten()) 
             y_pred_list.append(preds.cpu().numpy().flatten())
