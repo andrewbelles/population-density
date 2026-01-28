@@ -116,31 +116,39 @@ def define_gate_space(trial):
 
 def define_spatial_space(trial): 
     conv_choices = {
+        # shallow 
+        "32-64": (32, 64),
+        "64-128": (64, 128),
+
+        # standard 
+        "32-64-64": (32, 64, 64),
+        "32-64-128": (32, 64, 128),
+        "64-128-256": (64, 128, 256), 
+
+        # deep 
+        "32-32-64-64": (32, 32, 64, 64),
         "32-64-64-128": (32, 64, 64, 128),
-        "16-32-64": (16, 32, 64),
-        "24-48-96": (24, 48, 96),
-        "16-32-48-64": (16, 32, 48, 64),
-        "24-48-48-96": (24, 48, 48, 96)
+        "64-128-256-256": (64, 128, 256, 256)
     }
     key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
     return {
         # varying  
         "conv_channels": conv_choices[key],
+        "roi_output_size": trial.suggest_categorical("roi_output_size", [32, 64, 128]),
+        "kernel_size": trial.suggest_categorical("kernel_size", [5, 7, 9, 11]),
+
         "fc_dim": trial.suggest_categorical("fc_dim", [64, 128]),
         "dropout": trial.suggest_float("dropout", 0.1, 0.4),
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
-        "roi_output_size": trial.suggest_categorical("roi_output_size", [16, 64, 128]),
-        "sampling_ratio": trial.suggest_categorical("sampling_ratio", [0]),
+        "lambda_supcon": trial.suggest_float("lambda_supcon", 0.1, 1.0), 
 
-        # hardcoded 
-        "batch_size": 8,
-        "kernel_size": 7,
-        "use_bn": True,
-        "epochs": 150, 
+        "use_bn": True, 
+        "epochs": 125, 
         "early_stopping_rounds": 10, 
         "eval_fraction": 0.15,
-        "min_delta": 1e-3
+        "min_delta": 1e-3,
+        "sampling_ratio": 0
     }
 
 # ---------------------------------------------------------

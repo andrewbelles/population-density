@@ -555,6 +555,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         epochs: int = 100, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
+        lambda_supcon: float = 0.5, 
         random_state: int = 0, 
         early_stopping_rounds: int | None = 15, 
         eval_fraction: float = 0.1,
@@ -583,6 +584,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.epochs            = epochs
         self.lr                = lr
         self.weight_decay      = weight_decay
+        self.lambda_supcon     = lambda_supcon
         self.random_state      = random_state
         self.in_channels       = in_channels
         self.categorical_input = categorical_input
@@ -1201,8 +1203,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
             loss_supcon = self.supcon_fn_(proj, yb)
 
-            lambda_supcon = 0.5 
-            loss = loss_corn + (lambda_supcon * loss_supcon)
+            loss = loss_corn + (self.lambda_supcon * loss_supcon)
 
         bsz    = yb.size(0)
         return loss, bsz, loss_corn, loss_supcon 

@@ -79,9 +79,11 @@ class EngineConfig:
     pruner_type: Optional[str] = None 
     pruner_startup_trials: int = 5 
     pruner_warmup_steps: int = 2 
+    pruner_max_resource: int = 125 
 
     mp_start_method: str = "spawn"
     mp_enabled: bool = False 
+
     devices: Optional[List[int]] = None 
     enqueue_trials: Optional[List[Dict[str, Any]]] = None 
 
@@ -109,10 +111,17 @@ def select_sampler(sampler_type: str, random_state: int):
 def select_pruner(
     pruner_type: Optional[str],
     n_startup_trials: int = 5, 
-    n_warmup_steps: int = 2 
+    n_warmup_steps: int = 2,
+    max_resource: int = 125, 
 ): 
     if pruner_type is None or pruner_type == "none": 
         return optuna.pruners.NopPruner() 
+    elif pruner_type == "hyperband": 
+        return optuna.pruners.HyperbandPruner(
+            min_resource=n_warmup_steps,
+            max_resource=max_resource,
+            reduction_factor=3
+        )
     elif pruner_type == "median": 
         return optuna.pruners.MedianPruner(
             n_startup_trials=n_startup_trials,
@@ -298,7 +307,8 @@ def run_optimization(
     pruner    = select_pruner(
         config.pruner_type,
         n_startup_trials=config.pruner_startup_trials,
-        n_warmup_steps=config.pruner_warmup_steps
+        n_warmup_steps=config.pruner_warmup_steps,
+        max_resource=config.pruner_max_resource 
     )
 
     sampler   = select_sampler(config.sampler_type, config.random_state)
