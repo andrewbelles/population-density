@@ -267,7 +267,7 @@ def _spatial_opt(
         direction="maximize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
-        mp_enabled=(True if devices else False),
+        mp_enabled=False,#(True if devices else False),
         devices=(devices if devices else None),
         pruner_type="hyperband",
         pruner_warmup_steps=5

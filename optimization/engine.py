@@ -361,7 +361,12 @@ def run_optimization(
         return score 
         
     print(f"OPTIMIZATION: Starting {name} ({config.n_trials} trials)")
-    study.optimize(objective, n_trials=config.n_trials, callbacks=callbacks)
+    study.optimize(
+        objective, 
+        n_trials=config.n_trials, 
+        callbacks=callbacks,
+        n_jobs=len(config.devices)
+    )
 
     print("> Optimization Results:")
     print(f"Best Value: {study.best_value:.4f}")

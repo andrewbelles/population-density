@@ -6,11 +6,13 @@
 # shared pool of resources  
 # 
 
-import os, torch 
+import os, torch, threading, queue 
 
 from dataclasses import dataclass 
 
 from collections import OrderedDict 
+
+from contextlib import contextmanager
 
 
 class LRUCache: 
@@ -53,6 +55,33 @@ class LRUCache:
                 break 
             _, (_, size) = self.data.popitem(last=False)
             self.total -= size 
+
+class DevicePool: 
+    _instance = None 
+    _lock     = threading.Lock() 
+
+    def __init__(self, devices: list[int]):
+        self.q = queue.Queue() 
+        for d in devices: 
+            self.q.put(d)
+
+    @classmethod 
+    def get_instance(cls, devices=None):
+        with cls._lock: 
+            if cls._instance is None: 
+                if devices is None: 
+                    raise ValueError("DevicePool not initialized")
+                cls._instance = cls(devices)
+        return cls._instance 
+
+    @contextmanager 
+    def claim(self): 
+        device_id = self.q.get() 
+        try: 
+            yield device_id 
+        finally: 
+            self.q.put(device_id)
+
 
 @dataclass 
 class ComputeStrategy: 

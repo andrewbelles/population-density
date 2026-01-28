@@ -55,7 +55,10 @@ from utils.helpers             import (
     load_probs_for_fips
 )
 
-from utils.resources           import ComputeStrategy
+from utils.resources           import (
+    ComputeStrategy,
+    DevicePool
+)
 
 # ---------------------------------------------------------
 # Generic Evaluator Contract 
@@ -436,7 +439,9 @@ def _spatial_eval_fold(
     batch_size: int, 
     compute_strategy: ComputeStrategy,
     groups=None,
-    is_packed: bool
+    is_packed: bool,
+    trial=None, 
+    fold_idx=0 
 ):
     if is_packed:
         if groups is None: 
@@ -449,6 +454,16 @@ def _spatial_eval_fold(
         train_ds    = Subset(dataset, train_idx)
         test_ds     = Subset(dataset, test_idx)
 
+    def pruning_callback(epoch, metrics): 
+        if trial is None: 
+            return 
+
+        current_score = metrics.get("val_loss")
+        if current_score is not None: 
+            trial.report(-1.0 * current_score, step=epoch)
+            if trial.should_prune(): 
+                raise optuna.TrialPruned()
+
     model = model_factory(collate_fn=collate_fn, **params)
 
     val_loader   = _make_spatial_loader(
@@ -457,11 +472,11 @@ def _spatial_eval_fold(
     if is_packed: 
         train_loader = _make_spatial_loader(
             train_ds, collate_fn, batch_size, compute_strategy, shuffle=True)
-        model.fit(train_loader, y=None, val_loader=val_loader)
+        model.fit(train_loader, y=None, val_loader=val_loader, callbacks=[pruning_callback])
         val_loss     = model.loss(val_loader)
 
     else: 
-        model.fit(train_ds, labels[train_idx])
+        model.fit(train_ds, labels[train_idx], callbacks=[pruning_callback])
         val_loss     = model.loss(test_ds)
 
     y_true_list = []
@@ -570,7 +585,7 @@ class SpatialEvaluator(OptunaEvaluator):
         param_space,
         task,
         config,
-        batch_size: int = 64, 
+        batch_size: int = 1, 
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
         drop_last: bool = False 
     ): 
@@ -596,31 +611,39 @@ class SpatialEvaluator(OptunaEvaluator):
 
     def evaluate(self, params: Dict[str, Any], trial: optuna.Trial | None = None) -> float:
 
+        visible_devices = self.compute_strategy.visible_devices() or [0]
+        DevicePool.get_instance(visible_devices)
+
         scores = []
 
         splits, groups, is_packed = _iter_spatial_splits(
             self.data, self.dataset, self.labels, self.task, self.config)
 
-        for fold_idx, (train_idx, test_idx) in enumerate(splits): 
-            loss = _spatial_eval_fold(
-                dataset=self.dataset,
-                labels=self.labels,
-                collate_fn=self.collate_fn,
-                train_idx=train_idx,
-                test_idx=test_idx,
-                params=params,
-                model_factory=self.factory,
-                batch_size=self.batch_size,
-                compute_strategy=self.compute_strategy,
-                groups=groups,
-                is_packed=is_packed
-            )
-            scores.append(loss)
+        with DevicePool.get_instance().claim() as device_id: 
+            thread_strategy = replace(self.compute_strategy, device="cuda", gpu_id=device_id)
 
-            if trial is not None: 
-                trial.report(float(np.mean(scores)), step=fold_idx)
-                if trial.should_prune():
-                    raise optuna.TrialPruned() 
+            for fold_idx, (train_idx, test_idx) in enumerate(splits): 
+                loss = _spatial_eval_fold(
+                    dataset=self.dataset,
+                    labels=self.labels,
+                    collate_fn=self.collate_fn,
+                    train_idx=train_idx,
+                    test_idx=test_idx,
+                    params=params,
+                    model_factory=self.factory,
+                    batch_size=self.batch_size,
+                    compute_strategy=thread_strategy,
+                    groups=groups,
+                    is_packed=is_packed,
+                    trial=trial,
+                    fold_idx=fold_idx
+                )
+                scores.append(loss)
+
+                if trial is not None: 
+                    trial.report(float(np.mean(scores)), step=fold_idx)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned() 
 
         return float(np.mean(scores))
 
