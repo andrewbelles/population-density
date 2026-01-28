@@ -605,13 +605,18 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.classes_: NDArray | None = None 
         self.n_classes_: int | None   = None 
 
-    def fit(self, X, y=None, val_loader=None): 
+    def fit(self, X, y=None, val_loader=None, callbacks=None): 
         
         torch.manual_seed(self.random_state)
         if self.device.type == "cuda":
              torch.backends.cudnn.benchmark = True
              torch.backends.cuda.matmul.allow_tf32 = True
              torch.backends.cudnn.allow_tf32 = True
+
+        if callbacks is None: 
+            callbacks = []
+        elif callable(callbacks): 
+            callbacks = [callbacks]
 
         loader = self._ensure_loader(X, shuffle=self.shuffle)
         effective_batch  = loader.batch_size
@@ -731,6 +736,11 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                     patience  += 1
                     if patience >= self.early_stopping_rounds: 
                         break 
+
+                if callbacks: 
+                    metrics = {"val_loss": val_loss} 
+                    for cb in callbacks: 
+                        cb(ep, metrics)
 
             avg_loss = total_loss / max(total_count, 1)
             avg_corn = total_corn / max(total_count, 1) 
