@@ -944,7 +944,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
     def _resolve_device(self, device: str | None): 
         if device is not None: 
             return torch.device(device)
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device(str(device) if torch.cuda.is_available() else "cpu")
 
     def _make_loader(self, dataset, shuffle: bool): 
         pin = self.compute_strategy.device == "cuda" 

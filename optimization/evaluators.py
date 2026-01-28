@@ -356,12 +356,9 @@ def _cleanup_cuda():
     gc.collect() 
 
 def _resolve_compute_strategy(base: ComputeStrategy, device_id: int | None): 
-    if device_id is None: 
+    if device_id is None or base.device != "cuda": 
         return base 
-    elif base.device != "cuda": 
-        return base 
-    else: 
-        return replace(base, gpu_id=int(device_id), device="cuda")
+    return replace(base, gpu_id=int(device_id), device=f"cuda:{int(device_id)}")
 
 def _make_spatial_loader(
     dataset, 
