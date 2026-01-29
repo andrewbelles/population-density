@@ -270,9 +270,9 @@ def _spatial_opt(
         random_state=random_state,
         sampler_type="multivariate-tpe",
         mp_enabled=False,#(True if devices else False),
-        devices=(devices if devices else None),
+        devices=devices,
         pruner_type="hyperband",
-        pruner_warmup_steps=5
+        pruner_warmup_steps=5,
     )
 
     best_params, best_value, _ = run_optimization(
