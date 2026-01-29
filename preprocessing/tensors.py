@@ -258,6 +258,94 @@ class SpatialPackedLoader:
             group_weights 
         )
 
+class SpatialTileLoader:
+    '''
+    Loads per-county samples and slices them into fixed tiles. 
+    Returns a list/stack of tiles & masks 
+    '''
+
+    def __init__(
+        self,
+        root_dir: str, 
+        tile_hw=(256, 256), 
+        *,
+        min_mask_frac: float = 0.0 # if mask % < frac then discards 
+    ):
+        self.is_packed     = False 
+        self.is_tiles      = True 
+        self.root_dir      = Path(root_dir)
+        self.tile_hw       = tile_hw 
+        self.min_mask_frac = float(min_mask_frac)
+ 
+        manifest = self.root_dir / "manifest.jsonl"
+        self.records = [
+            json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
+            if line.strip() 
+        ]
+
+    def __len__(self): 
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        rec = self.records[idx]
+        with np.load(self.root_dir / rec["path"]) as npz: 
+            spatial = npz["spatial"]
+            mask    = npz["mask"]
+
+        if spatial.ndim == 2: 
+            spatial = spatial[None, ...]
+        elif spatial.ndim != 3: 
+            raise ValueError(f"spatial must be 2d/3d, got {spatial.shape}")
+
+        if mask.ndim == 3: 
+            mask = mask[0]
+        elif mask.ndim != 2: 
+            raise ValueError(f"mask must be 2d/3d, got {mask.shape}")
+
+        tiles = []
+        masks = []
+
+        Ht, Wt = self.tile_hw 
+        h, w   = spatial.shape[-2:]
+
+        for y0 in range(0, h, Ht): 
+            for x0 in range(0, w, Wt): 
+                y1 = min(y0 + Ht, h)
+                x1 = min(x0 + Wt, w) 
+
+                tile      = spatial[:, y0:y1, x0:x1]
+                tile_mask = mask[y0:y1, x0:x1]
+
+                # ensure all tiles are contiguous size (tile_hw)
+                th, tw    = tile.shape[-2:]
+                if th != Ht or tw != Wt: 
+                    pad_tile = np.zeros((spatial.shape[0], Ht, Wt), dtype=spatial.dtype)
+                    pad_mask = np.zeros((Ht, Wt), dtype=tile_mask.dtype)
+                    pad_tile[:, :th, :tw] = tile 
+                    pad_mask[:th, :tw]    = tile_mask 
+                    tile      = pad_tile 
+                    tile_mask = pad_mask 
+
+                valid     = int(tile_mask.sum())
+                if valid == 0: 
+                    continue 
+
+                frac = valid / float(tile_mask.size)
+                if frac < self.min_mask_frac: 
+                    continue 
+
+                tiles.append(tile)
+                masks.append(tile_mask)
+
+        if not tiles:  
+            tiles = np.zeros((0, spatial.shape[0], Ht, Wt), dtype=spatial.dtype)
+            masks = np.zeros((0, Ht, Wt), dtype=mask.dtype)
+        else: 
+            tiles = np.stack(tiles, axis=0)
+            masks = np.stack(masks, axis=0)
+
+        return tiles, masks, int(rec["label"]), rec["fips"]
+
 # ---------------------------------------------------------
 # Tensor Dataset Parent Class 
 # ---------------------------------------------------------

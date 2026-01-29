@@ -180,13 +180,14 @@ models:
     max_delta_step: 4
     gamma: 0.6095479395778445
   Spatial/VIIRS_ROI:
-    conv_channels: 16-32-64
+    conv_channels: 64-128
+    roi_output_size: 128
+    kernel_size: 7
     fc_dim: 64
-    dropout: 0.367531900234624
-    lr: 0.0008459126528049375
-    weight_decay: 1.4135935551752307e-05
-    roi_output_size: 16
-    sampling_ratio: 0
+    dropout: 0.12613878991046223
+    lr: 1.0975815419380153e-05
+    weight_decay: 0.0003146730406166008
+    lambda_supcon: 0.8003410758548655
   XGB/Ordinal:
     n_estimators: 754
     learning_rate: 0.005089553213697213
@@ -229,17 +230,18 @@ models:
     max_delta_step: 8
     gamma: 0.3182900207390742
   SAIPE/Manifold:
-    n_layers: 4
-    base_width: 64
+    n_layers: 3
+    base_width: 512
     shaping: diamond
-    dropout: 0.08248711236335654
-    lr: 0.0028866706842952633
-    weight_decay: 0.002866271720003784
-    batch_size: 512
-    epochs: 400
-    lambda_supcon: 1.1386900597758725
-    temperature: 0.07724043020399432
-    use_residual: true
+    use_residual: false
+    n_residual_blocks: 3
+    dropout: 0.16846956179856398
+    lr: 0.0010588211882116437
+    weight_decay: 0.0008105177634202593
+    batch_size: 2048
+    epochs: 1000
+    lambda_supcon: 1.285936675408938
+    temperature: 0.18646978078298618
     eval_fraction: 0.15
     early_stopping_rounds: 10
-    out_dim: 6
+    out_dim: 20

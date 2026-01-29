@@ -6,9 +6,14 @@
 # 
 # 
 
-import torch, sys, warnings 
+import torch 
 
-from torch import dtype, memory_format, nn 
+from torch import nn 
+
+from kernels.network import (
+    MaskedGroupNormTritonFn, 
+    masked_pooling
+) 
 
 import torch.nn.functional as F 
 
@@ -49,44 +54,10 @@ class MaskedGroupNorm(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, x, mask=None): 
-        if mask is None: 
-            return F.group_norm(x, self.num_groups, self.weight, self.bias, self.eps)
-
-        if mask.ndim == 3: 
-            mask = mask.unsqueeze(1)
-
-        if mask.shape[-2:] != x.shape[-2:]:
-            raise ValueError("mask size mismatch. ensure mask precompute is correct")
-
-        mg = mask.to(device=x.device)
-        if mg.dtype != torch.bool: 
-            mg = mg > 0 
-
-        n, c, h, w = x.shape
-        g  = self.num_groups 
-        xg = x.view(n, g, c // g, h, w) 
-        mg = mg.view(n, 1, 1, h, w)
-
-        sum_m    = mg.sum((2, 3, 4), dtype=torch.float32)
-        has_mask = sum_m > 0 
-        denom    = sum_m.clamp(min=1.0)
-
-        mean  = (xg * mg).sum((2, 3, 4), dtype=torch.float32) / denom  
-        mean  = mean.view(n, g, 1, 1, 1)
-
-        var   = ((xg - mean)**2 * mg).sum((2, 3, 4), dtype=torch.float32) / denom  
-        var   = var.view(n, g, 1, 1, 1)
-        x     = (xg - mean) / torch.sqrt(var.to(dtype=xg.dtype) + self.eps)
-
-        if (~has_mask).any():
-            valid = has_mask.view(n, g, 1, 1, 1) 
-            x     = torch.where(valid, x, torch.zeros_like(x))
-
-        x = x.view(n, c, h, w)
-        if self.weight is not None: 
-            x = x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
-        return x 
-
+        return MaskedGroupNormTritonFn.apply(
+            x, mask, self.weight, self.bias, 
+            self.num_groups, self.eps
+        )
 
 class MaskedConvBlock(nn.Module): 
     '''
@@ -115,7 +86,7 @@ class MaskedConvBlock(nn.Module):
         if use_norm: 
             num_groups = best_num_groups(out_ch) 
             self.norm  = MaskedGroupNorm(num_groups, out_ch)
-        self.relu = nn.ReLU(inplace=True)
+        self.gelu = nn.GELU()
 
     def forward(self, x, mask=None): 
         out = self.conv(x)
@@ -131,7 +102,7 @@ class MaskedConvBlock(nn.Module):
 
             out = self.norm(out, norm_mask)
 
-        out = self.relu(out)
+        out = self.gelu(out)
         return out, mask 
 
 
@@ -176,7 +147,7 @@ class DilatedResidualBlock(nn.Module):
             else: 
                 self.norms.append(None)
 
-        self.relu = nn.ReLU(inplace=True)
+        self.gelu = nn.GELU()
 
         self.proj = None 
         if in_ch != out_ch:
@@ -194,12 +165,12 @@ class DilatedResidualBlock(nn.Module):
                     norm_mask = F.interpolate(norm_mask, size=out.shape[-2:], mode="nearest") 
                 out = self.norms[i](out, norm_mask)
             if i < self.num_convs - 1: 
-                out = self.relu(out)
+                out = self.gelu(out)
 
         res = x if self.proj is None else self.proj(x)
         out = out + res 
 
-        out = self.relu(out)
+        out = self.gelu(out)
 
         return out, mask 
 
@@ -310,8 +281,7 @@ class SpatialBackbone(nn.Module):
             return x.new_zeros((0, self.out_dim))
 
         b_idx   = rois_t[:, 0].long() 
-        outputs = x.new_zeros((rois_t.size(0), self.out_dim))
-
+        outputs = None 
         for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
             x_chunk = x[i:i+MICRO_BATCH_SIZE] 
             m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
@@ -330,8 +300,13 @@ class SpatialBackbone(nn.Module):
             if not isinstance(feat_chunk, torch.Tensor): 
                 raise TypeError 
             pooled = self._roi_pool_chunk(feat_chunk, m_chunk, rois_chunk, x_chunk)
-            outputs[sel] = pooled 
-    
+            
+            if outputs is None: 
+                outputs = pooled.new_zeros((rois_t.size(0), pooled.shape[1]))
+            outputs[sel] = pooled
+
+        if outputs is None: 
+            raise ValueError("outputs were not computed")
         return outputs
 
     def global_pool(
@@ -506,40 +481,9 @@ class SpatialBackbone(nn.Module):
         Concatenates log sum, generalized mean, max, and shannon entropy 
         of features over a block. 
         '''
-        mask_b   = mask.to(device=x.device)
-        if mask_b.dtype != torch.bool: 
-            mask_b = mask_b > 0 
 
-        x_f      = x.to(dtype=torch.float32)
-        x_flat   = x_f.flatten(2)
-        m_flat   = mask_b.flatten(2).to(dtype=torch.float32)
-
-        sum_m    = m_flat.sum(2).clamp(min=eps)
-        has_mask = sum_m > eps 
-
-        sum_x    = (x_flat * m_flat).sum(2)
-        log_sum  = torch.log1p(sum_x).to(dtype=x.dtype)
-
-        sum_xp   = (x_flat.clamp(min=eps).pow(p) * m_flat).sum(2)
-        gem      = (sum_xp / sum_m).pow(1.0 / p)
-        gem      = torch.where(has_mask, gem, torch.zeros_like(gem)).to(dtype=x.dtype)
-
-        neg_inf  = torch.finfo(x_f.dtype).min 
-        mx_vals  = torch.where(
-            m_flat > 0, x_flat, torch.tensor(neg_inf, device=x.device, dtype=x_f.dtype)
-        )
-        mx       = mx_vals.max(2).values 
-        mx       = torch.where(has_mask, mx, torch.zeros_like(mx)).to(dtype=x.dtype)
-
-        sum_x2   = (x_flat * x_flat * m_flat).sum(2)
-        mean     = sum_x / sum_m 
-        var      = (sum_x2 / sum_m) - (mean * mean) 
-        var      = torch.where(has_mask, var, torch.zeros_like(var)).to(dtype=x.dtype)
-
-        norm     = sum_x.to(dtype=x.dtype).unsqueeze(2) + eps 
-        p_x      = (x_flat * m_flat) / norm 
-        entropy  = torch.special.entr(p_x).sum(2)
-        entropy  = torch.where(has_mask, entropy, torch.zeros_like(entropy)).to(dtype=x.dtype)
+        # call to triton kernel 
+        log_sum, gem, mx, entropy, var = masked_pooling(x, mask, p, eps)
 
         blocks = {
             "logsum": log_sum, 
@@ -553,4 +497,3 @@ class SpatialBackbone(nn.Module):
             features = ["logsum", "gem", "max", "entropy", "var"]
 
         return torch.cat([blocks[f] for f in features], dim=1)
-

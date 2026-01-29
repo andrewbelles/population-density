@@ -242,14 +242,17 @@ def _spatial_opt(
     root_dir: str, 
     model_key: str, 
     canvas_hw: tuple[int, int] = (512, 512), 
+    tile_hw: tuple[int, int] = (256, 256), 
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
+    bag_tiles: bool = False,
     config_path: str = CONFIG_PATH,
     **_
 ): 
-    spatial = load_spatial_roi_manifest(root_dir, canvas_hw=canvas_hw)
-    loader  = make_roi_loader(canvas_hw=canvas_hw) 
+    spatial = load_spatial_roi_manifest(
+        root_dir, canvas_hw=canvas_hw, bag_tiles=bag_tiles, tile_hw=tile_hw)
+    loader  = make_roi_loader(canvas_hw=canvas_hw, tile_hw=tile_hw, bag_tiles=bag_tiles) 
     factory = make_spatial_sfe(compute_strategy=strategy)
     factory = with_spatial_channels(factory, spatial)
 
@@ -536,6 +539,8 @@ def test_viirs_opt(
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
     canvas_hw: tuple[int, int] = (512, 512), 
+    tile_hw: tuple[int, int] = (256, 256), 
+    bag_tiles: bool = False, 
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
@@ -546,6 +551,8 @@ def test_viirs_opt(
         root_dir=data_path,
         model_key=model_key,
         canvas_hw=canvas_hw,
+        tile_hw=tile_hw, 
+        bag_tiles=bag_tiles,
         trials=trials,
         folds=folds,
         random_state=random_state,
@@ -917,6 +924,8 @@ def main():
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--folds", type=int, default=2)
     parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
+    parser.add_argument("--tile-hw", nargs=2, type=int, default=(256, 256))
+    parser.add_argument("--bag-tiles", action="store_true")
     parser.add_argument("--random-state", default=0)
     parser.add_argument("--embedding-paths", default=None)
     args = parser.parse_args()
@@ -937,7 +946,9 @@ def main():
         embedding_paths=args.embedding_paths,
         random_state=args.random_state,
         ablation_groups=ablation_groups,
-        canvas_hw=tuple(args.canvas_hw)
+        canvas_hw=tuple(args.canvas_hw),
+        tile_hw=tuple(args.tile_hw),
+        bag_tiles=bool(args.bag_tiles)
     )
 
     print(buf.getvalue().strip())

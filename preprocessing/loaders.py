@@ -28,7 +28,7 @@ from utils.helpers import (
     align_on_fips
 )
 
-from preprocessing.tensors import SpatialLazyLoader, SpatialPackedLoader
+from preprocessing.tensors import SpatialLazyLoader, SpatialPackedLoader, SpatialTileLoader
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -954,11 +954,45 @@ def _collate_packed(batch):
 def _collate_spatial(batch, *, canvas_hw, tile_hw): 
     return SpatialLazyLoader.pack(batch, canvas_hw=canvas_hw, tile_hw=tile_hw)
 
+def _collate_tiles(batch): 
+    tiles_list    = []
+    masks_list    = []
+    labels        = []
+    fips_list     = []
+    group_ids     = []
+    group_weights = []
+
+    for i, (tiles, masks, label, fip) in enumerate(batch): 
+        if tiles.shape[0] == 0: 
+            continue 
+
+        n = tiles.shape[0]
+        tiles_list.append(tiles)
+        masks_list.append(masks)
+        labels.append(label)
+        fips_list.append(fip)
+
+        group_ids.extend([i] * n)
+        group_weights.extend([float(m.sum()) for m in masks])
+
+    if not tiles_list: 
+        raise ValueError("collate produced no tiles")
+
+    tiles         = np.concatenate(tiles_list, axis=0)
+    masks         = np.concatenate(masks_list, axis=0)
+    labels        = np.asarray(labels, dtype=np.int64)
+    fips          = np.asarray(fips_list, dtype="U5")
+    group_ids     = np.asarray(group_ids, dtype=np.int64)
+    group_weights = np.asarray(group_weights, dtype=np.float32)
+    return tiles, masks, None, labels, fips, group_ids, group_weights 
+
+
 def load_spatial_roi_manifest(
     root_dir: str, 
     *, 
-    canvas_hw=(512, 512), 
-    tile_hw=None,
+    canvas_hw: tuple[int, int] = (512, 512), 
+    bag_tiles: bool = False, 
+    tile_hw: tuple[int, int] = (256, 256),
     cache_mb: int | None = None, 
     cache_items: int | None = None 
 ) -> SpatialDatasetDict:
@@ -971,6 +1005,26 @@ def load_spatial_roi_manifest(
     ]
     if not records: 
         raise ValueError(f"empty manifest: {manifest}")
+
+    if bag_tiles: 
+        ds          = SpatialTileLoader(root_dir, tile_hw=tile_hw) 
+        labels      = np.asarray([r["label"] for r in ds.records], dtype=np.int64)
+        fips        = np.asarray([r["fips"] for r in ds.records], dtype="U5")
+        coords      = np.zeros((labels.shape[0], 2), dtype=np.float64)
+        shape       = ds.records[0]["shape"]
+        in_channels = shape[0] if len(shape) == 3 else 1 
+
+        return {
+            "dataset": ds, 
+            "labels": labels, 
+            "coords": coords,
+            "sample_ids": fips, 
+            "collate_fn": _collate_tiles, 
+            "in_channels": in_channels,
+            "sample_labels": np.array([]),
+            "sample_ids_full": np.array([]), 
+            "sample_groups": np.array([])
+        }
 
     is_packed = "n_rois" in records[0]
 

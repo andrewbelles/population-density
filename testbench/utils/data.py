@@ -369,26 +369,34 @@ def _roi_loader(
     *,
     canvas_hw,
     cache_mb=None,
-    cache_items=None
+    cache_items=None,
+    bag_tiles=False,
+    tile_hw=(256,256)
 ):
     return load_spatial_roi_manifest(
         path, 
         canvas_hw=canvas_hw,
         cache_mb=cache_mb,
-        cache_items=cache_items
+        cache_items=cache_items,
+        bag_tiles=bag_tiles,
+        tile_hw=tile_hw
     )
 
 
 def make_roi_loader(
     canvas_hw: tuple[int, int] = (512, 512), 
     cache_mb: int | None = None, 
-    cache_items: int | None = None
+    cache_items: int | None = None,
+    bag_tiles: bool = False, 
+    tile_hw: tuple[int, int] = (256, 256) 
 ): 
     return bind(
         _roi_loader,
         canvas_hw=canvas_hw,
         cache_mb=cache_mb,
-        cache_items=cache_items
+        cache_items=cache_items,
+        bag_tiles=bag_tiles,
+        tile_hw=tile_hw
     )
 
 def load_embedding_mat(path: str): 

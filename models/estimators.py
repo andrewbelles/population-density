@@ -916,7 +916,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         with torch.amp.autocast("cuda", enabled=True): 
             feats  = self.model_.backbone(xb, mask=mb, rois=rois)
 
-            if group_ids is not None and rois is not None: 
+            if group_ids is not None: 
                 feats = self._aggregate_tiles(
                     feats, 
                     group_ids, 
@@ -951,7 +951,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if self.compute_strategy.n_jobs == -1: 
             num_workers = 8 
         else: 
-            num_workers = self.compute_strategy.n_jobs
+            num_workers = min(self.compute_strategy.n_jobs, 8) 
 
         base       = getattr(dataset, "dataset", dataset)
         is_packed  = hasattr(base, "is_packed") and base.is_packed  
@@ -1039,14 +1039,14 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         )
         self.fc_       = nn.Linear(self.backbone_.out_dim, self.fc_dim)
 
-        self.act_      = nn.ReLU(inplace=True)
+        self.act_      = nn.GELU()
         self.drop_     = nn.Dropout(self.dropout)
         self.out_      = nn.Linear(self.fc_dim, self.n_classes_ - 1)
         self.head_     = nn.Sequential(self.fc_, self.act_, self.drop_, self.out_) 
 
         self.proj_head_ = nn.Sequential(
             nn.Linear(self.backbone_.out_dim, self.backbone_.out_dim), 
-            nn.ReLU(inplace=True), 
+            nn.GELU(), 
             nn.Linear(self.backbone_.out_dim, 128)
         )
 
@@ -1194,7 +1194,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         with torch.amp.autocast("cuda", enabled=True): 
             feats  = self.model_.backbone(xb, mask=mb, rois=rois)
 
-            if group_ids is not None and rois is not None: 
+            if group_ids is not None: 
                 feats = self._aggregate_tiles(
                     feats, 
                     group_ids, 
@@ -1276,6 +1276,7 @@ class EmbeddingProjector(BaseEstimator):
         lr: float = 1e-3, 
         weight_decay: float = 1e-4, 
         use_residual: bool = False, 
+        n_residual_blocks: int = 1, 
         lambda_supcon: float = 0.5, 
         temperature: float = 0.1, 
         batch_size: int = 128, 
@@ -1294,6 +1295,7 @@ class EmbeddingProjector(BaseEstimator):
         self.lr                    = lr
         self.weight_decay          = weight_decay
         self.use_residual          = use_residual 
+        self.n_residual_blocks     = n_residual_blocks
         self.lambda_supcon         = lambda_supcon 
         self.temperature           = temperature 
         self.batch_size            = batch_size
@@ -1481,29 +1483,28 @@ class EmbeddingProjector(BaseEstimator):
                 dims += list(self.hidden_dims)
             dims += [self.out_dim]
 
-            residual_dim = None 
-            if len(dims) > 2: 
-                residual_dim = max(dims[1:-1])
-
-            layers = []
+            residual_dim      = max(dims[1:-1]) if len(dims) > 2 else None  
             inserted_residual = False 
+            layers            = []
 
             for i in range(len(dims) - 1): 
                 layers.append(nn.Linear(dims[i], dims[i + 1])) 
+
                 if i < len(dims) - 2: 
                     layers.append(nn.BatchNorm1d(dims[i + 1]))
+                    layers.append(nn.GELU()) 
+                    if self.dropout > 0: 
+                        layers.append(nn.Dropout(self.dropout))
                 
-                if (self.use_residual and not inserted_residual and 
-                    residual_dim is not None and dims[i + 1] == residual_dim): 
-                    layers.append(nn.GELU())
-                    if self.dropout > 0: 
-                        layers.append(nn.Dropout(self.dropout))
-                    layers.append(ResidualMLPBlock(residual_dim, self.dropout))
+                if (
+                    self.use_residual and not inserted_residual and 
+                    residual_dim is not None and 
+                    i < len(dims) - 2 and 
+                    dims[i + 1] == residual_dim
+                ): 
+                    for _ in range(self.n_residual_blocks): 
+                        layers.append(ResidualMLPBlock(residual_dim, self.dropout))
                     inserted_residual = True 
-                elif i < len(dims) - 2: 
-                    layers.append(nn.GELU())
-                    if self.dropout > 0: 
-                        layers.append(nn.Dropout(self.dropout))
 
             self.proj_ = nn.Sequential(*layers)
         else: 
