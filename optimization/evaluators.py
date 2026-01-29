@@ -6,6 +6,7 @@
 # 
 # 
 
+from sklearn.preprocessing import StandardScaler
 import gc, optuna, torch 
 
 import numpy as np 
@@ -939,6 +940,9 @@ class ProjectorEvaluator(OptunaEvaluator):
             random_state=self.random_state
         )
         train_idx, val_idx = next(splitter.split(self.X, self.y))
+        scaler  = StandardScaler() 
+        X_train = scaler.fit_transform(self.X[train_idx])
+        X_val   = scaler.transform(self.X[val_idx])
 
         proj = EmbeddingProjector(
             in_dim=self.X.shape[1],
@@ -946,7 +950,7 @@ class ProjectorEvaluator(OptunaEvaluator):
             random_state=self.random_state,
             device=self.compute_strategy.device
         )
-        proj.fit(self.X[train_idx], self.y[train_idx])
-        preds = proj.predict(self.X[val_idx])
+        proj.fit(X_train, self.y[train_idx])
+        preds = proj.predict(X_val)
         qwk   = cohen_kappa_score(self.y[val_idx], preds, weights="quadratic")
         return float(qwk)

@@ -1244,11 +1244,16 @@ class ResidualMLPBlock(nn.Module):
     def __init__(self, dim: int, dropout: float): 
         super().__init__()
         self.fc1  = nn.Linear(dim, dim)
-        self.act  = nn.ReLU(inplace=True)
+        self.bn1  = nn.BatchNorm1d(dim)
+        self.fc2  = nn.Linear(dim, dim)
+        self.bn2  = nn.BatchNorm1d(dim) 
+        self.act  = nn.GELU() 
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
 
     def forward(self, x): 
-        return x + self.drop(self.act(self.fc1(x)))
+        out = self.drop(self.act(self.bn1(self.fc1(x))))
+        out = self.drop(self.act(self.bn2(self.fc2(out))))
+        return x + out 
 
 
 class EmbeddingProjector(BaseEstimator): 
@@ -1264,6 +1269,7 @@ class EmbeddingProjector(BaseEstimator):
         in_dim: int, 
         out_dim: int = 5, 
         hidden_dims: tuple[int, ...] | None = None, 
+        supcon_dim: int = 128, 
         mode: str = "single",
         dropout: float = 0.1, 
         epochs: int = 200, 
@@ -1281,6 +1287,7 @@ class EmbeddingProjector(BaseEstimator):
         self.in_dim                = in_dim
         self.out_dim               = out_dim
         self.hidden_dims           = hidden_dims
+        self.supcon_dim            = supcon_dim
         self.mode                  = mode 
         self.dropout               = dropout
         self.epochs                = epochs
@@ -1357,7 +1364,8 @@ class EmbeddingProjector(BaseEstimator):
                 logits = self.head_(emb)
 
                 lc   = self.corn_loss_(logits, yb)
-                ls   = self.supcon_loss_(F.normalize(emb, dim=1), yb)
+                z    = self.supcon_head_(emb)
+                ls   = self.supcon_loss_(F.normalize(z, dim=1), yb)
                 loss = lc + self.lambda_supcon * ls  
 
                 opt.zero_grad()
@@ -1482,16 +1490,18 @@ class EmbeddingProjector(BaseEstimator):
 
             for i in range(len(dims) - 1): 
                 layers.append(nn.Linear(dims[i], dims[i + 1])) 
+                if i < len(dims) - 2: 
+                    layers.append(nn.BatchNorm1d(dims[i + 1]))
                 
                 if (self.use_residual and not inserted_residual and 
                     residual_dim is not None and dims[i + 1] == residual_dim): 
-                    layers.append(nn.ReLU(inplace=True))
+                    layers.append(nn.GELU())
                     if self.dropout > 0: 
                         layers.append(nn.Dropout(self.dropout))
                     layers.append(ResidualMLPBlock(residual_dim, self.dropout))
                     inserted_residual = True 
                 elif i < len(dims) - 2: 
-                    layers.append(nn.ReLU(inplace=True))
+                    layers.append(nn.GELU())
                     if self.dropout > 0: 
                         layers.append(nn.Dropout(self.dropout))
 
@@ -1500,7 +1510,15 @@ class EmbeddingProjector(BaseEstimator):
             raise ValueError(f"unknown projector mode: {self.mode}")
 
         self.head_  = nn.Linear(self.out_dim, n_classes - 1)
+        self.supcon_head_ = nn.Sequential(
+            nn.Linear(self.out_dim, self.supcon_dim),
+            nn.BatchNorm1d(self.supcon_dim),
+            nn.GELU(), 
+            nn.Linear(self.supcon_dim, self.supcon_dim)
+        )
+
         self.model_ = nn.Module() 
+        self.model_.supcon = self.supcon_head_
         self.model_.proj = self.proj_ 
         self.model_.head = self.head_ 
         self.model_.to(self.device)

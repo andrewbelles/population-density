@@ -242,4 +242,4 @@ models:
     use_residual: true
     eval_fraction: 0.15
     early_stopping_rounds: 10
-    out_dim: 5
+    out_dim: 6
