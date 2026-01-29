@@ -617,7 +617,7 @@ class SpatialEvaluator(OptunaEvaluator):
             self.data, self.dataset, self.labels, self.task, self.config)
 
         with DevicePool.get_instance().claim() as device_id: 
-            thread_strategy = replace(self.compute_strategy, device="cuda", gpu_id=device_id)
+            thread_strategy = _resolve_compute_strategy(self.compute_strategy, device_id) 
 
             for fold_idx, (train_idx, test_idx) in enumerate(splits): 
                 loss = _spatial_eval_fold(

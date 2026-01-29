@@ -104,9 +104,11 @@ strategy = ComputeStrategy.from_env()
 
 VIIRS_ROOT = project_path("data", "tensors", "viirs_roi")
 NLCD_ROOT  = project_path("data", "tensors", "nlcd_roi") 
+USPS_ROOT  = project_path("data", "tensors", "usps_tracts")
 
 VIIRS_KEY  = "Spatial/VIIRS_ROI"
 NLCD_KEY   = "Spatial/NLCD_ROI"
+USPS_KEY   = "Spatial/USPS_TRACTS"
 
 # Out Paths 
 VIIRS_OUT             = project_path("data", "datasets", "viirs_pooled.mat")
@@ -858,6 +860,28 @@ def test_nlcd_extract(
         proj_trials=proj_trials,
     )
 
+def test_usps_opt(
+    *,
+    data_path: str = USPS_ROOT,
+    model_key: str = USPS_KEY, 
+    canvas_hw: tuple[int, int] = (512, 512), 
+    trials: int = 50, 
+    folds: int = 2, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH, 
+    **_ 
+): 
+    
+    return _spatial_opt(
+        root_dir=data_path, 
+        model_key=model_key,
+        canvas_hw=canvas_hw,
+        trials=trials, 
+        folds=folds,
+        random_state=random_state,
+        config_path=config_path
+    )
+
 # ---------------------------------------------------------
 # Tests Entry Point 
 # ---------------------------------------------------------
@@ -872,7 +896,8 @@ TESTS = {
     "reduce-all": test_reduce_all,
     "viirs-extract-with-logits": test_viirs_extract_with_logits,
     "viirs-ablation": test_viirs_cnn_ablation,
-    "viirs-pooled-dependence": test_viirs_pooled_dependence
+    "viirs-pooled-dependence": test_viirs_pooled_dependence,
+    "usps-opt": test_usps_opt
 }
 
 def _call_test(fn, name, **kwargs): 

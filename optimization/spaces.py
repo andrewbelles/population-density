@@ -123,12 +123,10 @@ def define_spatial_space(trial):
         # standard 
         "32-64-64": (32, 64, 64),
         "32-64-128": (32, 64, 128),
-        "64-128-256": (64, 128, 256), 
 
         # deep 
         "32-32-64-64": (32, 32, 64, 64),
         "32-64-64-128": (32, 64, 64, 128),
-        "64-128-256-256": (64, 128, 256, 256)
     }
     key = trial.suggest_categorical("conv_channels", list(conv_choices.keys())) 
     return {
@@ -192,19 +190,19 @@ def define_manifold_projector_space(trial):
         "mode": "manifold",     
         "hidden_dims": tuple(hidden_dims),
         
-        "dropout": trial.suggest_float("dropout", 0.15, 0.5),
-        "lr": trial.suggest_float("lr", 5e-6, 5e-3, log=True),
+        "dropout": trial.suggest_float("dropout", 0.05, 0.65),
+        "lr": trial.suggest_float("lr", 1e-6, 5e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-4, 1e-2, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", [256, 512]),
+        "batch_size": trial.suggest_categorical("batch_size", [256, 512, 1024]),
         "epochs": trial.suggest_categorical("epochs", [400]),
 
-        "lambda_supcon": trial.suggest_float("lambda_supcon", 0.1, 1.0),
+        "lambda_supcon": trial.suggest_float("lambda_supcon", 0.1, 1.5),
         "temperature": trial.suggest_float("temperature", 0.07, 0.2),
 
         "use_residual": trial.suggest_categorical("use_residual", [True, False]),
         "eval_fraction": trial.suggest_categorical("eval_fraction", [0.15]),
         "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [10]),
-        "out_dim": trial.suggest_categorical("out_dim", [5]),
+        "out_dim": trial.suggest_categorical("out_dim", [6, 8, 10, 12, 16, 32]),
     }
 
 # ---------------------------------------------------------

@@ -206,16 +206,6 @@ models:
     roi_output_size: 4
     sampling_ratio: 1
     aligned: false
-  SAIPE/Manifold:
-    hidden_dim: 32
-    dropout: 0.170696857345769
-    lr: 0.0037387908993174904
-    weight_decay: 0.0009375776661184853
-    eval_fraction: 0.15
-    batch_size: 128
-    epochs: 300
-    early_stopping_rounds: 10
-    out_dim: 5
   VIIRS_MANIFOLD/XGBoost:
     n_estimators: 897
     learning_rate: 0.05682554421064301
@@ -238,3 +228,18 @@ models:
     reg_lambda: 24.50503408637575
     max_delta_step: 8
     gamma: 0.3182900207390742
+  SAIPE/Manifold:
+    n_layers: 4
+    base_width: 64
+    shaping: diamond
+    dropout: 0.08248711236335654
+    lr: 0.0028866706842952633
+    weight_decay: 0.002866271720003784
+    batch_size: 512
+    epochs: 400
+    lambda_supcon: 1.1386900597758725
+    temperature: 0.07724043020399432
+    use_residual: true
+    eval_fraction: 0.15
+    early_stopping_rounds: 10
+    out_dim: 5
