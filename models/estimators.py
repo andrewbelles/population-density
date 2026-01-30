@@ -13,6 +13,7 @@ import multiprocessing as mp
 
 import time, copy, time, sys, torch   
 
+from torch.cuda import temperature
 import torch.nn.functional as F 
 
 from utils.resources         import ComputeStrategy
@@ -42,7 +43,9 @@ from xgboost                 import (
 
 from utils.loss_funcs        import (
     CornLoss,
-    SupConLoss
+    HybridOrdinalLoss,
+    SupConLoss,
+    LearnableLogitScaling
 )
 
 from scipy.sparse            import csr_matrix
@@ -931,6 +934,64 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         return preds 
 
+    def predict_proba(self, batch) -> torch.Tensor: 
+        self.model_.eval() 
+
+        packed, masks, rois, labels, *extra = batch 
+        if packed.ndim == 3: 
+            packed = packed[:, None, ...]
+        if masks.ndim == 3: 
+            masks = masks[:, None, ...]
+
+        if rois is not None and len(rois) == 0: 
+            rois = None 
+
+        group_ids = group_weights = None 
+        if len(extra) >= 2: 
+            group_ids, group_weights = extra[-2], extra[-1]
+
+        xb = torch.as_tensor(packed, device=self.device)
+        if xb.ndim == 4: 
+            xb = xb.contiguous(memory_format=torch.channels_last)
+
+        if xb.dtype != torch.float32: 
+            xb = xb.to(dtype=torch.float32)
+        mask_dtype = torch.float32 
+
+        mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+
+        with torch.amp.autocast("cuda", enabled=True): 
+            feats = self.model_.backbone(xb, mask=mb, rois=rois) 
+            if group_ids is not None: 
+                feats = self._aggregate_tiles(
+                    feats, group_ids, group_weights, len(labels), self.features
+                )
+            logits = self.model_.head(feats)
+            T      = getattr(self, "temperature_", 1.0)
+            probs  = self._logits_temperature_scaling(logits, temperature=T)
+
+        return probs 
+
+    @staticmethod 
+    def _logits_temperature_scaling(
+        logits: torch.Tensor, 
+        temperature: float | torch.Tensor = 1.0
+    ) -> torch.Tensor: 
+        logits   = logits / torch.clamp(
+            torch.as_tensor(temperature, device=logits.device), 
+            min=1e-6
+        )
+        prob_gt = torch.sigmoid(logits) 
+        n, k    = prob_gt.shape 
+        probs   = torch.empty((n, k + 1), device=logits.device, dtype=logits.dtype) 
+        probs[:, 0] = 1.0 - prob_gt[:, 0]
+        for i in range(1, k): 
+            probs[:, i] = prob_gt[:, i - 1] - prob_gt[:, i] 
+        probs[:, -1] = prob_gt[:, -1]
+        probs = torch.clamp(probs, min=1e-9)
+        probs = probs / probs.sum(dim=1, keepdim=True)
+        return probs 
+
     def extract_with_logits(self, X) -> NDArray:
         emb    = self.extract(X)
         logits = self.logits(X)
@@ -1152,6 +1213,70 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         return total / max(count, 1)
 
+    def _fit_temperature(self, loader): 
+
+        self.model_.eval() 
+        logits_all = []
+        y_all      = []
+
+        with torch.no_grad(): 
+            for batch in loader: 
+                packed, masks, rois, labels, *extra = batch 
+                if packed.ndim == 3: 
+                    packed = packed[:, None, ...]
+                if masks.ndim == 3: 
+                    masks = masks[:, None, ...]
+
+                if rois is not None and len(rois) == 0: 
+                    rois = None 
+
+                group_ids = group_weights = None 
+                if len(extra) >= 2: 
+                    group_ids, group_weights = extra[-2], extra[-1]
+
+                xb = torch.as_tensor(packed, device=self.device)
+                if xb.ndim == 4: 
+                    xb = xb.contiguous(memory_format=torch.channels_last)
+
+                if xb.dtype != torch.float32: 
+                    xb = xb.to(dtype=torch.float32)
+                mask_dtype = xb.dtype
+
+                mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+
+                y_np  = np.asarray(labels).reshape(-1)
+                y_idx = np.searchsorted(self.classes_, y_np)
+                yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
+
+                with torch.amp.autocast("cuda", enabled=True):
+                    feats = self.model_.backbone(xb, mask=mb, rois=rois)
+                    if group_ids is not None: 
+                        feats = self._aggregate_tiles(
+                            feats, group_ids, group_weights, len(labels), self.features
+                        )
+                    logits = self.model_.head(feats)
+
+                logits_all.append(logits.detach())
+                y_all.append(yb.detach())
+
+        logits_all = torch.cat(logits_all, dim=0)
+        y_all      = torch.cat(y_all, dim=0)
+
+        log_T = torch.zeros((), device=logits_all.device, requires_grad=True)
+        opt   = torch.optim.LBFGS([log_T], lr=0.1, max_iter=50)
+
+        def closure():
+            opt.zero_grad()
+            T     = torch.exp(log_T) 
+            probs = self._logits_temperature_scaling(logits_all, temperature=T)
+            p     = probs.gather(1, y_all.view(-1, 1)).clamp_min(1e-12)
+            loss  = -torch.log(p).mean() 
+            loss.backward() 
+            return loss 
+
+        opt.step(closure)
+        self.temperature_ = float(torch.exp(log_T).detach().cpu())
+
     def _process_batch(self, batch):
         if self.n_classes_ is None or self.classes_ is None:
             raise TypeError
@@ -1240,7 +1365,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 # Scalar Embedding Learner 
 # ---------------------------------------------------------
 
-class ResidualMLPBlock(nn.Module): 
+class ResBlock(nn.Module): 
     def __init__(self, dim: int, dropout: float): 
         super().__init__()
         self.fc1  = nn.Linear(dim, dim)
@@ -1251,9 +1376,17 @@ class ResidualMLPBlock(nn.Module):
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
 
     def forward(self, x): 
-        out = self.drop(self.act(self.bn1(self.fc1(x))))
-        out = self.drop(self.act(self.bn2(self.fc2(out))))
-        return x + out 
+        residual = x 
+        out  = self.bn1(self.fc1(x))
+        out  = self.act(out)
+        out  = self.drop(out)
+
+        out  = self.bn2(self.fc2(out))
+        out  = self.drop(out)
+
+        out += residual 
+        out  = self.act(out)
+        return out 
 
 
 class EmbeddingProjector(BaseEstimator): 
@@ -1277,7 +1410,8 @@ class EmbeddingProjector(BaseEstimator):
         weight_decay: float = 1e-4, 
         use_residual: bool = False, 
         n_residual_blocks: int = 1, 
-        lambda_supcon: float = 0.5, 
+        alpha_rps: float = 5.0,
+        beta_supcon: float = 0.5, 
         temperature: float = 0.1, 
         batch_size: int = 128, 
         early_stopping_rounds: int = 30, 
@@ -1296,7 +1430,8 @@ class EmbeddingProjector(BaseEstimator):
         self.weight_decay          = weight_decay
         self.use_residual          = use_residual 
         self.n_residual_blocks     = n_residual_blocks
-        self.lambda_supcon         = lambda_supcon 
+        self.alpha_rps             = alpha_rps 
+        self.beta_supcon           = beta_supcon 
         self.temperature           = temperature 
         self.batch_size            = batch_size
         self.early_stopping_rounds = early_stopping_rounds
@@ -1317,14 +1452,19 @@ class EmbeddingProjector(BaseEstimator):
         self.classes_   = np.unique(y)
         self.n_classes_ = len(self.classes_)
 
-        self._build(self.n_classes_)
-
         y_idx         = np.searchsorted(self.classes_, y)
         class_counts  = np.bincount(y_idx, minlength=self.n_classes_)
         class_weights = class_counts.max() / np.clip(class_counts, 1, None)
+
+        self._build(self.n_classes_)
         
-        self.corn_loss_   = CornLoss(n_classes=self.n_classes_, class_weights=class_weights)
-        self.supcon_loss_ = SupConLoss(temperature=self.temperature)
+        self.criterion_ = HybridOrdinalLoss(
+            n_classes=self.n_classes_,
+            class_weights=class_weights,
+            alpha_rps=self.alpha_rps, 
+            beta_supcon=self.beta_supcon,
+            temperature=self.temperature
+        ).to(self.device)
 
         opt      = torch.optim.AdamW(
             self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay
@@ -1362,51 +1502,39 @@ class EmbeddingProjector(BaseEstimator):
                 xb     = xb.to(self.device)
                 yb     = yb.to(self.device)
 
-                emb    = self.proj_(xb)
-                logits = self.head_(emb)
+                emb    = self.model_.proj(xb)
+                raw_logits = self.model_.head(emb)
 
-                lc   = self.corn_loss_(logits, yb)
-                z    = self.supcon_head_(emb)
-                ls   = self.supcon_loss_(F.normalize(z, dim=1), yb)
-                loss = lc + self.lambda_supcon * ls  
+                logits = self.model_.scaler(raw_logits)
+
+                z    = self.model_.supcon(emb)
+                loss, _, _, _ = self.criterion_(logits, z, yb)
 
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
 
             self.model_.eval()
-            total = 0.0 
+            val_rps_accum = 0.0 
             count = 0 
-
-            y_true_all = []
-            y_pred_all = []
 
             with torch.no_grad():
                 for xb, yb in val_loader:
                     xb = xb.to(self.device)
                     yb = yb.to(self.device)
-                    emb = self.proj_(xb)
-                    logits = self.head_(emb)
 
-                    lc   = self.corn_loss_(logits, yb)
-                    total += lc.item() * yb.size(0)
-                    count += yb.size(0)
+                    emb = self.model_.proj(xb)
+                    logits = self.model_.head(emb)
+                    logits = self.model_.scaler(logits)
                     
-                    probs = torch.sigmoid(logits)
-                    preds = (probs > 0.5).sum(dim=1)
-                    y_true_all.append(yb.cpu().numpy())
-                    y_pred_all.append(preds.cpu().numpy())
+                    _, _, w_rps, _ = self.criterion_(logits, None, yb)
+                    val_rps_accum += w_rps.item() * yb.size(0) 
+                    count += yb.size(0)
 
-            val_corn = total / max(count, 1)
-            if y_true_all: 
-                y_true  = np.concatenate(y_true_all)
-                y_pred  = np.concatenate(y_pred_all)
-                val_qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic")
-            else: 
-                val_qwk = None   
+            avg_weighted_rps = (val_rps_accum / max(count, 1)) / self.alpha_rps
 
-            if val_corn < best_val - 1e-4:
-                best_val = val_corn
+            if avg_weighted_rps < best_val - 1e-4:
+                best_val = avg_weighted_rps 
                 best_state = copy.deepcopy(self.model_.state_dict())
                 patience = 0
             else:
@@ -1416,6 +1544,7 @@ class EmbeddingProjector(BaseEstimator):
 
         if best_state is not None: 
             self.model_.load_state_dict(best_state)
+
         return self 
 
     def transform(self, X): 
@@ -1445,11 +1574,14 @@ class EmbeddingProjector(BaseEstimator):
                 xb = xb.to(self.device)
                 yb = yb.to(self.device)
                 emb = self.proj_(xb)
-                logits = self.head_(emb)
-                loss = self.corn_loss_(logits, yb)
-                total += loss.item() * yb.size(0)
+                logits = self.model_.scaler(self.model_.head(emb))
+
+                _, _, loss_rps, _ = self.criterion_(logits, None, yb)
+                total += loss_rps.item() * yb.size(0)
                 count += yb.size(0)
-        return total / max(count, 1)
+        loss = total / max(count, 1)
+        loss = loss / self.alpha_rps
+        return loss / (self.n_classes_ - 1)
 
     def predict(self, X): 
         X = np.asarray(X, dtype=np.float32) 
@@ -1459,13 +1591,41 @@ class EmbeddingProjector(BaseEstimator):
         with torch.no_grad(): 
             for i in range(0, X.shape[0], self.batch_size): 
                 xb = torch.from_numpy(X[i:i+self.batch_size]).to(self.device)
-                emb = self.proj_(xb)
-                logits = self.head_(emb)
+
+                emb = self.model_.proj(xb)
+                logits = self.model_.scaler(self.model_.head(emb))
+
                 probs = torch.sigmoid(logits)
                 preds = (probs > 0.5).sum(dim=1)
                 outs.append(preds.cpu().numpy())
 
         return np.concatenate(outs)
+    
+    def predict_proba(self, X): 
+        X = np.asarray(X, dtype=np.float32)
+        self.model_.eval() 
+        outs = []
+
+        with torch.no_grad():
+            for i in range(0, X.shape[0], self.batch_size): 
+                xb  = torch.from_numpy(X[i:i+self.batch_size]).to(self.device)
+                emb = self.proj_(xb)
+                logits = self.model_.scaler(self.model_.head(emb))
+
+                prob_gt = torch.sigmoid(logits)
+                n, k    = prob_gt.shape 
+                probs   = torch.empty((n, k + 1), device=self.device)
+                probs[:, 0] = 1.0 - prob_gt[:, 0]
+                for j in range(1, k): 
+                    probs[:, j] = prob_gt[:, j - 1] - prob_gt[:, j]
+                probs[:, -1] = prob_gt[:, -1]
+                
+                probs = torch.clamp(probs, min=1e-9)
+                probs = probs / probs.sum(dim=1, keepdim=True)
+
+                outs.append(probs.cpu().numpy())
+
+        return np.vstack(outs)
 
     def _build(self, n_classes: int): 
 
@@ -1503,7 +1663,7 @@ class EmbeddingProjector(BaseEstimator):
                     dims[i + 1] == residual_dim
                 ): 
                     for _ in range(self.n_residual_blocks): 
-                        layers.append(ResidualMLPBlock(residual_dim, self.dropout))
+                        layers.append(ResBlock(residual_dim, self.dropout))
                     inserted_residual = True 
 
             self.proj_ = nn.Sequential(*layers)
@@ -1518,10 +1678,13 @@ class EmbeddingProjector(BaseEstimator):
             nn.Linear(self.supcon_dim, self.supcon_dim)
         )
 
-        self.model_ = nn.Module() 
+        self.scaler_ = LearnableLogitScaling(initial_value=1.0)
+
+        self.model_        = nn.Module() 
         self.model_.supcon = self.supcon_head_
-        self.model_.proj = self.proj_ 
-        self.model_.head = self.head_ 
+        self.model_.proj   = self.proj_ 
+        self.model_.head   = self.head_ 
+        self.model_.scaler = self.scaler_ 
         self.model_.to(self.device)
 
 class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin): 

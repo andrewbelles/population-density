@@ -147,8 +147,8 @@ def define_spatial_space(trial):
         "eval_fraction": 0.15,
         "min_delta": 1e-3,
         "sampling_ratio": 0, 
-        "batch_size": 8, 
-        "target_global_batch": 16
+        "batch_size": 512, 
+        "target_global_batch": 512
     }
 
 # ---------------------------------------------------------
@@ -205,8 +205,9 @@ def define_manifold_projector_space(trial):
         "batch_size": trial.suggest_categorical("batch_size", [512, 1024, 2048]),
         "epochs": trial.suggest_categorical("epochs", [1000]),
 
-        "lambda_supcon": trial.suggest_float("lambda_supcon", 0.5, 2.0),
-        "temperature": trial.suggest_float("temperature", 0.07, 0.3),
+        "beta_supcon": trial.suggest_float("beta_supcon", 0.2, 2.0),
+        "alpha_rps": trial.suggest_float("alpha_rps", 0.2, 6.0),
+        "temperature": trial.suggest_float("temperature", 0.07, 0.5),
 
         "eval_fraction": trial.suggest_categorical("eval_fraction", [0.15]),
         "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [10]),

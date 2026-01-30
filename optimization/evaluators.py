@@ -37,7 +37,8 @@ from analysis.cross_validation import (
     CrossValidator,
     CVConfig,
     TaskSpec,
-    ScaledEstimator
+    ScaledEstimator,
+    ranked_probability_score
 )
 
 from models.estimators         import EmbeddingProjector 
@@ -478,7 +479,7 @@ def _spatial_eval_fold(
         val_loss     = model.loss(test_ds)
 
     y_true_list = []
-    y_pred_list = [] 
+    prob_list = [] 
 
     model.eval() 
     with torch.no_grad(): 
@@ -488,30 +489,32 @@ def _spatial_eval_fold(
             else: 
                 yb = batch["labels"]
 
-            preds = model.predict(batch) 
+            probs = model.predict_proba(batch) 
 
             if hasattr(yb, "cpu"): 
                 y_true = yb.cpu().numpy() 
             else: 
                 y_true = np.asarray(yb) 
 
-            if hasattr(preds, "cpu"): 
-                y_pred = preds.cpu().numpy() 
+            if hasattr(probs, "cpu"): 
+                probs = probs.cpu().numpy() 
             else: 
-                y_pred = np.asarray(preds) 
+                probs = np.asarray(probs) 
 
             y_true_list.append(y_true.flatten()) 
-            y_pred_list.append(y_pred.flatten())
+            prob_list.append(probs)
 
     y_true = np.concatenate(y_true_list) 
-    y_pred = np.concatenate(y_pred_list) 
+    probs = np.concatenate(prob_list) 
 
-    qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic") 
+    rps = ranked_probability_score(
+        y_true, probs, class_labels=model.classes_, normalize=True
+    )
 
     del model 
     _cleanup_cuda()
 
-    return float(qwk)
+    return float(rps)
 
 # ---------------------------------------------------------
 # Spatial SFE Evaluator 
@@ -951,6 +954,4 @@ class ProjectorEvaluator(OptunaEvaluator):
             device=self.compute_strategy.device
         )
         proj.fit(X_train, self.y[train_idx])
-        preds = proj.predict(X_val)
-        qwk   = cohen_kappa_score(self.y[val_idx], preds, weights="quadratic")
-        return float(qwk)
+        return proj.loss(X_val, self.y[val_idx])

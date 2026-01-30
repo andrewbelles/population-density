@@ -104,7 +104,7 @@ strategy = ComputeStrategy.from_env()
 
 VIIRS_ROOT = project_path("data", "tensors", "viirs_roi")
 NLCD_ROOT  = project_path("data", "tensors", "nlcd_roi") 
-USPS_ROOT  = project_path("data", "tensors", "usps_tracts")
+USPS_ROOT  = project_path("data", "tensors", "usps_roi")
 
 VIIRS_KEY  = "Spatial/VIIRS_ROI"
 NLCD_KEY   = "Spatial/NLCD_ROI"
@@ -269,7 +269,7 @@ def _spatial_opt(
     devices = strategy.visible_devices()
     config  = EngineConfig(
         n_trials=trials,
-        direction="maximize",
+        direction="minimize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
         mp_enabled=False,#(True if devices else False),
@@ -386,7 +386,7 @@ def test_saipe_opt(
 
     config  = EngineConfig(
         n_trials=trials,
-        direction="maximize",
+        direction="minimize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
         enqueue_trials=[prior_params] if prior_params else None,

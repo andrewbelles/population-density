@@ -73,6 +73,7 @@ def ece(probs, y_idx, n_bins=10):
         ece += np.abs(acc - avg_conf) * (mask.sum() / conf.size)
     return float(ece)
 
+
 TaskType = Literal["regression", "classification"]
 
 @dataclass(frozen=True)

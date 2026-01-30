@@ -96,19 +96,27 @@ class CornLoss(nn.Module):
 
 class SupConLoss(nn.Module): 
     '''
-    Supervised Contrastive Loss meant to augment/regularize CORN Loss (Khosla et. al)
+    Combination of (Zhu et. al), (Abbasian et. al), and (Khosla et. al) for weighted,  
+    ordinal supervised contrastive loss. 
     '''
 
-    def __init__(self, temperature=0.07): 
+    def __init__(self, temperature=0.07, class_weights=None): 
         super().__init__() 
         self.temperature = temperature 
+
+        if class_weights is not None: 
+            self.register_buffer(
+                "class_weights", torch.as_tensor(class_weights, dtype=torch.float32)
+            )
+        else: 
+            self.class_weights = None 
 
     def forward(self, features, labels): 
 
         device     = features.device 
         batch_size = features.shape[0]
-
         labels     = labels.contiguous().view(-1, 1)
+
         if labels.shape[0] != batch_size: 
             raise ValueError("num labels must match num features")
 
@@ -130,10 +138,84 @@ class SupConLoss(nn.Module):
 
         mask = mask * logits_mask 
 
-        exp_logits = torch.exp(logits) * logits_mask 
-        log_prob   = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-6)
+        # Get ordinal weight from discrete labels 
+        label_dist     = torch.abs(labels - labels.T).float() 
+        max_dist       = label_dist.max().clamp(min=1.0)
+        ordinal_weight = label_dist / max_dist  
 
+        exp_logits   = torch.exp(logits) * logits_mask 
+        denom_weight = mask + (1.0 - mask) * ordinal_weight 
+        log_prob     = logits - torch.log(
+            (exp_logits * denom_weight).sum(1, keepdims=True) + 1e-9
+        )
         mean_log_prob = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-6)
 
-        loss = -mean_log_prob.mean() 
+        if self.class_weights is not None: 
+            anchor_weights = self.class_weights.to(device).gather(0, labels.view(-1))
+            loss = - (mean_log_prob * anchor_weights).sum() / anchor_weights.sum() 
+        else:
+            loss = -mean_log_prob.mean() 
         return loss
+
+
+class LearnableLogitScaling(nn.Module): 
+
+    def __init__(self, initial_value: float = 1.0): 
+        super().__init__() 
+        self.scale = nn.Parameter(torch.tensor(initial_value, dtype=torch.float32))
+
+    def forward(self, x): 
+        return x * self.scale.clamp(min=1e-4, max=50.0)
+
+
+class HybridOrdinalLoss(nn.Module): 
+    def __init__(
+        self, 
+        n_classes: int, 
+        class_weights: torch.Tensor | None = None, 
+        alpha_rps: float = 1.0, 
+        beta_supcon: float = 0.5, 
+        temperature: float = 0.1 
+    ): 
+
+        super().__init__()
+        self.alpha      = alpha_rps 
+        self.beta       = beta_supcon
+        self.corn_fn_   = CornLoss(n_classes, class_weights=class_weights)
+        self.supcon_fn_ = SupConLoss(temperature, class_weights=class_weights)
+        self.n_classes_ = n_classes
+
+        if class_weights is not None: 
+            weights = torch.as_tensor(class_weights, dtype=torch.float32)
+            self.register_buffer("class_weights", weights)
+        else: 
+            self.class_weights = None 
+
+    def forward(self, logits, embeddings, labels): 
+        corn_loss = self.corn_fn_(logits, labels)
+
+        log_cond_probs = F.logsigmoid(logits)
+        log_cdf        = torch.cumsum(log_cond_probs, dim=1)
+        cdf = torch.exp(log_cdf)
+
+        targets  = self.corn_fn_._ordinal_targets(labels, self.n_classes_)
+        per_sample_rps = torch.sum((cdf - targets)**2, dim=1)
+
+        if self.class_weights is not None: 
+            sample_weights = self.class_weights.to(logits.device).gather(0, labels)
+            loss_rps = (per_sample_rps * sample_weights).sum() / (sample_weights.sum() + 1e-9)
+        else: 
+            loss_rps = per_sample_rps.mean() 
+
+
+        if self.beta > 0 and embeddings is not None: 
+            norm_emb = F.normalize(embeddings, dim=1)
+            loss_supcon = self.supcon_fn_(norm_emb, labels)
+        else: 
+            loss_supcon = torch.tensor(0.0, device=logits.device)
+
+        weighted_rps    = self.alpha * loss_rps 
+        weighted_supcon = self.beta * loss_supcon 
+
+        total_loss = corn_loss + weighted_rps + weighted_supcon
+        return total_loss, corn_loss, weighted_rps, weighted_supcon 

@@ -253,7 +253,7 @@ class SpatialBackbone(nn.Module):
         sizes    = {(x.shape[-2], x.shape[-1])}
         mask_pyr = self._build_masks(mask, sizes, x.device) if mask is not None else None  
 
-        MICRO_BATCH_SIZE = 8 
+        MICRO_BATCH_SIZE = 16 
         n_tiles = x.shape[0]
 
         if rois is None: 
