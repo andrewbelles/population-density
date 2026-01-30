@@ -73,6 +73,39 @@ def ece(probs, y_idx, n_bins=10):
         ece += np.abs(acc - avg_conf) * (mask.sum() / conf.size)
     return float(ece)
 
+def ranked_probability_score(y_true, probs, *, class_labels=None, normalize=True): 
+    '''
+    Scoring for ordinal weighted classification 
+    Target lower values. Normalization means dividing by number of class thresholds  
+    '''
+
+    y_true = np.asarray(y_true).reshape(-1)
+    P      = np.asarray(probs, dtype=np.float64)
+
+    if P.ndim == 1 or (P.ndim == 2 and P.shape[1] == 1): 
+        p = P.reshape(-1)
+        P = np.column_stack([1.0 - p, p])
+
+    if class_labels is None: 
+        labels = np.unique(y_true)
+    else: 
+        labels = np.asarray(class_labels)
+
+    if P.shape[1] != labels.size: 
+        raise ValueError(f"probs has {P.shape[1]} cols, labels has {labels.size}")
+
+    row_sum = P.sum(axis=1, keepdims=True)
+    P       = np.divide(P, row_sum, out=np.zeros_like(P), where=row_sum != 0)
+    y_idx   = np.searchsorted(labels, y_true)
+    cdf     = np.cumsum(P, axis=1)[:, :-1]
+    K       = P.shape[1] - 1
+    obs     = (y_idx[:, None] <= np.arange(K)[None, :]).astype(np.float64)
+    rps     = np.mean(np.sum((cdf - obs)**2, axis=1))
+
+    if normalize and K > 0: 
+        rps = rps / K 
+    return float(rps)
+
 
 TaskType = Literal["regression", "classification"]
 

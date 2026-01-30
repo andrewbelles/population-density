@@ -1377,16 +1377,18 @@ class ResBlock(nn.Module):
 
     def forward(self, x): 
         residual = x 
+
         out  = self.bn1(self.fc1(x))
         out  = self.act(out)
+        out  = self.fc1(out)
         out  = self.drop(out)
 
         out  = self.bn2(self.fc2(out))
+        out  = self.act(out)
+        out  = self.fc2(out)
         out  = self.drop(out)
 
-        out += residual 
-        out  = self.act(out)
-        return out 
+        return out + residual  
 
 
 class EmbeddingProjector(BaseEstimator): 
@@ -1638,34 +1640,21 @@ class EmbeddingProjector(BaseEstimator):
             else: 
                 self.proj_ = nn.Linear(self.in_dim, self.out_dim)
         elif self.mode == "manifold": 
-            dims = [self.in_dim]
-            if self.hidden_dims is not None: 
-                dims += list(self.hidden_dims)
-            dims += [self.out_dim]
 
-            residual_dim      = max(dims[1:-1]) if len(dims) > 2 else None  
-            inserted_residual = False 
-            layers            = []
+            if self.hidden_dims: 
+                width = self.hidden_dims[0]
+            else: 
+                width = 256 
 
-            for i in range(len(dims) - 1): 
-                layers.append(nn.Linear(dims[i], dims[i + 1])) 
+            layers = []
+            layers.append(nn.Linear(self.in_dim, width))
 
-                if i < len(dims) - 2: 
-                    layers.append(nn.BatchNorm1d(dims[i + 1]))
-                    layers.append(nn.GELU()) 
-                    if self.dropout > 0: 
-                        layers.append(nn.Dropout(self.dropout))
-                
-                if (
-                    self.use_residual and not inserted_residual and 
-                    residual_dim is not None and 
-                    i < len(dims) - 2 and 
-                    dims[i + 1] == residual_dim
-                ): 
-                    for _ in range(self.n_residual_blocks): 
-                        layers.append(ResBlock(residual_dim, self.dropout))
-                    inserted_residual = True 
+            for _ in range(self.n_residual_blocks): 
+                layers.append(ResBlock(width, self.dropout))
 
+            layers.append(nn.BatchNorm1d(width))
+            layers.append(nn.GELU())
+            layers.append(nn.Linear(width, self.out_dim))
             self.proj_ = nn.Sequential(*layers)
         else: 
             raise ValueError(f"unknown projector mode: {self.mode}")
