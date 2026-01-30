@@ -365,7 +365,7 @@ def run_optimization(
         objective, 
         n_trials=config.n_trials, 
         callbacks=callbacks,
-        n_jobs=len(config.devices)
+        n_jobs=len(config.devices) if config.devices else 1 
     )
 
     print("> Optimization Results:")

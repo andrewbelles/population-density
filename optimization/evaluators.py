@@ -310,7 +310,16 @@ class StandardEvaluator(OptunaEvaluator):
         y_pred = model.predict(X_test, coords_test)
         y_prob = predict_proba_if_any(model, X_test, coords_test)
 
-        metrics = self.task.compute_metrics(y_test, y_pred, y_prob)
+        labels = np.sort(np.unique(np.concatenate([y_train, y_test])))
+        y_idx_train = np.searchsorted(labels, y_train)
+        counts = np.bincount(y_idx_train, minlength=labels.size)
+        class_weights = counts.max() / np.clip(counts, 1, None)
+
+        metrics = self.task.compute_metrics(
+            y_test, y_pred, y_prob,
+            class_labels=labels,
+            class_weights=class_weights
+        )
         return float(select_metric_value(metrics, self.task, self.metric))
 
     def build_nested_worker_specs(self, name, nested_cfg, base_cfg):

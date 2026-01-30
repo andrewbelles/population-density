@@ -166,19 +166,19 @@ models:
     smoothing_alpha: 0.09152769113230329
     autoscale: false
   SAIPE/Logistic:
-    C: 76.82087087243589
-    class_weight: null
+    C: 4.665954567021848
+    class_weight: balanced
   SAIPE/XGBoost:
-    n_estimators: 354
-    learning_rate: 0.08618093467664059
-    max_depth: 5
-    subsample: 0.6925130620052629
-    colsample_bytree: 0.9492183649247241
+    n_estimators: 794
+    learning_rate: 0.029786678276546068
+    max_depth: 6
+    subsample: 0.7511159360603011
+    colsample_bytree: 0.8328594936037962
     min_child_weight: 5
-    reg_alpha: 1.5169982884260107
-    reg_lambda: 30.801246000892984
-    max_delta_step: 4
-    gamma: 0.6095479395778445
+    reg_alpha: 0.01987999296955997
+    reg_lambda: 0.03621694052083294
+    max_delta_step: 1
+    gamma: 0.886755443790972
   Spatial/VIIRS_ROI:
     conv_channels: 64-128
     roi_output_size: 128
@@ -230,18 +230,29 @@ models:
     max_delta_step: 8
     gamma: 0.3182900207390742
   SAIPE/Manifold:
-    n_layers: 3
-    base_width: 512
-    shaping: diamond
-    use_residual: false
-    n_residual_blocks: 3
-    dropout: 0.16846956179856398
-    lr: 0.0010588211882116437
-    weight_decay: 0.0008105177634202593
-    batch_size: 2048
-    epochs: 1000
-    lambda_supcon: 1.285936675408938
-    temperature: 0.18646978078298618
-    eval_fraction: 0.15
-    early_stopping_rounds: 10
-    out_dim: 20
+    base_width: 704
+    dropout: 0.015771917683472067
+    weight_decay: 0.00024784994857864225
+    lr: 0.0007627611295369431
+    batch_size: 512
+    epochs: 500
+    beta_supcon: 0.10553920070380012
+    alpha_rps: 3.611129103911005
+    temperature: 0.15050256327032188
+    eval_fraction: 0.2
+    early_stopping_rounds: 20
+    out_dim: 12
+  SAIPE_MANIFOLD/XGBoost:
+    n_estimators: 376
+    learning_rate: 0.01186258520233953
+    max_depth: 5
+    subsample: 0.7001399891013366
+    colsample_bytree: 0.894417989174838
+    min_child_weight: 6
+    reg_alpha: 0.031404059820337324
+    reg_lambda: 0.09891380025064497
+    max_delta_step: 1
+    gamma: 0.3949042367239135
+  SAIPE_MANIFOLD/Logistic:
+    C: 3.2612321282034435
+    class_weight: null

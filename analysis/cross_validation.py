@@ -32,6 +32,7 @@ from sklearn.metrics import (
     roc_auc_score, 
     log_loss 
 )
+from sklearn.utils import class_weight
 
 from utils.helpers import (
     ModelFactory,
@@ -73,7 +74,14 @@ def ece(probs, y_idx, n_bins=10):
         ece += np.abs(acc - avg_conf) * (mask.sum() / conf.size)
     return float(ece)
 
-def ranked_probability_score(y_true, probs, *, class_labels=None, normalize=True): 
+def ranked_probability_score(
+    y_true, 
+    probs, 
+    *, 
+    class_labels=None,
+    normalize=True,
+    class_weights=None
+): 
     '''
     Scoring for ordinal weighted classification 
     Target lower values. Normalization means dividing by number of class thresholds  
@@ -96,15 +104,23 @@ def ranked_probability_score(y_true, probs, *, class_labels=None, normalize=True
 
     row_sum = P.sum(axis=1, keepdims=True)
     P       = np.divide(P, row_sum, out=np.zeros_like(P), where=row_sum != 0)
+
     y_idx   = np.searchsorted(labels, y_true)
     cdf     = np.cumsum(P, axis=1)[:, :-1]
     K       = P.shape[1] - 1
     obs     = (y_idx[:, None] <= np.arange(K)[None, :]).astype(np.float64)
-    rps     = np.mean(np.sum((cdf - obs)**2, axis=1))
 
+    per_rps = np.mean(np.sum((cdf - obs)**2, axis=1))
     if normalize and K > 0: 
-        rps = rps / K 
-    return float(rps)
+        per_rps = per_rps / K 
+
+    if class_weights is not None: 
+        w = np.asarray(class_weights, dtype=np.float64)
+        if w.size != labels.size: 
+            raise ValueError("class_weights does not match the number of classes.")
+        sample_w = w[y_idx]
+        return float((per_rps * sample_w).sum() / (sample_w.sum() + 1e-9))
+    return float(per_rps.mean())
 
 
 TaskType = Literal["regression", "classification"]
@@ -127,79 +143,111 @@ class TaskSpec:
         self, 
         y_true: NDArray, 
         y_pred: NDArray, 
-        y_prob: NDArray | None = None
+        y_prob: NDArray | None = None,
+        *,
+        class_labels=None, 
+        class_weights=None 
     ) -> dict[str, float]: 
+        
+        y_true = np.asarray(y_true).ravel() 
+        y_pred = np.asarray(y_pred).ravel() 
 
-        y_true = np.asarray(y_true).ravel()
-        n_classes = len(np.unique(y_true))
+        if class_labels is None: 
+            labels = np.sort(np.unique(y_true))
+        else:
+            labels = np.asarray(class_labels)
+
+        y_idx = np.searchsorted(labels, y_true)
+
         results = {}
-
-        y_idx, labels = as_label_indices(y_true)
 
         if self.task_type == "regression": 
             for m in self.metrics: 
-                if m == "r2":
+                if m == "r2": 
                     results["r2"] = float(r2_score(y_true, y_pred))
                 elif m == "rmse": 
                     results["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-        else: 
-            y_prob_arr = None
-            if y_prob is not None:
-                y_prob_arr = np.asarray(y_prob)
-                # Align label indices with prob columns (0..K-1)
+            return results 
+        y_prob_arr = None
+        if y_prob is not None:
+            y_prob_arr = np.asarray(y_prob, dtype=np.float64)
 
-                # Normalize row-wise if needed (prevents log_loss warnings)
-                if y_prob_arr.ndim > 1:
-                    row_sum = y_prob_arr.sum(axis=1, keepdims=True)
-                    y_prob_arr = np.divide(
-                        y_prob_arr,
-                        row_sum,
-                        out=np.zeros_like(y_prob_arr),
-                        where=row_sum != 0
-                    )
+            if y_prob_arr.ndim == 1 or (y_prob_arr.ndim == 2 and y_prob_arr.shape[1] == 1):
+                p = y_prob_arr.reshape(-1)
+                y_prob_arr = np.column_stack([1.0 - p, p])
 
-            for m in self.metrics:
-                if m == "accuracy":
-                    results["accuracy"] = float(accuracy_score(y_true, y_pred))
-                elif m == "f1":
-                    avg = "binary" if n_classes == 2 else "macro"
-                    results["f1"] = float(f1_score(y_true, y_pred, average=avg))
-                elif m == "f1_macro":
-                    results["f1_macro"] = float(f1_score(y_true, y_pred, average="macro"))
-                elif m == "roc_auc" and y_prob_arr is not None:
-                    try:
-                        if y_prob_arr.ndim == 1 or (y_prob_arr.ndim == 2 and 
-                                                    y_prob_arr.shape[1] == 1):
-                            results["roc_auc"] = float(roc_auc_score(y_true, y_prob_arr.ravel()))
-                        else:
-                            results["roc_auc"] = float(roc_auc_score(
-                                y_idx,
-                                y_prob_arr,
-                                multi_class="ovr",
-                                average="macro"
-                            ))
-                    except ValueError:
-                        results["roc_auc"] = np.nan
-                elif m == "log_loss" and y_prob_arr is not None:
-                    if y_prob_arr.ndim > 1:
-                        results["log_loss"] = float(
-                            log_loss(y_idx, y_prob_arr, labels=np.arange(labels.size))
+            row_sum = y_prob_arr.sum(axis=1, keepdims=True)
+            y_prob_arr = np.divide(
+                y_prob_arr, row_sum, out=np.zeros_like(y_prob_arr), where=row_sum != 0
+            )
+
+            if y_prob_arr.shape[1] != labels.size:
+                y_prob_arr = None
+
+        for m in self.metrics:
+            if m == "accuracy":
+                results["accuracy"] = float(accuracy_score(y_true, y_pred))
+
+            elif m == "f1_macro":
+                results["f1_macro"] = float(f1_score(y_true, y_pred, average="macro"))
+
+            elif m == "roc_auc" and y_prob_arr is not None:
+                try:
+                    if y_prob_arr.shape[1] == 2:
+                        results["roc_auc"] = float(
+                            roc_auc_score(y_true, y_prob_arr[:, 1])
                         )
                     else:
-                        results["log_loss"] = float(log_loss(y_true, y_prob_arr))
-                elif m == "brier" and y_prob_arr is not None:
-                    results["brier"] = brier_multiclass(y_prob_arr, y_idx, labels.size)
-                elif m == "ece" and y_prob_arr is not None:
-                    results["ece"] = ece(y_prob_arr, y_idx, labels.size)
-                elif m == "qwk":
-                    p_idx, _ = as_label_indices(y_pred)
-                    results["qwk"] = float(cohen_kappa_score(y_idx, p_idx, weights="quadratic"))
-                elif m == "ord_mae" and y_prob_arr is not None:
-                    p_idx, _ = as_label_indices(y_pred)
-                    results["ord_mae"] = float(np.mean(np.abs(y_idx - p_idx)))
+                        present = np.unique(y_idx)
+                        if present.size < 2: 
+                            results["roc_auc"] = np.nan
+                        else:
+                            P = y_prob_arr[:, present]
+                            y_present = np.searchsorted(present, y_idx)
+                            results["roc_auc"] = float(
+                                roc_auc_score(
+                                    y_present,
+                                    P,
+                                    multi_class="ovr",
+                                    average="macro",
+                                    labels=np.arange(present.size)
+                                )
+                            )
+                except ValueError:
+                    results["roc_auc"] = np.nan
 
+            elif m == "log_loss" and y_prob_arr is not None:
+                try:
+                    results["log_loss"] = float(
+                        log_loss(y_idx, y_prob_arr, labels=np.arange(labels.size))
+                    )
+                except ValueError:
+                    results["log_loss"] = np.nan
 
-        return results 
+            elif m == "brier" and y_prob_arr is not None:
+                results["brier"] = brier_multiclass(y_prob_arr, y_idx, labels.size)
+
+            elif m == "ece" and y_prob_arr is not None:
+                results["ece"] = ece(y_prob_arr, y_idx)
+
+            elif m == "qwk":
+                p_idx = np.searchsorted(labels, y_pred)
+                results["qwk"] = float(cohen_kappa_score(y_idx, p_idx, weights="quadratic"))
+
+            elif m == "ord_mae":
+                p_idx = np.searchsorted(labels, y_pred)
+                results["ord_mae"] = float(np.mean(np.abs(y_idx - p_idx)))
+
+            elif m == "rps" and y_prob_arr is not None:
+                results["rps"] = ranked_probability_score(
+                    y_true,
+                    y_prob_arr,
+                    class_labels=labels,
+                    normalize=True,
+                    class_weights=class_weights
+                )
+
+        return results
 
     def compute_baseline(
         self, 
@@ -217,11 +265,9 @@ class TaskSpec:
             return self.compute_metrics(y_test, y_base)
 
 REGRESSION     = TaskSpec("regression")
-CLASSIFICATION = TaskSpec("classification") 
-
-FULL_CLASSIF   = TaskSpec(
+CLASSIFICATION = TaskSpec(
     "classification", 
-    ("accuracy", "f1_macro", "roc_auc", "log_loss", "brier", "ece", "qwk", "ord_mae")
+    ("accuracy", "f1_macro", "roc_auc", "ece", "qwk", "rps")
 )
 
 # ---------------------------------------------------------
@@ -626,7 +672,17 @@ class CrossValidator:
         y_prob
     ): 
 
-        metrics  = self.task.compute_metrics(y_test, y_pred_eval, y_prob)
+
+        labels = np.sort(np.unique(np.concatenate([y_train, y_test])))
+        y_idx_train = np.searchsorted(labels, y_train)
+        counts = np.bincount(y_idx_train, minlength=labels.size)
+        class_weights = counts.max() / np.clip(counts, 1, None)
+
+        metrics  = self.task.compute_metrics(
+            y_test, y_pred_eval, y_prob, 
+            class_labels=labels,
+            class_weights=class_weights
+        )
         baseline = self.task.compute_baseline(y_train, y_test)
 
         row = {

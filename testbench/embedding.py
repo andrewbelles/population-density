@@ -428,8 +428,9 @@ def test_saipe_extract(
 
     params = load_model_params(config_path, model_key)
     params = dict(params)
-    params["mode"]    = "manifold"
-    params["out_dim"] = 5
+
+    params["hidden_dims"] = int(params.pop("base_width")),
+    params["mode"] = "manifold"
 
     splitter      = cv_config(folds, random_state).get_splitter(OPT_TASK)
     model_factory = lambda: EmbeddingProjector(

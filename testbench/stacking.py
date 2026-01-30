@@ -16,8 +16,7 @@ import numpy as np
 from analysis.cross_validation import (
     CrossValidator,
     CVConfig,
-    CLASSIFICATION,
-    FULL_CLASSIF,
+    CLASSIFICATION
 )
 
 from models.graph.processing import CorrectAndSmooth
@@ -47,6 +46,7 @@ from testbench.utils.paths import (
 )
 
 from testbench.utils.config import (
+    cv_config,
     load_model_params,
     normalize_params,
     eval_config
@@ -113,7 +113,7 @@ STACKED_PASSTHROUGH_PROBS = project_path("data", "results", "final_stacked_passt
 STACKING_BASE_KEY        = "Stacking"
 STACKING_PASSTHROUGH_KEY = "StackingPassthrough"
 
-MODELS = ("XGBoost",)
+MODELS = ("Logistic",)
 
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 
@@ -207,7 +207,7 @@ def _optimize_dataset(
     devices: list[int] | None = None
 ): 
 
-    outer_config = eval_config(RANDOM_STATE)
+    outer_config = cv_config(3, RANDOM_STATE)
 
     inner_config = CVConfig(
         n_splits=3,
@@ -226,7 +226,7 @@ def _optimize_dataset(
             task=OPT_TASK,
             config=inner_config,
             outer_config=outer_config,
-            metric="qwk"
+            metric="rps"
         )
 
         config = EngineConfig(
@@ -377,22 +377,20 @@ def _select_best_model(
 
 def _row_metrics(name: str, metrics: dict): 
     return {
-        "Name":    name, 
-        "Acc":     format_metric(metrics.get("accuracy")),
-        "F1":      format_metric(metrics.get("f1_macro")),
-        "ROC_AUC": format_metric(metrics.get("roc_auc")),
-        "LogLoss": format_metric(metrics.get("log_loss")),
-        "Brier": format_metric(metrics.get("brier")),
-        "ECE": format_metric(metrics.get("ece")),
-        "QWK": format_metric(metrics.get("qwk")),
-        "OrdMAE": format_metric(metrics.get("ord_mae"))
+        "Name": name, 
+        "Acc":  format_metric(metrics.get("accuracy")),
+        "F1":   format_metric(metrics.get("f1_macro")),
+        "ROC":  format_metric(metrics.get("ROC_AUC")), 
+        "ECE":  format_metric(metrics.get("ece")),
+        "QWK":  format_metric(metrics.get("qwk")),
+        "RPS":  format_metric(metrics.get("rps"))
     }
 
 def _row_opt(name: str, model: str, score: float): 
     return {
         "Name":  name, 
         "Model": model, 
-        "F1":    format_metric(score)
+        "RPS":    format_metric(score)
     }
 
 # ---------------------------------------------------------
@@ -418,7 +416,7 @@ def test_expert_optimize(
             name, 
             base["path"],
             loader, 
-            direction="maximize",
+            direction="minimize",
             n_trials=EXPERT_TRIALS,
             config_path=config_path,
             parallel_outer=False, 
@@ -429,7 +427,7 @@ def test_expert_optimize(
         rows.append(_row_opt(name, best["model"], best["mean_score"]))
         
     return {
-        "header": ["Name", "Model", "F1"],
+        "header": ["Name", "Model", "RPS"],
         "rows": rows 
     }
 
@@ -440,7 +438,7 @@ def test_expert_oof(
     **_
 ):
     rows    = []
-    config  = eval_config() 
+    config  = cv_config(3, RANDOM_STATE) 
     targets = datasets or list(DATASETS) 
 
     for name in targets:
@@ -448,12 +446,12 @@ def test_expert_oof(
             raise ValueError(f"unknown dataset: {name}")
         base, loader = resolve_expert_loader(name, filter_dir)
 
-        _, best_model, best_params, metrics = _select_best_model(
+        _, best_model, best_params, _ = _select_best_model(
             name, 
             base["path"],
             loader,
             config,
-            task=FULL_CLASSIF,
+            task=CLASSIFICATION,
             config_path=config_path
         )
 
@@ -463,14 +461,16 @@ def test_expert_oof(
             best_model,
             best_params,
             config,
-            task=FULL_CLASSIF,
+            task=CLASSIFICATION,
             proba_path=EXPERT_PROBA[name]
         )
 
+        P, y, _, class_labels = load_probs_labels_fips(EXPERT_PROBA[name])
+        metrics = metrics_from_probs(y, P, class_labels)
         rows.append(_row_metrics(f"{name}/{best_model}", metrics))
 
     return {
-        "header": ["Name", "Acc", "F1", "ROC_AUC", "LogLoss", "Brier", "ECE", "QWK", "OrdMAE"],
+        "header": ["Name", "Acc", "F1", "ROC", "ECE", "QWK", "RPS"],
         "rows": rows,
         "experts": {k: EXPERT_PROBA[k] for k in DATASETS}
     }
