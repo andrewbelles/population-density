@@ -166,7 +166,7 @@ models:
     smoothing_alpha: 0.09152769113230329
     autoscale: false
   SAIPE/Logistic:
-    C: 4.665954567021848
+    C: 0.9275965648123793
     class_weight: balanced
   SAIPE/XGBoost:
     n_estimators: 794
@@ -243,16 +243,38 @@ models:
     early_stopping_rounds: 20
     out_dim: 12
   SAIPE_MANIFOLD/XGBoost:
-    n_estimators: 376
-    learning_rate: 0.01186258520233953
+    n_estimators: 532
+    learning_rate: 0.07687399379259809
     max_depth: 5
-    subsample: 0.7001399891013366
-    colsample_bytree: 0.894417989174838
-    min_child_weight: 6
-    reg_alpha: 0.031404059820337324
-    reg_lambda: 0.09891380025064497
-    max_delta_step: 1
-    gamma: 0.3949042367239135
+    subsample: 0.6824733335408097
+    colsample_bytree: 0.9597187146215655
+    min_child_weight: 5
+    reg_alpha: 0.036798213912308
+    reg_lambda: 0.04441171334728096
+    max_delta_step: 6
+    gamma: 0.37750873402513435
   SAIPE_MANIFOLD/Logistic:
-    C: 3.2612321282034435
-    class_weight: null
+    C: 1.0426206702139886
+    class_weight: balanced
+  SAIPE_2023/Logistic:
+    C: 0.9275965648123793
+    class_weight: balanced
+  SAIPE_2023/XGBoost:
+    n_estimators: 750
+    learning_rate: 0.0054234705079926025
+    max_depth: 3
+    subsample: 0.6872419807649187
+    colsample_bytree: 0.9937171262311015
+    min_child_weight: 5
+    reg_alpha: 0.1757339132047719
+    reg_lambda: 0.06025208636281852
+    max_delta_step: 7
+    gamma: 0.8340018913945823
+  SAIPE_MANIFOLD/SVM:
+    C: 16.314228204492267
+    gamma: 0.0004698238931337501
+    class_weight: balanced
+  SAIPE_2023/SVM:
+    C: 88.12888706644083
+    gamma: 0.00018193581531331194
+    class_weight: balanced

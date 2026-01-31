@@ -63,38 +63,63 @@ def metrics_from_summary(summary):
         "rps": float(row["rps_mean"]) if "rps_mean" in row else np.nan 
     }
 
-def metrics_from_probs(y_true, probs, class_labels): 
+
+def metrics_from_probs(y_true, probs, class_labels):
     y_true = np.asarray(y_true).reshape(-1)
     probs  = np.asarray(probs, dtype=np.float64)
 
-    if probs.ndim == 1 or probs.shape[1] == 1: 
-        p     = probs.reshape(-1) 
-        preds = ( p >= 0.5 ).astype(int)
-        roc   = roc_auc_score(y_true, p) if np.unique(y_true).size > 1 else float("nan")
-    else: 
-        if not np.allclose(probs.sum(axis=1), 1.0, rtol=1e-3, atol=1e-3):
-            probs = _softmax_rows(probs)
+    if probs.ndim == 1 or (probs.ndim == 2 and probs.shape[1] == 1):
+        p = probs.reshape(-1)
+        probs = np.column_stack([1.0 - p, p])
 
-        preds  = np.argmax(probs, axis=1)
-        labels = class_labels if class_labels.size else np.unique(y_true)
-        roc    = roc_auc_score(
-            y_true,
-            probs,
-            multi_class="ovr",
-            average="macro",
-            labels=labels
-        )
+    if probs.ndim != 2:
+        raise ValueError(f"probs must be 2d (n, c), got {probs.shape}")
 
-    y_idx, labels = as_label_indices(y_true)
-    p_idx = np.argmax(probs, axis=1) if probs.ndim > 1 else (probs >= 0.5).astype(int)
+    row_sum = probs.sum(axis=1, keepdims=True)
+    probs = np.divide(probs, row_sum, out=np.zeros_like(probs), where=row_sum != 0)
+
+    K = probs.shape[1]
+
+    if class_labels is not None and np.asarray(class_labels).size == K:
+        labels = np.asarray(class_labels)
+        idx_map = {v: i for i, v in enumerate(labels)}
+        y_idx = np.array([idx_map[v] for v in y_true], dtype=np.int64)
+    else:
+        labels = np.arange(K)
+        y_idx = y_true.astype(np.int64)
+
+    preds = np.argmax(probs, axis=1)
+
+    counts = np.bincount(y_idx, minlength=K)
+    weights = counts.max() / np.clip(counts, 1, None)
+
+    if K == 2:
+        roc = roc_auc_score(y_idx, probs[:, 1])
+    else:
+        try:
+            roc = roc_auc_score(
+                y_idx,
+                probs,
+                multi_class="ovr",
+                average="macro",
+                labels=np.arange(K)
+            )
+        except ValueError:
+            roc = np.nan
 
     return {
-        "accuracy": float(accuracy_score(y_true, preds)),
-        "f1_macro": float(f1_score(y_true, preds, average="macro")),
+        "accuracy": float(accuracy_score(y_idx, preds)),
+        "f1_macro": float(f1_score(y_idx, preds, average="macro")),
         "roc_auc": float(roc),
         "ece": ece(probs, y_idx),
-        "qwk": float(cohen_kappa_score(y_idx, p_idx, weights="quadratic")),
-        "rps": ranked_probability_score(y_true, probs, class_labels=labels, normalize=True)
+        "qwk": float(cohen_kappa_score(y_idx, preds, weights="quadratic")),
+        "rps": ranked_probability_score(
+            y_true, 
+            probs, 
+            class_labels=labels, 
+            normalize=True,
+            class_weights=weights
+        ),
     }
 
 def rank_by_label(results, labels): 

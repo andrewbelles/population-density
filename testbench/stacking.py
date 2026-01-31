@@ -16,7 +16,8 @@ import numpy as np
 from analysis.cross_validation import (
     CrossValidator,
     CVConfig,
-    CLASSIFICATION
+    CLASSIFICATION,
+    ranked_probability_score
 )
 
 from models.graph.processing import CorrectAndSmooth
@@ -100,7 +101,7 @@ EXPERT_PROBA    = {
     "VIIRS": project_path("data", "stacking", "viirs_optimized_probs.mat"),
     # "TIGER": project_path("data", "stacking", "tiger_optimized_probs.mat"),
     "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat"),
-    "SAIPE": project_path("data", "stacking", "saipe_optimized_probs.mat"),
+    "SAIPE_2023": project_path("data", "stacking", "saipe_optimized_probs.mat"),
     "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"),
     "VIIRS_MANIFOLD_LOGITS": project_path("data", "stacking", 
                                           "viirs_pooled_with_logits_probs.mat"),
@@ -113,7 +114,7 @@ STACKED_PASSTHROUGH_PROBS = project_path("data", "results", "final_stacked_passt
 STACKING_BASE_KEY        = "Stacking"
 STACKING_PASSTHROUGH_KEY = "StackingPassthrough"
 
-MODELS = ("Logistic",)
+MODELS = ("Logistic", "SVM")
 
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 
@@ -206,7 +207,6 @@ def _optimize_dataset(
     parallel_outer: bool = False, 
     devices: list[int] | None = None
 ): 
-
     outer_config = cv_config(3, RANDOM_STATE)
 
     inner_config = CVConfig(
@@ -380,7 +380,7 @@ def _row_metrics(name: str, metrics: dict):
         "Name": name, 
         "Acc":  format_metric(metrics.get("accuracy")),
         "F1":   format_metric(metrics.get("f1_macro")),
-        "ROC":  format_metric(metrics.get("ROC_AUC")), 
+        "ROC":  format_metric(metrics.get("roc_auc")), 
         "ECE":  format_metric(metrics.get("ece")),
         "QWK":  format_metric(metrics.get("qwk")),
         "RPS":  format_metric(metrics.get("rps"))
@@ -438,7 +438,7 @@ def test_expert_oof(
     **_
 ):
     rows    = []
-    config  = cv_config(3, RANDOM_STATE) 
+    config  = cv_config(5, RANDOM_STATE) 
     targets = datasets or list(DATASETS) 
 
     for name in targets:
@@ -446,7 +446,7 @@ def test_expert_oof(
             raise ValueError(f"unknown dataset: {name}")
         base, loader = resolve_expert_loader(name, filter_dir)
 
-        _, best_model, best_params, _ = _select_best_model(
+        _, best_model, best_params, metrics = _select_best_model(
             name, 
             base["path"],
             loader,
@@ -465,14 +465,12 @@ def test_expert_oof(
             proba_path=EXPERT_PROBA[name]
         )
 
-        P, y, _, class_labels = load_probs_labels_fips(EXPERT_PROBA[name])
-        metrics = metrics_from_probs(y, P, class_labels)
         rows.append(_row_metrics(f"{name}/{best_model}", metrics))
 
     return {
         "header": ["Name", "Acc", "F1", "ROC", "ECE", "QWK", "RPS"],
         "rows": rows,
-        "experts": {k: EXPERT_PROBA[k] for k in DATASETS}
+        # "experts": {k: EXPERT_PROBA[k] for k in DATASETS}
     }
 
 def test_stacking_optimize(

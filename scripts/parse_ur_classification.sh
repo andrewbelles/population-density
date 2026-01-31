@@ -8,14 +8,15 @@
 
 set -euo pipefail 
 
-if [ $# -ne 1 ]; then 
-  echo "Usage: parse_ur_classification.sh <target_dir>" >&2 
+if [ $# -ne 2 ]; then 
+  echo "Usage: parse_ur_classification.sh <year> <target_dir>" >&2 
   exit 2 
 fi 
 
-dir="$1"
-in="${dir}/urban_rural_classification.csv"
-out="${dir}/nchs_classification.csv"
+year="$1"
+dir="$2"
+in="${dir}/urban_rural_classification_${year}.csv"
+out="${dir}/nchs_classification_${year}.csv"
 
 if [ ! -f "$in" ]; then 
   echo "error missing file: $in" >&2 

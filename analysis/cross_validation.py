@@ -110,7 +110,8 @@ def ranked_probability_score(
     K       = P.shape[1] - 1
     obs     = (y_idx[:, None] <= np.arange(K)[None, :]).astype(np.float64)
 
-    per_rps = np.mean(np.sum((cdf - obs)**2, axis=1))
+    per_rps = np.sum((cdf - obs)**2, axis=1)
+
     if normalize and K > 0: 
         per_rps = per_rps / K 
 
@@ -120,8 +121,8 @@ def ranked_probability_score(
             raise ValueError("class_weights does not match the number of classes.")
         sample_w = w[y_idx]
         return float((per_rps * sample_w).sum() / (sample_w.sum() + 1e-9))
-    return float(per_rps.mean())
 
+    return float(per_rps.mean())
 
 TaskType = Literal["regression", "classification"]
 

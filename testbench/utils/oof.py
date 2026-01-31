@@ -39,12 +39,17 @@ def load_probs_labels_fips(proba_path=PROBA_PATH):
     check_paths_exist([proba_path], "stacking OOF file")
     oof   = load_oof_predictions(proba_path) 
     probs = np.asarray(oof["probs"], dtype=np.float64)
-    if probs.ndim != 3: 
-        raise ValueError(f"expected probs (n, m, c), got {probs.shape}")
-    if probs.shape[1] == 1: 
-        P = probs[:, 0, :]
+
+    if probs.ndim == 2: 
+        P = probs 
+    elif probs.ndim == 3: 
+        if probs.shape[1] == 1: 
+            P = probs[:, 0, :]
+        else: 
+            P = probs.mean(axis=1)
     else: 
-        P = probs.mean(axis=1)
+        raise ValueError(f"got {probs.shape}, invalid.")
+
     y    = np.asarray(oof["labels"]).reshape(-1)
     fips = np.asarray(oof["fips_codes"]).astype("U5")
     class_labels = np.asarray(oof["class_labels"]).reshape(-1) 

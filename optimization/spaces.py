@@ -54,23 +54,15 @@ def define_rf_space(trial: optuna.Trial):
 
 
 def define_svm_space(trial: optuna.Trial):
-    kernel = trial.suggest_categorical("kernel", ["rbf", "linear", "poly", "sigmoid"])
-    params = {
-        "kernel": kernel,
-        "C": trial.suggest_float("C", 1e-3, 1e3, log=True),
-        "probability": True
+    return {
+        "kernel": "rbf",
+        "C": trial.suggest_float("C", 1e-2, 1e2, log=True),
+        "gamma": trial.suggest_float("gamma", 1e-4, 1e-1, log=True),
+        "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
+        "shrinking": True, 
+        "probability": True, 
+        "ordinal": True
     }
-
-    if kernel == "rbf":
-        gamma_type = trial.suggest_categorical("gamma_mode", ["auto_scale", "custom"])
-        if gamma_type == "custom":
-            params["gamma"] = trial.suggest_float("gamma_custom", 1e-4, 1e1, log=True)
-        else:
-            params["gamma"] = trial.suggest_categorical("gamma_rbf", ["scale", "auto"])
-
-    params["shrinking"] = trial.suggest_categorical("shrinking", [True, False])
-    return params
-
 
 def define_logistic_space(trial: optuna.Trial):
     return {

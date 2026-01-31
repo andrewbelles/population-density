@@ -27,9 +27,9 @@ class SaipeNCHS:
         labels_path: str | None = None 
     ): 
         if csv_path is None: 
-            csv_path = project_path("data", "saipe", "saipe_2023.csv")
+            csv_path = project_path("data", "saipe", "saipe_2013.csv")
         if labels_path is None: 
-            labels_path = project_path("data", "nchs", "nchs_classification.csv")
+            labels_path = project_path("data", "nchs", "nchs_classification_2013.csv")
 
         self.csv_path    = csv_path 
         self.labels_path = labels_path
@@ -158,7 +158,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv", default=project_path("data", "saipe", "saipe_2023.csv"))
     parser.add_argument("--labels", default=project_path("data", "nchs", 
-                                                         "nchs_classification.csv"))
+                                                         "nchs_classification_2023.csv"))
     parser.add_argument("--out", default=project_path("data", "datasets",
                                                       "saipe_nchs_2023.mat"))
     args = parser.parse_args()

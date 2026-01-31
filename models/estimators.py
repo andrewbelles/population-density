@@ -503,6 +503,7 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         probability: bool = False, 
         class_weight: str | dict | None = None, 
         random_state: int | None = None, 
+        ordinal: bool = True, 
         **kwargs
     ): 
         self.C = C 
@@ -511,29 +512,100 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         self.probability  = probability 
         self.class_weight = class_weight 
         self.random_state = random_state 
+        self.ordinal      = ordinal 
         self.kwargs       = kwargs
 
+        self.model_       = None 
+        self.models_      = None 
+        self.classes_     = None 
+
+
     def fit(self, X, y, coords=None): 
-        self.model_ = SVC(
-            C=self.C, 
-            kernel=self.kernel, 
-            gamma=self.gamma, 
-            probability=self.probability,
-            class_weight=self.class_weight,
-            random_state=self.random_state,
-            **self.kwargs
-        )
-        self.model_.fit(X, y)
-        self.classes_ = self.model_.classes_ 
+        y             = np.asarray(y).reshape(-1)
+        self.classes_ = np.sort(np.unique(y))
+
+        if not self.ordinal: 
+            self.model_ = SVC(
+                C=self.C, 
+                kernel=self.kernel, 
+                gamma=self.gamma, 
+                probability=self.probability,
+                class_weight=self.class_weight,
+                random_state=self.random_state,
+                **self.kwargs
+            )
+            self.model_.fit(X, y)
+            return self 
+
+        if not self.probability: 
+            raise ValueError("ordinal SVM requires probability=True")
+
+        y_idx     = np.searchsorted(self.classes_, y)
+        n_classes = len(self.classes_)
+        if n_classes < 2: 
+            raise ValueError("ordinal SVM requires multiclass")
+
+        self.models_ = []
+        for k in range(n_classes - 1): 
+            y_bin = (y_idx > k).astype(np.int64)
+            clf = SVC(
+                C=self.C, 
+                kernel=self.kernel, 
+                gamma=self.gamma, 
+                probability=True,
+                class_weight=self.class_weight,
+                random_state=self.random_state,
+                **self.kwargs
+            )
+            clf.fit(X, y_bin)
+            self.models_.append(clf) 
+
         return self 
 
     def predict(self, X, coords=None):
-        return self.model_.predict(X)
+        if not self.ordinal: 
+            if self.model_ is None or self.classes_ is None: 
+                raise ValueError("must fit model and compute classes")
+            return self.model_.predict(X)
+
+        if self.models_ is None or self.classes_ is None: 
+            raise ValueError("must fit frank-hall models and compute classes")
+
+        probs = self._ordinal_probs(X)
+        idx   = np.argmax(probs, axis=1) 
+        return self.classes_[idx]
 
     def predict_proba(self, X, coords=None):
         if not self.probability: 
             raise AttributeError("SVMClassifier was instantiated with probability=False")
-        return self.model_.predict_proba(X)
+        if not self.ordinal:
+            if self.model_ is None: 
+                raise ValueError("model must be fit")
+            return self.model_.predict_proba(X)
+
+        if self.models_ is None or self.classes_ is None: 
+            raise ValueError("must fit frank-hall models and compute classes")
+        return self._ordinal_probs(X)
+
+    def _ordinal_probs(self, X): 
+        if self.models_ is None: 
+            raise ValueError("must fit frank-hall models")
+
+        prob_gt = np.stack(
+            [m.predict_proba(X)[:, 1] for m in self.models_],
+            axis=1
+        )
+
+        n, k  = prob_gt.shape 
+        probs = np.empty((n, k + 1), dtype=np.float64)
+        probs[:, 0] = 1.0 - prob_gt[:, 0]
+        for j in range(1, k): 
+            probs[:, j] = prob_gt[:, j - 1] - prob_gt[:, j]
+        probs[:, -1] = prob_gt[:, -1]
+
+        probs = np.clip(probs, 1e-9, None)
+        probs = probs / probs.sum(axis=1, keepdims=True)
+        return probs 
 
 # ---------------------------------------------------------
 # Supervised Feature Extraction based Models  

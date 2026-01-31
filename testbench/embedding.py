@@ -210,6 +210,11 @@ def _holdout_embeddings(
         model = model_factory() 
         if callable(model) and not hasattr(model, "fit"): 
             model = model() 
+        if isinstance(train_data, np.ndarray): 
+            scaler     = StandardScaler() 
+            train_data = scaler.fit_transform(train_data)
+            val_data   = scaler.transform(val_data)
+
         model.fit(train_data, labels[train_idx]) 
 
         train_emb = extract_fn(model, train_data) if postprocess else None 
