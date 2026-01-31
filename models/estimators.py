@@ -7,6 +7,7 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
+from joblib import memory
 import numpy as np 
 
 import multiprocessing as mp
@@ -14,7 +15,7 @@ import multiprocessing as mp
 from sklearn.preprocessing import StandardScaler
 import time, copy, time, sys, torch   
 
-from torch.cuda import temperature
+from torch.cuda import memory_allocated, temperature
 import torch.nn.functional as F 
 
 from utils.resources         import ComputeStrategy
@@ -74,7 +75,7 @@ from sklearn.metrics         import (
     cohen_kappa_score
 )
 
-from utils.helpers           import bind 
+from utils.helpers           import align_on_fips, bind 
 
 # ---------------------------------------------------------
 # Regressors 
@@ -677,16 +678,20 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         fc_dim: int = 128, 
         dropout: float = 0.2, 
         use_bn: bool = True, 
-        loss_beta: float = 0.99, 
-        distance_power: float = 1.0, 
         roi_output_size: int | tuple[int, int] = 7, 
         sampling_ratio: int = 2, 
         aligned: bool = False, 
+
         pretrain_epochs: int = 10, 
         epochs: int = 100, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
-        lambda_supcon: float = 0.5, 
+
+        alpha_rps: float = 6.0, 
+        beta_supcon: float = 0.5, 
+        supcon_temperature: float = 0.07, 
+        supcon_dim: int = 128, 
+
         random_state: int = 0, 
         early_stopping_rounds: int | None = 15, 
         eval_fraction: float = 0.1,
@@ -695,7 +700,6 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         target_global_batch: int = 1, 
         shuffle: bool = True, 
         in_channels: int | None = None, 
-        categorical_input: bool = False, 
         collate_fn=None,
         class_values: list[int] | None = None,
         features: list[str] | None = None, 
@@ -709,19 +713,23 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.roi_output_size   = roi_output_size
         self.sampling_ratio    = sampling_ratio
         self.aligned           = aligned
-        self.loss_beta         = loss_beta 
-        self.distance_power    = distance_power
+
         self.pretrain_epochs   = pretrain_epochs 
         self.epochs            = epochs
         self.lr                = lr
         self.weight_decay      = weight_decay
-        self.lambda_supcon     = lambda_supcon
-        self.random_state      = random_state
-        self.in_channels       = in_channels
-        self.categorical_input = categorical_input
-        self.class_values      = class_values
-        self.features          = features 
-        self.device            = self._resolve_device(compute_strategy.device)
+
+        self.alpha_rps          = alpha_rps  
+        self.beta_supcon        = beta_supcon
+        self.supcon_temperature = supcon_temperature  
+        self.supcon_dim         = supcon_dim 
+
+        self.random_state        = random_state
+        self.in_channels        = in_channels
+        self.class_values       = class_values
+        self.features           = features 
+
+        self.device             = self._resolve_device(compute_strategy.device)
 
         self.target_global_batch   = target_global_batch
         self.early_stopping_rounds = early_stopping_rounds 
@@ -735,9 +743,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         self.classes_: NDArray | None = None 
         self.n_classes_: int | None   = None 
+        self.model_: nn.Module        = nn.Module() 
 
     def fit(self, X, y=None, val_loader=None, callbacks=None): 
-        
+
         torch.manual_seed(self.random_state)
         if self.device.type == "cuda":
              torch.backends.cudnn.benchmark = True
@@ -798,11 +807,13 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             break
         
         class_weights = (class_counts.max() / np.clip(class_counts, 1, None))
-        loss_fn       = CornLoss(
+        self.loss_fn_ = HybridOrdinalLoss(
             n_classes=self.n_classes_,
-            class_weights=class_weights
-        )
-        self.loss_fn_ = loss_fn
+            class_weights=class_weights, 
+            alpha_rps=self.alpha_rps, 
+            beta_supcon=self.beta_supcon,
+            temperature=self.supcon_temperature
+        ).to(self.device)
 
         scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
@@ -824,20 +835,22 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             accum = max(1, int(self.accum_steps))
             opt.zero_grad()
 
-            step_idx = -1 
+            step_idx    = -1 
             total_loss  = 0.0
             total_count = 0
 
             total_corn  = 0.0 
+            total_rps   = 0.0 
             total_sup   = 0.0 
 
             for step_idx, batch in enumerate(loader): 
                 with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-                    loss, bsz, lc, ls = self._process_batch(batch)
+                    loss, bsz, lc, lrps, ls = self._process_batch(batch)
+                    
                     total_loss += loss.item() * bsz 
-
                     total_corn += lc.item() * bsz  
                     total_sup  += ls.item() * bsz 
+                    total_rps  += lrps.item() * bsz 
 
                     total_count += bsz
                     loss = loss / accum 
@@ -876,10 +889,12 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             avg_loss = total_loss / max(total_count, 1)
             avg_corn = total_corn / max(total_count, 1) 
             avg_sup  = total_sup / max(total_count, 1)
+            avg_rps  = (total_rps / max(total_count, 1)) / max(self.alpha_rps, 1e-9)
 
             avg_dt   = (time.perf_counter() - start) / (ep + 1)
             msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg, training_loss={avg_loss:.4f} " + 
-                f"corn={avg_corn:.4f} supcon={avg_sup:.4f}")
+                f"corn={avg_corn:.4f} supcon={avg_sup:.4f} rps={avg_rps:.4f}")
+
             if ep % 5 == 0: 
                 if val_loss is not None: 
                     msg += f" val_loss={val_loss:.4f}"
@@ -889,86 +904,58 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             self.model_.load_state_dict(best_state)
         return self 
 
-    def loss(self, X) -> NDArray: 
-        loader = self._ensure_loader(X, shuffle=False)
-        return self._eval_loss(loader)
+    def predict(self, batch) -> torch.Tensor: 
+        self.model_.eval() 
+        packed, masks, rois, labels, group_ids, group_weights = self._unpack_batch(batch)
+
+        with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
+            feats = self._forward_feats(
+                packed, masks, rois, group_ids, group_weights, len(labels)
+            )
+            _, logits = self._forward_logits(feats)
+            probs     = self._logits_to_probs(logits) 
+            idx       = torch.argmax(probs, dim=1)
+
+        return torch.as_tensor(self.classes_, device=idx.device)[idx]
+
+    def predict_proba(self, batch) -> torch.Tensor: 
+        self.model_.eval() 
+        packed, masks, rois, labels, group_ids, group_weights = self._unpack_batch(batch)
+
+        with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
+            feats = self._forward_feats(
+                packed, masks, rois, group_ids, group_weights, len(labels)
+            )
+            _, logits = self._forward_logits(feats)
+            probs     = self._logits_to_probs(logits) 
+
+        return probs 
 
     def extract(self, X) -> NDArray: 
         loader = self._ensure_loader(X, shuffle=False)
         outs   = []
-
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader: 
-                packed, masks, rois, labels, *extra = batch
-                if packed.ndim == 3: 
-                    packed = packed[:, None, ...]
-                if masks.ndim == 3: 
-                    masks  = masks[:, None, ...]
-
-                if rois is not None and len(rois) == 0: 
-                    rois = None 
-
-                group_ids = group_weights = None 
-                if len(extra) >= 2: 
-                    group_ids, group_weights = extra[-2], extra[-1]
-
-                if self.categorical_input: 
-                    xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
-                else: 
-                    xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
-                mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
-    
-                feats  = self.model_.backbone(xb, mask=mb, rois=rois)
-                if group_ids is not None: 
-                    feats = self._aggregate_tiles(
-                        feats, group_ids, group_weights, len(labels), self.features
-                    )
-
-                emb = self.fc_(feats)
-                emb = self.act_(emb)
+                packed, masks, rois, labels, group_ids, group_weights = self._unpack_batch(batch)
+                feats = self._forward_feats(
+                    packed, masks, rois, group_ids, group_weights, len(labels)
+                )
+                emb, _ = self._forward_logits(feats)
                 outs.append(emb.cpu().numpy())
-
         return np.vstack(outs)
 
     def logits(self, X) -> NDArray: 
         loader = self._ensure_loader(X, shuffle=False)
         outs   = []
-
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader:
-                packed, masks, rois, labels, *extra = batch 
-                if packed.ndim == 3: 
-                    packed = packed[:, None, ...]
-                if masks.ndim == 3: 
-                    masks = masks[:, None, ...]
-
-                if rois is not None and len(rois) == 0: 
-                    rois = None 
-
-                group_ids = group_weights = None 
-                if len(extra) >= 2: 
-                    group_ids, group_weights = extra[-2], extra[-1]
-
-                if self.categorical_input: 
-                    xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
-                    mask_dtype = torch.float32
-                else: 
-                    xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
-                    mask_dtype = xb.dtype 
-
-                mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
-
-                feats = self.model_.backbone(xb, mask=mb, rois=rois)
-                if group_ids is not None: 
-                    feats = self._aggregate_tiles(
-                        feats, group_ids, group_weights, len(labels), self.features
-                    )
-
-                emb    = self.fc_(feats)
-                emb    = self.act_(emb)
-                logits = self.out_(self.drop_(emb))
+                packed, masks, rois, labels, group_ids, group_weights = self._unpack_batch(batch)
+                feats = self._forward_feats(
+                    packed, masks, rois, group_ids, group_weights, len(labels)
+                )
+                _, logits = self._forward_logits(feats)
                 outs.append(logits.cpu().numpy())
 
         return np.vstack(outs)
@@ -980,92 +967,20 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader: 
-                packed, masks, rois, labels, *extra = batch  
-                if packed.ndim == 3: 
-                    packed = packed[:, None, ...]
-                if masks.ndim == 3: 
-                    masks = masks[:, None, ...]
-
-                if rois is not None and len(rois) == 0:
-                    rois = None 
-
-                group_ids = group_weights = None 
-                if len(extra) >= 2: 
-                    group_ids, group_weights = extra[-2], extra[-1] 
-
-                if self.categorical_input: 
-                    xb = torch.as_tensor(packed, dtype=torch.uint8, device=self.device)
-                    mask_dtype = torch.float32
-                else: 
-                    xb = torch.as_tensor(packed, dtype=torch.float32, device=self.device)
-                    mask_dtype = xb.dtype 
-
-                mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
-
-                feats = self.model_.backbone(xb, mask=mb, rois=rois)
-                if group_ids is not None: 
-                    feats = self._aggregate_tiles(
-                        feats, group_ids, group_weights, len(labels), self.features
-                    )
-
+                packed, masks, rois, labels, group_ids, group_weights = self._unpack_batch(batch)
+                feats = self._forward_feats(
+                    packed, masks, rois, group_ids, group_weights, len(labels)
+                )
                 outs.append(feats.cpu().numpy())
-
         return np.vstack(outs)
 
-    def predict(self, batch) -> torch.Tensor: 
-        self.model_.eval() 
+    # -----------------------------------------------------
+    # Internal Helpers 
+    # -----------------------------------------------------
 
+    def _unpack_batch(self, batch): 
         packed, masks, rois, labels, *extra = batch 
 
-        if packed.ndim == 3: 
-            packed = packed[:, None, ...] 
-        if masks.ndim == 3: 
-            masks = masks[:, None, ...] 
-
-        if rois is not None and len(rois) == 0: 
-            rois = None 
-
-        group_ids = group_weights = None 
-        if len(extra) >= 2: 
-            group_ids, group_weights = extra[-2], extra[-1]
-
-        xb = torch.as_tensor(packed, device=self.device)
-        if xb.ndim == 4: 
-            xb = xb.contiguous(memory_format=torch.channels_last)
-
-        if self.categorical_input: 
-            if xb.dtype != torch.uint8: 
-                xb = xb.to(dtype=torch.uint8)
-            mask_dtype = torch.float32 
-        else: 
-            if xb.dtype != torch.float32: 
-                xb = xb.to(dtype=torch.float32)
-            mask_dtype = xb.dtype 
-
-        mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
-
-        with torch.amp.autocast("cuda", enabled=True): 
-            feats  = self.model_.backbone(xb, mask=mb, rois=rois)
-
-            if group_ids is not None: 
-                feats = self._aggregate_tiles(
-                    feats, 
-                    group_ids, 
-                    group_weights, 
-                    len(labels),
-                    self.features
-                )
-
-            logits = self.model_.head(feats)
-            probs  = torch.sigmoid(logits)
-            preds  = (probs > 0.5).sum(dim=1) 
-
-        return preds 
-
-    def predict_proba(self, batch) -> torch.Tensor: 
-        self.model_.eval() 
-
-        packed, masks, rois, labels, *extra = batch 
         if packed.ndim == 3: 
             packed = packed[:, None, ...]
         if masks.ndim == 3: 
@@ -1078,220 +993,115 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if len(extra) >= 2: 
             group_ids, group_weights = extra[-2], extra[-1]
 
-        xb = torch.as_tensor(packed, device=self.device)
+        return packed, masks, rois, labels, group_ids, group_weights 
+
+    def _prepare_inputs(self, packed, masks): 
+        xb = torch.as_tensor(packed, device=self.device, dtype=torch.float32)
         if xb.ndim == 4: 
             xb = xb.contiguous(memory_format=torch.channels_last)
+        mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
+        return xb, mb 
 
-        if xb.dtype != torch.float32: 
-            xb = xb.to(dtype=torch.float32)
-        mask_dtype = torch.float32 
+    def _forward_feats(self, packed, masks, rois, group_ids, group_weights, n_labels): 
+        xb, mb = self._prepare_inputs(packed, masks)
+        feats  = self.model_.backbone(xb, mask=mb, rois=rois)
 
-        mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+        if group_ids is not None: 
+            feats = self._aggregate_tiles(
+                feats, group_ids, group_weights, n_labels, self.features 
+            )
+        return feats 
 
-        with torch.amp.autocast("cuda", enabled=True): 
-            feats = self.model_.backbone(xb, mask=mb, rois=rois) 
-            if group_ids is not None: 
-                feats = self._aggregate_tiles(
-                    feats, group_ids, group_weights, len(labels), self.features
-                )
-            logits = self.model_.head(feats)
-            T      = getattr(self, "temperature_", 1.0)
-            probs  = self._logits_temperature_scaling(logits, temperature=T)
+    def _forward_logits(self, feats): 
+        emb    = self.fc_(feats)
+        emb    = self.act_(emb)
+        logits = self.out_(self.drop_(emb))
+        logits = self.model_.scaler(logits)
+        return emb, logits 
 
-        return probs 
+    def _process_batch(self, batch, *, with_supcon=True): 
+        if self.n_classes_ is None or self.classes_ is None: 
+            raise TypeError 
 
-    @staticmethod 
-    def _logits_temperature_scaling(
-        logits: torch.Tensor, 
-        temperature: float | torch.Tensor = 1.0
-    ) -> torch.Tensor: 
-        logits   = logits / torch.clamp(
-            torch.as_tensor(temperature, device=logits.device), 
-            min=1e-6
-        )
-        prob_gt = torch.sigmoid(logits) 
-        n, k    = prob_gt.shape 
-        probs   = torch.empty((n, k + 1), device=logits.device, dtype=logits.dtype) 
+        packed, masks, rois, labels, group_ids, group_weights = self._unpack_batch(batch)
+
+        y_np  = np.asarray(labels).reshape(-1)
+        y_idx = np.searchsorted(self.classes_, y_np)
+        yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
+
+        with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
+            feats = self._forward_feats(
+                packed, masks, rois, group_ids, group_weights, len(labels)
+            )
+            _, logits = self._forward_logits(feats)
+            proj      = self.model_.proj(feats) if with_supcon else None 
+
+            loss, loss_corn, loss_rps, loss_sup = self.loss_fn_(logits, proj, yb)
+
+        bsz = yb.size(0)
+        return loss, bsz, loss_corn, loss_rps, loss_sup 
+
+    def _logits_to_probs(self, logits):
+        prob_gt = torch.sigmoid(logits)
+        n, k    = prob_gt.shape
+        probs   = torch.empty((n, k + 1), device=logits.device, dtype=logits.dtype)
         probs[:, 0] = 1.0 - prob_gt[:, 0]
         for i in range(1, k): 
-            probs[:, i] = prob_gt[:, i - 1] - prob_gt[:, i] 
+            probs[:, i] = prob_gt[:, i - 1] - prob_gt[:, i]
         probs[:, -1] = prob_gt[:, -1]
         probs = torch.clamp(probs, min=1e-9)
         probs = probs / probs.sum(dim=1, keepdim=True)
         return probs 
 
-    def extract_with_logits(self, X) -> NDArray:
-        emb    = self.extract(X)
-        logits = self.logits(X)
-        return np.concatenate([emb, logits], axis=1)
-
-    def eval(self): 
-        if hasattr(self, "model_"): 
-            self.model_.eval() 
-        return self 
-
-    def _resolve_device(self, device: str | None): 
-        if device is not None: 
-            return torch.device(device)
-        return torch.device(str(device) if torch.cuda.is_available() else "cpu")
-
-    def _make_loader(self, dataset, shuffle: bool): 
-        pin = self.compute_strategy.device == "cuda" 
-        if self.compute_strategy.n_jobs == -1: 
-            num_workers = 8 
-        else: 
-            num_workers = min(self.compute_strategy.n_jobs, 8) 
-
-        base       = getattr(dataset, "dataset", dataset)
-        is_packed  = hasattr(base, "is_packed") and base.is_packed  
-
-        worker_override = getattr(base, "prefetch_workers", None)
-        if worker_override is not None: 
-            num_workers = int(worker_override)
-
-        batch_size = 1 if is_packed else self.batch_size 
-
-        prefetch_factor = 4 if num_workers > 0 else None 
-        pf_override     = getattr(base, "prefetch_factor", None)
-        if pf_override is not None and num_workers > 0: 
-            prefetch_factor = int(pf_override)
-
-        return DataLoader(
-            dataset, 
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=pin,
-            collate_fn=self.collate_fn,
-            persistent_workers=(num_workers > 0), 
-            prefetch_factor=prefetch_factor  
-        )
-
-    def _resolve_accum_steps(self, world_size, effective_batch):
-        world_size   = max(1, int(world_size))
-        local_global = max(1, int(effective_batch) * world_size)
-        return max(1, int(np.ceil(self.target_global_batch / local_global)))
-
-    def _ensure_loader(self, X, shuffle: bool): 
-        if isinstance(X, DataLoader): 
-            return X 
-        return self._make_loader(X, shuffle=shuffle)
-
-    def _split_loader(self, loader, y_full): 
-        run_es = self.early_stopping_rounds is not None and self.eval_fraction > 0 
-        if not run_es: 
-            return loader, None 
-
-        ds = getattr(loader, "dataset", None)
-        if ds is None or len(ds) < 2: 
-            return loader, None 
-
-        if y_full is None or len(y_full) != len(ds): 
-            return loader, None 
-
-        try: 
-            splitter = StratifiedShuffleSplit(
-                n_splits=1,
-                test_size=self.eval_fraction, 
-                random_state=self.random_state 
-            )
-            train_idx, val_idx = next(splitter.split(np.zeros(len(y_full)), y_full))
-            train_ds           = Subset(ds, train_idx)
-            val_ds             = Subset(ds, val_idx)
-        except ValueError:
-            n_val   = max(1, int(len(ds) * self.eval_fraction))
-            n_train = len(ds) - n_val 
-            if n_train < 1: 
-                return loader, None 
-
-            gen              = torch.Generator().manual_seed(self.random_state)
-            train_ds, val_ds = random_split(ds, [n_train, n_val], generator=gen)
-
-        train_loader     = self._make_loader(train_ds, shuffle=True)
-        val_loader       = self._make_loader(val_ds, shuffle=False)
-        return train_loader, val_loader 
-
-    def _build_model(self, in_channels: int): 
-        if self.n_classes_ is None: 
-            raise ValueError("n_classes not set before model build")
-
-        self.backbone_ = SpatialBackbone(
-            in_channels=in_channels,
-            categorical_input=self.categorical_input,
-            conv_channels=self.conv_channels,
-            kernel_size=self.kernel_size,
-            use_bn=self.use_bn,
-            roi_output_size=self.roi_output_size,
-            sampling_ratio=self.sampling_ratio,
-            aligned=self.aligned,
-            features=self.features
-        )
-        self.fc_       = nn.Linear(self.backbone_.out_dim, self.fc_dim)
-
-        self.act_      = nn.GELU()
-        self.drop_     = nn.Dropout(self.dropout)
-        self.out_      = nn.Linear(self.fc_dim, self.n_classes_ - 1)
-        self.head_     = nn.Sequential(self.fc_, self.act_, self.drop_, self.out_) 
-
-        self.proj_head_ = nn.Sequential(
-            nn.Linear(self.backbone_.out_dim, self.backbone_.out_dim), 
-            nn.GELU(), 
-            nn.Linear(self.backbone_.out_dim, 128)
-        )
-
-        self.model_          = nn.Module() 
-        self.model_.backbone = self.backbone_ 
-        self.model_.head     = self.head_ 
-        self.model_.proj     = self.proj_head_
-        self.model_.to(self.device)
-
-        if self.device.type == "cuda": 
-            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
-            self.model_.to(memory_format=torch.channels_last)
-
     def _aggregate_tiles(
-        self, 
-        feats, 
+        self,
+        feats,
         group_ids,
         group_weights,
         n_groups,
-        features: list[str] | None = None 
-    ): 
+        features: list[str] | None = None
+    ):
         '''
-        Aggregates concatenated, pooled sums, generalized means, and maxes across all ROIs 
-        computed by backbone 
+        Aggregates pooled features across ROIs for each group.
         '''
-
         gids     = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
         feats_f  = feats.to(dtype=torch.float32)
-        
-        if features is None: 
+
+        if features is None:
             features = ["logsum", "gem", "max", "entropy", "var"]
 
-        n_blocks = len(features)
-        dim      = feats_f.size(1) // n_blocks 
-
         parts = {}
-        for i, name in enumerate(features): 
-            parts[name] = feats_f[:, i*dim:(i+1)*dim]
+        if "logsum" in features or "gem" in features:
+            parts["logsum"] = feats_f
+            parts["gem"]    = feats_f
+        if "max" in features:
+            parts["max"] = feats_f
+        if "entropy" in features:
+            p = feats_f.clamp(min=1e-9)
+            parts["entropy"] = -(p * torch.log(p))
+        if "var" in features:
+            parts["var"] = feats_f * feats_f
 
-        if group_weights is None: 
-            w = torch.ones((feats_f.size(0), 1), device=feats_f.device, dtype=feats_f.dtype)
-            denom_min = 1.0 
-        else: 
+        dim = feats_f.shape[1]
+        if group_weights is None:
+            w = torch.ones((feats_f.shape[0], 1), device=feats_f.device, dtype=feats_f.dtype)
+            denom_min = 1.0
+        else:
             w = torch.as_tensor(
-                group_weights, dtype=feats_f.dtype, device=feats_f.device 
+                group_weights, 
+                dtype=feats_f.dtype, 
+                device=feats_f.device
             ).view(-1, 1)
-            denom_min = 1e-6 
+            denom_min = 1e-6
 
-        sum_w      = torch.zeros((n_groups, 1), device=feats_f.device)
+        sum_w = torch.zeros((n_groups, 1), device=feats_f.device)
         sum_w.index_add_(0, gids, w)
-        denom      = sum_w.clamp(min=denom_min)
-        has_group  = sum_w > 0
-        out_blocks = []
+        denom     = sum_w.clamp(min=denom_min)
+        has_group = sum_w > 0
 
-        for name in features: 
-            if name == "logsum": 
+        out_blocks = []
+        for name in features:
+            if name == "logsum":
                 sum_x = torch.expm1(parts[name]).clamp(min=0.0)
                 agg   = torch.zeros((n_groups, dim), device=feats_f.device)
                 agg.index_add_(0, gids, sum_x * w)
@@ -1314,10 +1124,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 agg.index_add_(0, gids, parts[name] * w)
                 agg = agg / denom
                 agg = torch.where(has_group, agg, torch.zeros_like(agg))
-            elif name == "var": 
+            elif name == "var":
                 agg = torch.zeros((n_groups, dim), device=feats_f.device)
-                agg.index_add_(0, gids, parts[name] * w) 
-                agg = agg / denom 
+                agg.index_add_(0, gids, parts[name] * w)
+                agg = agg / denom
                 agg = torch.where(has_group, agg, torch.zeros_like(agg))
             else:
                 raise ValueError(f"unknown pooling feature: {name}")
@@ -1327,167 +1137,135 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         return torch.cat(out_blocks, dim=1)
 
     def _eval_loss(self, loader): 
-        '''
-        Evaluation loss is corn loss, not the total loss from SupCon regularization. 
-        '''
         self.model_.eval() 
         total = 0.0 
         count = 0 
+
         with torch.no_grad(): 
             for batch in loader: 
-                _, bsz, lc, _ = self._process_batch(batch)
-                total    += lc.item() * bsz 
-                count    += bsz 
-
+                _, bsz, _, lrps, _ = self._process_batch(batch, with_supcon=False)
+                total += (lrps.item() / max(self.alpha_rps, 1e-9)) * bsz 
+                count += bsz 
         return total / max(count, 1)
 
-    def _fit_temperature(self, loader): 
+    def _build_model(self, in_channels: int): 
+        if self.n_classes_ is None: 
+            raise ValueError("n_classes not set before model build")
 
-        self.model_.eval() 
-        logits_all = []
-        y_all      = []
+        self.backbone_ = SpatialBackbone(
+            in_channels=in_channels,
+            conv_channels=self.conv_channels,
+            kernel_size=self.kernel_size,
+            use_bn=self.use_bn,
+            roi_output_size=self.roi_output_size,
+            sampling_ratio=self.sampling_ratio,
+            aligned=self.aligned,
+            features=self.features
+        )
+        self.fc_        = nn.Linear(self.backbone_.out_dim, self.fc_dim)
+        self.act_       = nn.GELU() 
+        self.drop_      = nn.Dropout(self.dropout)
+        self.out_       = nn.Linear(self.fc_dim, self.n_classes_ - 1)
+        self.head_      = nn.Sequential(self.fc_, self.act_, self.drop_, self.out_)
+        self.scaler_    = LearnableLogitScaling(initial_value=1.0)
 
-        with torch.no_grad(): 
-            for batch in loader: 
-                packed, masks, rois, labels, *extra = batch 
-                if packed.ndim == 3: 
-                    packed = packed[:, None, ...]
-                if masks.ndim == 3: 
-                    masks = masks[:, None, ...]
+        self.proj_head_ = nn.Sequential(
+            nn.Linear(self.backbone_.out_dim, self.backbone_.out_dim),
+            nn.GELU(),
+            nn.Linear(self.backbone_.out_dim, self.supcon_dim)
+        )
 
-                if rois is not None and len(rois) == 0: 
-                    rois = None 
+        self.model_          = nn.Module() 
+        self.model_.backbone = self.backbone_ 
+        self.model_.scaler   = self.scaler_ 
+        self.model_.head     = self.head_ 
+        self.model_.proj     = self.proj_head_ 
+        self.model_.to(self.device)
 
-                group_ids = group_weights = None 
-                if len(extra) >= 2: 
-                    group_ids, group_weights = extra[-2], extra[-1]
+        if self.device.type == "cuda": 
+            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
+            self.model_.to(memory_format=torch.channels_last)
 
-                xb = torch.as_tensor(packed, device=self.device)
-                if xb.ndim == 4: 
-                    xb = xb.contiguous(memory_format=torch.channels_last)
+    def _resolve_device(self, device: str | None): 
+        if device is not None: 
+            return torch.device(device)
+        return torch.device(str(device) if torch.cuda.is_available() else "cpu") 
 
-                if xb.dtype != torch.float32: 
-                    xb = xb.to(dtype=torch.float32)
-                mask_dtype = xb.dtype
+    def _make_loader(self, dataset, shuffle: bool):
+        pin = self.compute_strategy.device == "cuda"
+        if self.compute_strategy.n_jobs == -1:
+            num_workers = 8
+        else:
+            num_workers = min(self.compute_strategy.n_jobs, 8)
 
-                mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
+        base       = getattr(dataset, "dataset", dataset)
+        is_packed  = hasattr(base, "is_packed") and base.is_packed
 
-                y_np  = np.asarray(labels).reshape(-1)
-                y_idx = np.searchsorted(self.classes_, y_np)
-                yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
+        worker_override = getattr(base, "prefetch_workers", None)
+        if worker_override is not None:
+            num_workers = int(worker_override)
 
-                with torch.amp.autocast("cuda", enabled=True):
-                    feats = self.model_.backbone(xb, mask=mb, rois=rois)
-                    if group_ids is not None: 
-                        feats = self._aggregate_tiles(
-                            feats, group_ids, group_weights, len(labels), self.features
-                        )
-                    logits = self.model_.head(feats)
+        batch_size = 1 if is_packed else self.batch_size
 
-                logits_all.append(logits.detach())
-                y_all.append(yb.detach())
+        prefetch_factor = 4 if num_workers > 0 else None
+        pf_override     = getattr(base, "prefetch_factor", None)
+        if pf_override is not None and num_workers > 0:
+            prefetch_factor = int(pf_override)
 
-        logits_all = torch.cat(logits_all, dim=0)
-        y_all      = torch.cat(y_all, dim=0)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin,
+            collate_fn=self.collate_fn,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=prefetch_factor
+        )
 
-        log_T = torch.zeros((), device=logits_all.device, requires_grad=True)
-        opt   = torch.optim.LBFGS([log_T], lr=0.1, max_iter=50)
+    def _resolve_accum_steps(self, world_size, effective_batch):
+        world_size   = max(1, int(world_size))
+        local_global = max(1, int(effective_batch) * world_size)
+        return max(1, int(np.ceil(self.target_global_batch / local_global)))
 
-        def closure():
-            opt.zero_grad()
-            T     = torch.exp(log_T) 
-            probs = self._logits_temperature_scaling(logits_all, temperature=T)
-            p     = probs.gather(1, y_all.view(-1, 1)).clamp_min(1e-12)
-            loss  = -torch.log(p).mean() 
-            loss.backward() 
-            return loss 
-
-        opt.step(closure)
-        self.temperature_ = float(torch.exp(log_T).detach().cpu())
-
-    def _process_batch(self, batch):
-        if self.n_classes_ is None or self.classes_ is None:
-            raise TypeError
-
-        packed, masks, rois, labels, *extra = batch
-        if packed.ndim == 3: 
-            packed = packed[:, None, ...]
-        if masks.ndim == 3: 
-            masks  = masks[:, None, ...]
-
-        if rois is not None and len(rois) == 0: 
-            rois = None 
-
-        group_ids = group_weights = None 
-        if len(extra) >= 2: 
-            group_ids, group_weights = extra[-2], extra[-1]
-
-        xb = torch.as_tensor(packed, device=self.device)
-        if xb.ndim == 4: 
-            xb = xb.contiguous(memory_format=torch.channels_last)
-
-        if self.categorical_input: 
-            if xb.dtype != torch.uint8: 
-                xb = xb.to(dtype=torch.uint8)
-            mask_dtype = torch.float32 
-        else: 
-            if xb.dtype != torch.float32: 
-                xb = xb.to(dtype=torch.float32)
-            mask_dtype = xb.dtype 
-
-        mb = torch.as_tensor(masks, dtype=mask_dtype, device=self.device)
-
-        if xb.shape[-2:] != mb.shape[-2:]: 
-            raise RuntimeError(f"pre-backbone mismatch: xb={xb.shape}, mb={mb.shape}")
-    
-        y_np  = np.asarray(labels).reshape(-1)
-        y_idx = np.searchsorted(self.classes_, y_np)
-        yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
-
-        with torch.amp.autocast("cuda", enabled=True): 
-            feats  = self.model_.backbone(xb, mask=mb, rois=rois)
-
-            if group_ids is not None: 
-                feats = self._aggregate_tiles(
-                    feats, 
-                    group_ids, 
-                    group_weights, 
-                    len(labels),
-                    self.features
-                )
-            logits = self.model_.head(feats)
-            loss_corn = self.loss_fn_(logits, yb)
-
-            proj   = self.model_.proj(feats)
-            proj   = F.normalize(proj, dim=1)
-
-            if not hasattr(self, "supcon_fn_"): 
-                self.supcon_fn_ = SupConLoss(temperature=0.1)
-
-            loss_supcon = self.supcon_fn_(proj, yb)
-
-            loss = loss_corn + (self.lambda_supcon * loss_supcon)
-
-        bsz    = yb.size(0)
-        return loss, bsz, loss_corn, loss_supcon 
-
-    def _as_eval_loader(self, X): 
+    def _ensure_loader(self, X, shuffle: bool):
         if isinstance(X, DataLoader):
-            return DataLoader(
-                X.dataset, 
-                batch_size=X.batch_size,
-                shuffle=False,
-                num_workers=X.num_workers,
-                pin_memory=X.pin_memory,
-                drop_last=False,
-                collate_fn=X.collate_fn
-            )
-        return X 
+            return X
+        return self._make_loader(X, shuffle=shuffle)
 
-    @staticmethod 
-    def _ordinal_targets(y: torch.Tensor, n_classes: int) -> torch.Tensor: 
-        thresholds = torch.arange(n_classes - 1, device=y.device).view(1, -1)
-        return (y.view(-1, 1) > thresholds).to(dtype=torch.float32)
+    def _split_loader(self, loader, y_full):
+        run_es = self.early_stopping_rounds is not None and self.eval_fraction > 0
+        if not run_es:
+            return loader, None
+
+        ds = getattr(loader, "dataset", None)
+        if ds is None or len(ds) < 2:
+            return loader, None
+
+        if y_full is None or len(y_full) != len(ds):
+            return loader, None
+
+        try:
+            splitter = StratifiedShuffleSplit(
+                n_splits=1,
+                test_size=self.eval_fraction,
+                random_state=self.random_state
+            )
+            train_idx, val_idx = next(splitter.split(np.zeros(len(y_full)), y_full))
+            train_ds           = Subset(ds, train_idx)
+            val_ds             = Subset(ds, val_idx)
+        except ValueError:
+            n_val   = max(1, int(len(ds) * self.eval_fraction))
+            n_train = len(ds) - n_val
+            if n_train < 1:
+                return loader, None
+
+            gen              = torch.Generator().manual_seed(self.random_state)
+            train_ds, val_ds = random_split(ds, [n_train, n_val], generator=gen)
+
+        train_loader = self._make_loader(train_ds, shuffle=True)
+        val_loader   = self._make_loader(val_ds, shuffle=False)
+        return train_loader, val_loader
 
 # ---------------------------------------------------------
 # Scalar Embedding Learner 
