@@ -516,8 +516,18 @@ def _spatial_eval_fold(
     y_true = np.concatenate(y_true_list) 
     probs = np.concatenate(prob_list) 
 
+    class_weights = None 
+    if hasattr(model, "class_counts_") and model.class_counts_ is not None: 
+        counts = np.asarray(model.class_counts_) 
+        if counts.size == len(model.classes_): 
+            class_weights = counts.max() / np.clip(counts, 1, None)
+
     rps = ranked_probability_score(
-        y_true, probs, class_labels=model.classes_, normalize=True
+        y_true, 
+        probs, 
+        class_labels=model.classes_, 
+        normalize=True, 
+        class_weights=class_weights
     )
 
     del model 
