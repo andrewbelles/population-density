@@ -195,6 +195,7 @@ class SpatialBackbone(nn.Module):
         use_bn: bool = True, 
         roi_output_size: int | tuple[int, int] = 7, 
         sampling_ratio: int = 2, 
+        batch_size: int = 32, 
         aligned: bool = True,
         features: list[str] | None = None         
     ): 
@@ -204,6 +205,7 @@ class SpatialBackbone(nn.Module):
         self.spatial_scale     = 1.0 
         self.roi_output_size   = roi_output_size
         self.sampling_ratio    = sampling_ratio 
+        self.batch_size        = batch_size 
         self.aligned           = aligned 
         if features is None: 
             features = ["logsum", "gem", "max", "entropy", "var"]
@@ -253,7 +255,7 @@ class SpatialBackbone(nn.Module):
         sizes    = {(x.shape[-2], x.shape[-1])}
         mask_pyr = self._build_masks(mask, sizes, x.device) if mask is not None else None  
 
-        MICRO_BATCH_SIZE = 16 
+        MICRO_BATCH_SIZE = self.batch_size if self.batch_size > 1 else 128   
         n_tiles = x.shape[0]
 
         if rois is None: 

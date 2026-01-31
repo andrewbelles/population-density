@@ -201,12 +201,14 @@ class HybridOrdinalLoss(nn.Module):
         targets  = self.corn_fn_._ordinal_targets(labels, self.n_classes_)
         per_sample_rps = torch.sum((cdf - targets)**2, dim=1)
 
+        K = max(self.n_classes_ - 1, 1)
+        per_sample_rps /= float(K) 
+
         if self.class_weights is not None: 
             sample_weights = self.class_weights.to(logits.device).gather(0, labels)
             loss_rps = (per_sample_rps * sample_weights).sum() / (sample_weights.sum() + 1e-9)
         else: 
             loss_rps = per_sample_rps.mean() 
-
 
         if self.beta > 0 and embeddings is not None: 
             norm_emb = F.normalize(embeddings, dim=1)

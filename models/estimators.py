@@ -1065,76 +1065,23 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         Aggregates pooled features across ROIs for each group.
         '''
         gids     = torch.as_tensor(group_ids, dtype=torch.int64, device=feats.device)
-        feats_f  = feats.to(dtype=torch.float32)
+        x = feats.to(dtype=torch.float32)
 
-        if features is None:
-            features = ["logsum", "gem", "max", "entropy", "var"]
-
-        parts = {}
-        if "logsum" in features or "gem" in features:
-            parts["logsum"] = feats_f
-            parts["gem"]    = feats_f
-        if "max" in features:
-            parts["max"] = feats_f
-        if "entropy" in features:
-            p = feats_f.clamp(min=1e-9)
-            parts["entropy"] = -(p * torch.log(p))
-        if "var" in features:
-            parts["var"] = feats_f * feats_f
-
-        dim = feats_f.shape[1]
         if group_weights is None:
-            w = torch.ones((feats_f.shape[0], 1), device=feats_f.device, dtype=feats_f.dtype)
+            w = torch.ones((x.shape[0], 1), device=x.device, dtype=x.dtype)
             denom_min = 1.0
         else:
-            w = torch.as_tensor(
-                group_weights, 
-                dtype=feats_f.dtype, 
-                device=feats_f.device
-            ).view(-1, 1)
+            w = torch.as_tensor(group_weights, dtype=x.dtype, device=x.device).view(-1, 1)
             denom_min = 1e-6
 
-        sum_w = torch.zeros((n_groups, 1), device=feats_f.device)
+        sum_w = torch.zeros((n_groups, 1), device=x.device)
         sum_w.index_add_(0, gids, w)
-        denom     = sum_w.clamp(min=denom_min)
-        has_group = sum_w > 0
+        denom = sum_w.clamp(min=denom_min)
 
-        out_blocks = []
-        for name in features:
-            if name == "logsum":
-                sum_x = torch.expm1(parts[name]).clamp(min=0.0)
-                agg   = torch.zeros((n_groups, dim), device=feats_f.device)
-                agg.index_add_(0, gids, sum_x * w)
-                agg = torch.log1p(agg / denom)
-                agg = torch.where(has_group, agg, torch.zeros_like(agg))
-            elif name == "gem":
-                agg = torch.zeros((n_groups, dim), device=feats_f.device)
-                agg.index_add_(0, gids, parts[name] * w)
-                agg = agg / denom
-                agg = torch.where(has_group, agg, torch.zeros_like(agg))
-            elif name == "max":
-                agg = torch.full(
-                    (n_groups, dim), torch.finfo(parts[name].dtype).min, device=feats_f.device
-                )
-                idx = gids.view(-1, 1).expand(-1, dim)
-                agg.scatter_reduce_(0, idx, parts[name], reduce="amax", include_self=True)
-                agg = torch.where(has_group, agg, torch.zeros_like(agg))
-            elif name == "entropy":
-                agg = torch.zeros((n_groups, dim), device=feats_f.device)
-                agg.index_add_(0, gids, parts[name] * w)
-                agg = agg / denom
-                agg = torch.where(has_group, agg, torch.zeros_like(agg))
-            elif name == "var":
-                agg = torch.zeros((n_groups, dim), device=feats_f.device)
-                agg.index_add_(0, gids, parts[name] * w)
-                agg = agg / denom
-                agg = torch.where(has_group, agg, torch.zeros_like(agg))
-            else:
-                raise ValueError(f"unknown pooling feature: {name}")
-
-            out_blocks.append(agg.to(dtype=feats.dtype))
-
-        return torch.cat(out_blocks, dim=1)
+        agg = torch.zeros((n_groups, x.shape[1]), device=x.device, dtype=x.dtype)
+        agg.index_add_(0, gids, x * w)
+        agg = agg / denom
+        return agg.to(dtype=feats.dtype)
 
     def _eval_loss(self, loader): 
         self.model_.eval() 
@@ -1146,6 +1093,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 _, bsz, _, lrps, _ = self._process_batch(batch, with_supcon=False)
                 total += (lrps.item() / max(self.alpha_rps, 1e-9)) * bsz 
                 count += bsz 
+
         return total / max(count, 1)
 
     def _build_model(self, in_channels: int): 
@@ -1158,6 +1106,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             kernel_size=self.kernel_size,
             use_bn=self.use_bn,
             roi_output_size=self.roi_output_size,
+            batch_size=self.batch_size,
             sampling_ratio=self.sampling_ratio,
             aligned=self.aligned,
             features=self.features
@@ -1266,6 +1215,14 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         train_loader = self._make_loader(train_ds, shuffle=True)
         val_loader   = self._make_loader(val_ds, shuffle=False)
         return train_loader, val_loader
+
+    def _as_eval_loader(self, X): 
+        if isinstance(X, DataLoader): 
+            ds = getattr(X, "dataset", None)
+            if ds is None: 
+                return X 
+            return self._make_loader(ds, shuffle=False)
+        return self._make_loader(X, shuffle=False)
 
 # ---------------------------------------------------------
 # Scalar Embedding Learner 

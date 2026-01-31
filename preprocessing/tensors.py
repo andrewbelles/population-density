@@ -269,25 +269,56 @@ class SpatialTileLoader:
         root_dir: str, 
         tile_hw=(256, 256), 
         *,
-        min_mask_frac: float = 0.0 # if mask % < frac then discards 
+        min_mask_frac: float = 0.0, # if mask % < frac then discards 
+        cache_tiles: bool = True, 
+        cache_dir: str | None = None, 
+        cache_compress: bool = False,
+        max_tiles_per_sample: int = None, 
+        tile_sample_frac: float | None = None, 
+        tile_sample_seed: int | None = None
     ):
-        self.is_packed     = False 
-        self.is_tiles      = True 
-        self.root_dir      = Path(root_dir)
-        self.tile_hw       = tile_hw 
-        self.min_mask_frac = float(min_mask_frac)
+        self.is_packed      = False 
+        self.is_tiles       = True 
+        self.root_dir       = Path(root_dir)
+        self.tile_hw        = tile_hw 
+        self.min_mask_frac  = float(min_mask_frac)
  
+        self.cache_tiles    = bool(cache_tiles)
+        self.cache_compress = bool(cache_compress)
+        if cache_dir is None: 
+            self.cache_dir = self.root_dir / "tile_cache" 
+        else: 
+            self.cache_dir = Path(cache_dir)
+
+        if self.cache_tiles: 
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         manifest = self.root_dir / "manifest.jsonl"
         self.records = [
             json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
             if line.strip() 
         ]
 
+        self.max_tiles_per_sample = max_tiles_per_sample 
+        self.tile_sample_frac     = tile_sample_frac 
+        self.tile_sample_seed     = tile_sample_seed
+
     def __len__(self): 
         return len(self.records)
 
     def __getitem__(self, idx):
         rec = self.records[idx]
+        
+        cache_path = None 
+        if self.cache_tiles: 
+            stem       = Path(rec["path"]).stem 
+            cache_path = self.cache_dir / f"{idx:06d}_{stem}_tiles.npz"
+            if cache_path.exists(): 
+                with np.load(cache_path) as npz: 
+                    tiles = npz["tiles"]
+                    masks = npz["masks"]
+                return tiles, masks, int(rec["label"]), rec["fips"]
+
         with np.load(self.root_dir / rec["path"]) as npz: 
             spatial = npz["spatial"]
             mask    = npz["mask"]
@@ -344,7 +375,38 @@ class SpatialTileLoader:
             tiles = np.stack(tiles, axis=0)
             masks = np.stack(masks, axis=0)
 
+        if self.cache_tiles and cache_path is not None: 
+            tmp = cache_path.with_suffix(".tmp.npz")
+            if self.cache_compress:
+                np.savez_compressed(tmp, tiles=tiles, masks=masks)
+            else: 
+                np.savez(tmp, tiles=tiles, masks=masks)
+            tmp.replace(cache_path)
+
         return tiles, masks, int(rec["label"]), rec["fips"]
+
+    def subsample(self, tiles, masks): 
+        n = tiles.shape[0]
+
+        if n == 0: 
+            return tiles, masks 
+
+        keep = None 
+
+        if self.tile_sample_frac is not None: 
+            if not (0.0 < self.tile_sample_frac <= 1.0): 
+                raise ValueError("tile_sample_frac must be in (0, 1]")
+            keep = max(1, int(np.floor(n * self.tile_sample_frac)))
+
+        if self.max_tiles_per_sample is not None: 
+            keep = min(keep, self.max_tiles_per_sample) if keep is not None else self.max_tiles_per_sample
+
+        if keep is None or keep >= n: 
+            return tiles, masks 
+
+        rng = np.random.default_rng(self.tile_sample_seed)
+        idx = rng.choice(n, size=keep, replace=False)
+        return tiles[idx], masks[idx]
 
 # ---------------------------------------------------------
 # Tensor Dataset Parent Class 

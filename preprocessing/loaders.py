@@ -992,7 +992,7 @@ def load_spatial_roi_manifest(
     *, 
     canvas_hw: tuple[int, int] = (512, 512), 
     bag_tiles: bool = False, 
-    tile_hw: tuple[int, int] = (256, 256),
+    tile_hw: tuple[int, int] = (512, 512),
     cache_mb: int | None = None, 
     cache_items: int | None = None 
 ) -> SpatialDatasetDict:
@@ -1007,7 +1007,13 @@ def load_spatial_roi_manifest(
         raise ValueError(f"empty manifest: {manifest}")
 
     if bag_tiles: 
-        ds          = SpatialTileLoader(root_dir, tile_hw=tile_hw) 
+        ds          = SpatialTileLoader(
+            root_dir, 
+            tile_hw=tile_hw,
+            cache_tiles=True,
+            max_tiles_per_sample=64,
+            tile_sample_frac=None, 
+        ) 
         labels      = np.asarray([r["label"] for r in ds.records], dtype=np.int64)
         fips        = np.asarray([r["fips"] for r in ds.records], dtype="U5")
         coords      = np.zeros((labels.shape[0], 2), dtype=np.float64)

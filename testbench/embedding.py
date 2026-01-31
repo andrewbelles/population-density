@@ -247,7 +247,7 @@ def _spatial_opt(
     root_dir: str, 
     model_key: str, 
     canvas_hw: tuple[int, int] = (512, 512), 
-    tile_hw: tuple[int, int] = (256, 256), 
+    tile_hw: tuple[int, int] = (512, 512), 
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
@@ -261,11 +261,19 @@ def _spatial_opt(
     factory = make_spatial_sfe(compute_strategy=strategy)
     factory = with_spatial_channels(factory, spatial)
 
+    is_packed = getattr(spatial["dataset"], "is_packed", False)
+
+    def _spatial_space(trial):
+        params = define_spatial_space(trial)
+        if is_packed: 
+            params["target_global_batch"] = 1 
+        return params 
+
     evaluator = SpatialEvaluator(
         filepath=root_dir,
         loader_func=loader,
         model_factory=factory,
-        param_space=define_spatial_space,
+        param_space=_spatial_space,
         compute_strategy=strategy,
         task=OPT_TASK,
         config=cv_config(folds, random_state)
@@ -545,7 +553,7 @@ def test_viirs_opt(
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
     canvas_hw: tuple[int, int] = (512, 512), 
-    tile_hw: tuple[int, int] = (256, 256), 
+    tile_hw: tuple[int, int] = (512, 512), 
     bag_tiles: bool = False, 
     trials: int = 50, 
     folds: int = 2, 
