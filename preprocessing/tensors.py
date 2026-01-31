@@ -1198,7 +1198,7 @@ def main():
     parser.add_argument("--counties-path", default=project_path(
         "data", "geography", "county_shapefile", "tl_2020_us_county.shp"))
     parser.add_argument("--labels-path", default=project_path(
-        "data", "nchs", "nchs_classification.csv"))
+        "data", "nchs", "nchs_classification_2013.csv"))
 
     parser.add_argument("--out-root", default=project_path("data", "tensors"))
     parser.add_argument("--viirs-out", default=None)
