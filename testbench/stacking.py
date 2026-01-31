@@ -114,7 +114,7 @@ STACKED_PASSTHROUGH_PROBS = project_path("data", "results", "final_stacked_passt
 STACKING_BASE_KEY        = "Stacking"
 STACKING_PASSTHROUGH_KEY = "StackingPassthrough"
 
-MODELS = ("Logistic", "SVM")
+MODELS = ("SVM",)
 
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 

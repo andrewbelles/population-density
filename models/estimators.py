@@ -11,6 +11,7 @@ import numpy as np
 
 import multiprocessing as mp
 
+from sklearn.preprocessing import StandardScaler
 import time, copy, time, sys, torch   
 
 from torch.cuda import temperature
@@ -23,7 +24,8 @@ from numpy.typing            import NDArray
 from sklearn.base            import (
     BaseEstimator, 
     RegressorMixin, 
-    ClassifierMixin, 
+    ClassifierMixin,
+    check_is_fitted, 
     clone
 )
 
@@ -62,8 +64,10 @@ from torch.utils.data        import (
 from models.networks         import SpatialBackbone
 
 from sklearn.model_selection import (
+    StratifiedGroupKFold,
     StratifiedShuffleSplit,
-    StratifiedKFold
+    StratifiedKFold,
+    cross_val_predict
 )
 
 from sklearn.metrics         import (
@@ -465,19 +469,22 @@ class LogisticWrapper(BaseEstimator, ClassifierMixin):
     def __init__(
         self, 
         C: float = 1.0, 
-        max_iter: int = 1000, 
+        max_iter: int = 5000, 
+        solver: str = "lbfgs", 
         random_state: int | None = None, 
         **kwargs 
     ): 
-        self.C = C 
-        self.max_iter = max_iter 
+        self.C            = C 
+        self.max_iter     = max_iter 
+        self.solver       = solver 
         self.random_state = random_state 
-        self.kwargs = kwargs 
+        self.kwargs       = kwargs 
 
     def fit(self, X, y): 
         self.model_ = LogisticRegression(
             C=self.C ,
             max_iter=self.max_iter ,
+            solver=self.solver, 
             random_state=self.random_state ,
             **self.kwargs
         )
@@ -504,23 +511,35 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         class_weight: str | dict | None = None, 
         random_state: int | None = None, 
         ordinal: bool = True, 
+        calibration_cv: int = 5, 
+        calibration_max_iter: int = 5000, 
+        calibration_solver: str = "newton-cg", 
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
         **kwargs
     ): 
         self.C = C 
-        self.kernel       = kernel 
-        self.gamma        = gamma 
-        self.probability  = probability 
-        self.class_weight = class_weight 
-        self.random_state = random_state 
-        self.ordinal      = ordinal 
-        self.kwargs       = kwargs
+        self.kernel         = kernel 
+        self.gamma          = gamma 
+        self.probability    = probability 
+        self.class_weight   = class_weight 
+        self.random_state   = random_state 
+        self.ordinal        = ordinal 
+        self.kwargs         = kwargs
 
-        self.model_       = None 
-        self.models_      = None 
-        self.classes_     = None 
+        self.model_         = None 
+        self.models_        = None 
+        self.classes_       = None 
 
+        self.calibration_scaler_  = None 
+        self.calibrator_          = None 
+        self.calibration_cv       = calibration_cv
+        self.calibration_max_iter = calibration_max_iter 
+        self.calibration_solver   = calibration_solver
+
+        self.compute_strategy = compute_strategy 
 
     def fit(self, X, y, coords=None): 
+        X             = np.asarray(X, dtype=np.float64)
         y             = np.asarray(y).reshape(-1)
         self.classes_ = np.sort(np.unique(y))
 
@@ -552,7 +571,7 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
                 C=self.C, 
                 kernel=self.kernel, 
                 gamma=self.gamma, 
-                probability=True,
+                probability=False,
                 class_weight=self.class_weight,
                 random_state=self.random_state,
                 **self.kwargs
@@ -560,52 +579,89 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
             clf.fit(X, y_bin)
             self.models_.append(clf) 
 
+        if self.probability:
+
+            cv = StratifiedKFold(
+                n_splits=self.calibration_cv,
+                shuffle=True,
+                random_state=self.random_state
+            )
+
+            X_scores = np.zeros((X.shape[0], len(self.models_)), dtype=np.float64)
+
+            for k, model in enumerate(self.models_):
+                y_bin = (y_idx > k).astype(np.int64)
+                cv_clf = clone(model)
+                scores = cross_val_predict(
+                    cv_clf,
+                    X,
+                    y_bin,
+                    cv=cv,
+                    method="decision_function",
+                    n_jobs=self.compute_strategy.n_jobs
+                )
+                scores = np.asarray(scores)
+                if scores.ndim > 1: 
+                    scores = scores[:, -1]
+                X_scores[:, k] = scores 
+
+            self.calibration_scaler_ = StandardScaler() 
+            X_scores_scaled          = self.calibration_scaler_.fit_transform(X_scores)
+
+            self.calibrator_ = LogisticRegression(
+                solver=self.calibration_solver,
+                penalty=None, 
+                random_state=self.random_state,
+                max_iter=self.calibration_max_iter
+            )
+
+            counts  = np.bincount(y_idx, minlength=len(self.classes_))
+            weights = counts.max() / np.clip(counts, 1, None)
+            sample_weight = weights[y_idx]
+
+            self.calibrator_.fit(X_scores_scaled, y, sample_weight=sample_weight) 
+
         return self 
 
     def predict(self, X, coords=None):
+        check_is_fitted(self, ["classes_"])
+
         if not self.ordinal: 
-            if self.model_ is None or self.classes_ is None: 
-                raise ValueError("must fit model and compute classes")
             return self.model_.predict(X)
 
-        if self.models_ is None or self.classes_ is None: 
-            raise ValueError("must fit frank-hall models and compute classes")
+        if self.probability and self.calibrator_ is not None: 
+            probs = self.predict_proba(X)
+            idx   = np.argmax(probs, axis=1)
+            return self.classes_[idx]
+        else: 
+            X     = np.asarray(X, dtype=np.float64)
+            votes = np.zeros(X.shape[0], dtype=np.int64)
+            for clf in self.models_:
+                votes += clf.predict(X)
 
-        probs = self._ordinal_probs(X)
-        idx   = np.argmax(probs, axis=1) 
-        return self.classes_[idx]
+            return self.classes_[votes]
 
     def predict_proba(self, X, coords=None):
         if not self.probability: 
             raise AttributeError("SVMClassifier was instantiated with probability=False")
+
         if not self.ordinal:
-            if self.model_ is None: 
-                raise ValueError("model must be fit")
             return self.model_.predict_proba(X)
 
-        if self.models_ is None or self.classes_ is None: 
-            raise ValueError("must fit frank-hall models and compute classes")
-        return self._ordinal_probs(X)
+        check_is_fitted(self, ["calibrator_", "models_", "calibration_scaler_"])
 
-    def _ordinal_probs(self, X): 
-        if self.models_ is None: 
-            raise ValueError("must fit frank-hall models")
+        X = np.asarray(X, dtype=np.float64)
 
-        prob_gt = np.stack(
-            [m.predict_proba(X)[:, 1] for m in self.models_],
-            axis=1
-        )
+        n_samples = X.shape[0]
+        n_models  = len(self.models_)
+        scores    = np.zeros((n_samples, n_models), dtype=np.float64)
 
-        n, k  = prob_gt.shape 
-        probs = np.empty((n, k + 1), dtype=np.float64)
-        probs[:, 0] = 1.0 - prob_gt[:, 0]
-        for j in range(1, k): 
-            probs[:, j] = prob_gt[:, j - 1] - prob_gt[:, j]
-        probs[:, -1] = prob_gt[:, -1]
+        for k, clf in enumerate(self.models_):
+            scores[:, k] = clf.decision_function(X)
 
-        probs = np.clip(probs, 1e-9, None)
-        probs = probs / probs.sum(axis=1, keepdims=True)
-        return probs 
+        scores_scaled = self.calibration_scaler_.transform(scores)
+        
+        return self.calibrator_.predict_proba(scores_scaled)
 
 # ---------------------------------------------------------
 # Supervised Feature Extraction based Models  
