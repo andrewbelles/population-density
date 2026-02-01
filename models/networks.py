@@ -22,11 +22,19 @@ import torchvision.ops as tops
 import torch.utils.checkpoint as cp
 
 
-def best_num_groups(ch: int, max_groups: int = 32) -> int: 
-    for g in (32, 16, 8, 4, 2, 1): 
-        if g <= max_groups and ch % g == 0: 
-            return g 
-    return 1 
+def best_num_groups(
+    ch: int, 
+    max_groups: int = 32, 
+    min_cpg: int = 8, 
+    target_cpg: int = 16
+) -> int:
+    candidates = [g for g in range(1, max_groups + 1) if ch % g == 0]
+    if not candidates:
+        return 1
+    viable = [g for g in candidates if (ch // g) >= min_cpg]
+    if not viable:
+        viable = candidates
+    return min(viable, key=lambda g: abs((ch // g) - target_cpg))
 
 
 class MaskedGroupNorm(nn.Module): 
@@ -196,6 +204,7 @@ class SpatialBackbone(nn.Module):
         roi_output_size: int | tuple[int, int] = 7, 
         sampling_ratio: int = 2, 
         batch_size: int = 32, 
+        use_channels_last: bool = False, 
         aligned: bool = True,
         features: list[str] | None = None         
     ): 
@@ -217,6 +226,7 @@ class SpatialBackbone(nn.Module):
         self.categorical_embed_dim   = categorical_embed_dim
         self.categorical_cardinality = (categorical_cardinality or 
                                         (in_channels if in_channels > 1 else 8))
+        self.use_channels_last       = use_channels_last
         
         if self.categorical_input: 
             self.embedding = nn.Embedding(self.categorical_cardinality + 1,
@@ -336,7 +346,7 @@ class SpatialBackbone(nn.Module):
         m = self.prep_mask(x, mask)
         m = m.to(dtype=feats.dtype)
 
-        chunk_size    = 16 
+        chunk_size    = 128 
         pooled_chunks = []
         mask_chunks   = []
     
@@ -364,57 +374,33 @@ class SpatialBackbone(nn.Module):
         return self.masked_pooling_head(pooled, mask_pooled, features=self.features)
 
     def _run_chunk(self, chunk, mask=None): 
-        if self.categorical_input: 
-            x_idx = chunk.squeeze(1).long().clamp(0, self.categorical_cardinality)
 
-            if mask is None: 
-                mask = (x_idx > 0).unsqueeze(1).to(device=chunk.device)
+        if mask is not None: 
+            mask = self.prep_mask(chunk, mask)
+
+        if not chunk.is_contiguous():
+            chunk = chunk.contiguous() 
+
+        def _run_segment(x, m, blocks): 
+            for block in blocks: 
+                x, _ = block(x, m)
+            return x 
+
+        SEGMENT_SIZE = 4 
+        segments     = [self.net[i:i + SEGMENT_SIZE] 
+                        for i in range(0, len(self.net), SEGMENT_SIZE)]
+        
+        for segment in segments: 
+            if self.training: 
+                chunk = cp.checkpoint(
+                    lambda x, m: _run_segment(x, m, segment), 
+                    chunk, 
+                    mask, 
+                    use_reentrant=True, 
+                    preserve_rng_state=False
+                )
             else: 
-                if mask.ndim == 3: 
-                    mask = mask.unsqueeze(1)
-                mask = mask.to(device=chunk.device)
-                if mask.shape[-2:] != x_idx.shape[-2:]:
-                    mask = F.interpolate(
-                        mask.to(dtype=chunk.dtype), 
-                        size=x_idx.shape[-2:], 
-                        mode="nearest"
-                    )
-                    mask = mask > 0
-                mask = mask & (x_idx > 0).unsqueeze(1)
-
-            emb   = self.embedding(x_idx)
-            chunk = emb.permute(0, 3, 1, 2).contiguous(memory_format=torch.channels_last) 
-
-            if mask is not None: 
-                chunk = chunk * mask 
-
-        else: 
-            if mask is not None: 
-                mask = self.prep_mask(chunk, mask)
-
-            if not chunk.is_contiguous(memory_format=torch.channels_last):
-                chunk = chunk.contiguous(memory_format=torch.channels_last)
-
-        def _run_block(block, x, mask, training): 
-            if not training: 
-                return block(x, mask) 
-
-            def _ckpt_wrapper(inp, m):
-                out, _ = block(inp, m)
-                return out 
-
-            x = cp.checkpoint(
-                _ckpt_wrapper,
-                x,
-                mask,
-                use_reentrant=True,
-                preserve_rng_state=False
-            )
-
-            return x, mask 
-
-        for block in self.net: 
-            chunk, mask = _run_block(block, chunk, mask, self.training)
+                chunk = _run_segment(chunk, mask, segment)
 
         return chunk
 

@@ -351,11 +351,13 @@ def _masked_pooling_kernel(
     mask_offset = n * HW 
 
     acc_sum_pos = tl.zeros((), dtype=tl.float32)
-    acc_pow     = tl.zeros((), dtype=tl.float32)
-    acc_ent     = tl.zeros((), dtype=tl.float32)
+    acc_sq_pos  = tl.zeros((), dtype=tl.float32) # For Variance
+    acc_pow     = tl.zeros((), dtype=tl.float32) # For GEM
+    acc_ent     = tl.zeros((), dtype=tl.float32) # For Entropy
     acc_cnt     = tl.zeros((), dtype=tl.float32)
     acc_max     = tl.full((), float("-inf"), dtype=tl.float32)
 
+    # SINGLE LOOP: Load data ONCE
     for k in range(0, HW, BLOCK): 
         offset = k + tl.arange(0, BLOCK)
         mask_k = offset < HW 
@@ -366,64 +368,57 @@ def _masked_pooling_kernel(
         m     = m > 0 
 
         x     = tl.where(m, x_raw, 0.0)
-        x_max = tl.where(m, x_raw, float("-inf"))
-
+        # Softplus for stability
         x_pos = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
         x_pos = tl.where(m, x_pos, 0.0)
+        
+        acc_cnt += tl.sum(tl.where(m, 1.0, 0.0), axis=0)
+        
+        x_max   = tl.where(m, x_raw, float("-inf"))
+        acc_max = tl.maximum(acc_max, tl.max(x_max, axis=0))
+        
+        acc_sum_pos += tl.sum(x_pos, axis=0)
+        
+        acc_sq_pos  += tl.sum(x_pos * x_pos, axis=0)
 
         x_clamp = tl.maximum(x, eps)
         x_clamp = tl.where(m, x_clamp, 0.0)
+        acc_pow += tl.sum(tl.exp(tl.log(x_clamp) * p_val) * tl.where(m, 1.0, 0.0), axis=0)
 
-        acc_cnt     += tl.sum(tl.where(m, 1.0, 0.0), axis=0)
-        acc_max      = tl.maximum(acc_max, tl.max(x_max, axis=0))
-        acc_sum_pos += tl.sum(x_pos, axis=0)
-
-        acc_pow     += tl.sum(tl.exp(tl.log(x_clamp) * p_val) * tl.where(m, 1.0, 0.0), axis=0)
-
-        log_x        = tl.where(x_pos > eps, tl.log(x_pos), 0.0)
-        acc_ent     += tl.sum(x_pos * log_x, axis=0)
+        log_x    = tl.where(x_pos > eps, tl.log(x_pos), 0.0)
+        acc_ent += tl.sum(x_pos * log_x, axis=0)
 
     denom    = tl.maximum(acc_cnt, eps)
     has_data = acc_cnt > 0.5 
-    mean     = acc_sum_pos / denom 
 
-    acc_sq_diff = tl.zeros((), dtype=tl.float32)
-
-    for k in range(0, HW, BLOCK): 
-        offset = k + tl.arange(0, BLOCK)
-        mask_k = offset < HW 
-
-        x_raw = tl.load(
-            x_ptr + x_offset + offset, mask=mask_k, other=float("-inf")).to(tl.float32)
-        m     = tl.load(m_ptr + mask_offset + offset, mask=mask_k, other=0.0)
-        m     = m > 0 
-
-        x     = tl.where(m, x_raw, 0.0) 
-        x_pos = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
-        x_pos = tl.where(m, x_pos, 0.0)
-
-        diff  = tl.where(m, x_pos - mean, 0.0)
-        acc_sq_diff += tl.sum(diff * diff, axis=0)
-
+    # LogSumExp
     res_logsum = tl.log(1.0 + acc_sum_pos)
 
-    res_gem    = tl.exp(tl.log(acc_pow / denom) / p_val)
-    res_gem    = tl.where(has_data, res_gem, 0.0)
+    # GEM
+    res_gem = tl.exp(tl.log(acc_pow / denom) / p_val)
+    res_gem = tl.where(has_data, res_gem, 0.0)
 
-    res_max    = tl.where(has_data, acc_max, 0.0)
+    # Max
+    res_max = tl.where(has_data, acc_max, 0.0)
 
-    res_var = acc_sq_diff / denom 
-    res_var = tl.where(has_data, res_var, 0.0)
+    # Variance 
+    mean_sq   = acc_sq_pos / denom
+    mean      = acc_sum_pos / denom
+    res_var   = mean_sq - (mean * mean)
+    # Clamp negative variance due to float errors
+    res_var   = tl.where(res_var < 0.0, 0.0, res_var)
+    res_var   = tl.where(has_data, res_var, 0.0)
 
+    # Entropy
     A = tl.log(acc_sum_pos + eps)
     B = acc_ent / (acc_sum_pos + eps) 
     res_ent = A - B 
     res_ent = tl.where(has_data, res_ent, 0.0)
 
+    # Write Output
     base_out = n * (5 * C) + c 
-
-    tl.store(out_ptr + base_out + (0 * C), res_logsum) # redundant but explicitly the 0th offset
-    tl.store(out_ptr + base_out + (C), res_gem)
+    tl.store(out_ptr + base_out + (0 * C), res_logsum)
+    tl.store(out_ptr + base_out + (1 * C), res_gem)
     tl.store(out_ptr + base_out + (2 * C), res_max)
     tl.store(out_ptr + base_out + (3 * C), res_ent)
     tl.store(out_ptr + base_out + (4 * C), res_var)
@@ -431,11 +426,11 @@ def _masked_pooling_kernel(
 @triton.jit 
 def _masked_pooling_backward_kernel(
     dx_ptr, dy_ptr, x_ptr, m_ptr, 
+    out_fwd_ptr, 
     N, C, H, W, 
     p_val, eps, 
     BLOCK: tl.constexpr
 ): 
-
     pid = tl.program_id(0)
     n   = pid // C 
     c   = pid % C 
@@ -443,51 +438,31 @@ def _masked_pooling_backward_kernel(
 
     x_offset    = pid * HW 
     mask_offset = n * HW 
-
     base_out    = n * (5 * C) + c 
-    dy_logsum   = tl.load(dy_ptr + base_out)
-    dy_gem      = tl.load(dy_ptr + base_out + C)
-    dy_max      = tl.load(dy_ptr + base_out + 2*C)
-    dy_ent      = tl.load(dy_ptr + base_out + 3*C)
-    dy_var      = tl.load(dy_ptr + base_out + 4*C)
 
-    acc_sum_pos = tl.zeros((), dtype=tl.float32)
-    acc_sq_pos  = tl.zeros((), dtype=tl.float32)
-    acc_pow     = tl.zeros((), dtype=tl.float32)
-    acc_ent     = tl.zeros((), dtype=tl.float32)
-    acc_cnt     = tl.zeros((), dtype=tl.float32)
-    acc_max     = tl.full((), float("-inf"), dtype=tl.float32)
+    dy_logsum = tl.load(dy_ptr + base_out)
+    dy_gem    = tl.load(dy_ptr + base_out + C)
+    dy_max    = tl.load(dy_ptr + base_out + 2*C)
+    dy_ent    = tl.load(dy_ptr + base_out + 3*C)
+    dy_var    = tl.load(dy_ptr + base_out + 4*C)
 
-    for k in range(0, HW, BLOCK): 
+    fwd_logsum = tl.load(out_fwd_ptr + base_out)
+    fwd_gem    = tl.load(out_fwd_ptr + base_out + C)
+    fwd_max    = tl.load(out_fwd_ptr + base_out + 2*C)
+    fwd_ent    = tl.load(out_fwd_ptr + base_out + 3*C)
+    S = tl.exp(fwd_logsum) - 1.0 
+    
+    acc_cnt = tl.zeros((), dtype=tl.float32)
+    for k in range(0, HW, BLOCK):
         offset = k + tl.arange(0, BLOCK)
-        mask_k = offset < HW 
-
-        x_raw = tl.load(
-            x_ptr + x_offset + offset, mask=mask_k, other=float("-inf")).to(tl.float32)
-        m     = tl.load(m_ptr + mask_offset + offset, mask=mask_k, other=0.0)
-        m     = m > 0 
-
-        x     = tl.where(m, x_raw, 0.0)
-        x_max = tl.where(m, x_raw, float("-inf"))
-
-        x_pos = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
-        x_pos = tl.where(m, x_pos, 0.0)
-
-        x_clamp = tl.maximum(x, eps)
-        x_clamp = tl.where(m, x_clamp, 0.0)
-
-        acc_cnt     += tl.sum(tl.where(m, 1.0, 0.0), axis=0)
-        acc_max      = tl.maximum(acc_max, tl.max(x_max, axis=0))
-        acc_sum_pos += tl.sum(x_pos, axis=0)
-        acc_sq_pos  += tl.sum(x_pos * x_pos, axis=0)
-        acc_pow     += tl.sum(tl.exp(tl.log(x_clamp) * p_val) * tl.where(m, 1.0, 0.0), axis=0)
-        log_x        = tl.where(x_pos > eps, tl.log(x_pos), 0.0)
-        acc_ent     += tl.sum(x_pos * log_x, axis=0)
-
+        mask_k = offset < HW
+        m = tl.load(m_ptr + mask_offset + offset, mask=mask_k, other=0.0)
+        acc_cnt += tl.sum(tl.where(m > 0, 1.0, 0.0), axis=0)
+    
     denom = tl.maximum(acc_cnt, eps)
-    S     = acc_sum_pos + eps 
-    Y_gem = tl.exp(tl.log(acc_pow / denom) / p_val) 
-    H_val = tl.log(S) - (acc_ent / S)
+    mean_val = S / denom 
+
+    term_gem_common = dy_gem * fwd_gem / ( (tl.exp(tl.log(fwd_gem + eps) * p_val) * denom) + eps )
 
     for k in range(0, HW, BLOCK): 
         offset = k + tl.arange(0, BLOCK)
@@ -499,33 +474,33 @@ def _masked_pooling_backward_kernel(
         m     = m > 0 
 
         x     = tl.where(m, x_raw, 0.0)
-
+        
         sig_x = 1.0 / (1.0 + tl.exp(-x))
         sig_x = tl.where(m, sig_x, 0.0)
-
         x_pos = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
         x_pos = tl.where(m, x_pos, 0.0)
+        x_clamp = tl.maximum(x, eps)
 
         grad_logsum = (1.0 / (1.0 + S)) * sig_x * dy_logsum 
 
-        x_clamp  = tl.maximum(x, eps)
+        # term_pow = x_clamp^(p-1)
         term_pow = tl.exp(tl.log(x_clamp) * (p_val - 1.0)) * tl.where(m, 1.0, 0.0)
-        grad_gem = dy_gem * Y_gem * term_pow / (acc_pow + eps)
+        grad_gem = term_gem_common * term_pow
 
-        is_max   = (x_raw >= acc_max) & m 
+        is_max   = (x_raw >= fwd_max) & m 
         grad_max = tl.where(is_max, dy_max, 0.0)
 
-        mean_val = S / denom 
+        # dVar/dx = (2/N) * (x - mean) * sig_x
         grad_var = dy_var * (2.0 / denom) * (x_pos - mean_val) * sig_x 
 
+        # dH/dx = (1/S) * (H - 1 - log(x)) * sig_x
         log_x    = tl.where(x_pos > eps, tl.log(x_pos), 0.0)
-        grad_ent = dy_ent * (1.0 / S) * (H_val - 1.0 - log_x) * sig_x 
+        grad_ent = dy_ent * (1.0 / (S + eps)) * (fwd_ent - 1.0 - log_x) * sig_x 
 
         total_dx = grad_logsum + grad_gem + grad_max + grad_var + grad_ent 
         total_dx = tl.where(m, total_dx, 0.0)
 
         tl.store(dx_ptr + x_offset + offset, total_dx, mask=mask_k)
-    
 
 # ---------------------------------------------------------
 # Masked Pooling Head Triton Calls    
@@ -533,81 +508,65 @@ def _masked_pooling_backward_kernel(
 
 def masked_pooling_triton(x, mask, p=3.0, eps=1e-6): 
     assert x.is_cuda and mask.is_cuda 
-
     if not x.is_contiguous(): 
         x = x.contiguous() 
-
     if not mask.is_contiguous(): 
         mask = mask.contiguous() 
-
     if mask.ndim == 4: 
         mask = mask[:, 0]
 
     N, C, H, W = x.shape 
-
     y = torch.empty((N, 5 * C), device=x.device, dtype=torch.float32)
 
     grid = (N * C,)
-
     _masked_pooling_kernel[grid](
         x, mask, y, 
         N, C, H, W,
         float(p), float(eps),
         BLOCK=1024
     )
-
     return y  
 
-def masked_pooling_backward_triton(x, mask, dy, p, eps): 
-
+def masked_pooling_backward_triton(x, mask, out_fwd, dy, p, eps): 
     assert x.is_cuda and mask.is_cuda 
-
     if not x.is_contiguous(): 
         x = x.contiguous() 
-
     if not mask.is_contiguous(): 
         mask = mask.contiguous() 
-
     if mask.ndim == 4: 
         mask = mask[:, 0]
-
     if not dy.is_contiguous(): 
         dy = dy.contiguous() 
-
-    if mask.ndim == 4: 
-        mask = mask[:, 0]
-
+    
     N, C, H, W = x.shape 
-
     dx = torch.empty_like(x)
 
     grid = (N * C,)
     _masked_pooling_backward_kernel[grid](
         dx, dy, x, mask, 
+        out_fwd,
         N, C, H, W, 
         float(p), float(eps),
         BLOCK=1024
     )
-
     return dx 
 
 class MaskedPoolingTritonFn(torch.autograd.Function):
     @staticmethod 
     def forward(ctx, x, mask, p, eps):
         y = masked_pooling_triton(x, mask, p, eps)
-        ctx.save_for_backward(x, mask)
+        ctx.save_for_backward(x, mask, y) 
         ctx.p   = p
         ctx.eps = eps 
-
         return y 
 
     @staticmethod 
     def backward(ctx, dy): 
-        x, mask = ctx.saved_tensors 
+        x, mask, y = ctx.saved_tensors 
         p   = ctx.p 
         eps = ctx.eps 
 
-        dx  = masked_pooling_backward_triton(x, mask, dy, p, eps)
+        dx  = masked_pooling_backward_triton(x, mask, y, dy, p, eps)
         return dx, None, None, None
 
 def masked_pooling(x, mask, p=3.0, eps=1e-6): 

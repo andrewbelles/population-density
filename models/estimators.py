@@ -679,6 +679,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         dropout: float = 0.2, 
         use_bn: bool = True, 
         roi_output_size: int | tuple[int, int] = 7, 
+        use_channels_last: bool = False, 
         sampling_ratio: int = 2, 
         aligned: bool = False, 
 
@@ -711,6 +712,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.dropout           = dropout
         self.use_bn            = use_bn
         self.roi_output_size   = roi_output_size
+        self.use_channels_last = use_channels_last
         self.sampling_ratio    = sampling_ratio
         self.aligned           = aligned
 
@@ -998,7 +1000,10 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
     def _prepare_inputs(self, packed, masks): 
         xb = torch.as_tensor(packed, device=self.device, dtype=torch.float32)
         if xb.ndim == 4: 
-            xb = xb.contiguous(memory_format=torch.channels_last)
+            if self.use_channels_last: 
+                xb = xb.contiguous(memory_format=torch.channels_last)
+            else: 
+                xb = xb.contiguous() 
         mb = torch.as_tensor(masks, dtype=torch.float32, device=self.device)
         return xb, mb 
 
@@ -1107,6 +1112,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
             use_bn=self.use_bn,
             roi_output_size=self.roi_output_size,
             batch_size=self.batch_size,
+            use_channels_last=self.use_channels_last,
             sampling_ratio=self.sampling_ratio,
             aligned=self.aligned,
             features=self.features
@@ -1133,7 +1139,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
         if self.device.type == "cuda": 
             self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
-            self.model_.to(memory_format=torch.channels_last)
+            if self.use_channels_last: 
+                self.model_.to(memory_format=torch.channels_last)
 
     def _resolve_device(self, device: str | None): 
         if device is not None: 
