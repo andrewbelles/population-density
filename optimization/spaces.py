@@ -121,13 +121,13 @@ def define_spatial_space(trial):
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.3),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
 
-        "batch_size": trial.suggest_int("batch_size", 64, 128, step=16), 
+        "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
 
         "epochs": 200, 
         "early_stopping_rounds": 15, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,
-        "target_global_batch": 128
+        "target_global_batch": 1024
     }
 
 # ---------------------------------------------------------

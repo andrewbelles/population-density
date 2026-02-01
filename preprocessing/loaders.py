@@ -949,16 +949,23 @@ def dynamic_tile_collate(batch):
     tiles_list, labels, num_tiles_list = [], [], []
 
     for tiles, label, _ in batch: 
-        tiles_list.append(torch.from_numpy(np.array(tiles, copy=True)))
+        t = torch.from_numpy(np.array(tiles, copy=True))
+        tiles_list.append(t)
         labels.append(label)
-        num_tiles_list.append(tiles.shape[0])
+        num_tiles_list.append(t.shape[0])
 
     flat_inputs = torch.cat(tiles_list, dim=0)
     flat_inputs = flat_inputs.contiguous(memory_format=torch.channels_last)
+
     labels      = torch.tensor(labels, dtype=torch.long)
     sections    = torch.tensor(num_tiles_list, dtype=torch.long)
 
-    return flat_inputs, labels, sections 
+    batch_idx   = torch.repeat_interleave(
+        torch.arange(len(batch)),
+        sections 
+    )
+
+    return flat_inputs, labels, batch_idx 
 
 def load_spatial_mmap_manifest(
     root_dir: str, 
