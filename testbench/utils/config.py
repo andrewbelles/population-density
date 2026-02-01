@@ -59,14 +59,10 @@ def cv_config(folds: int, random_state: int) -> CVConfig:
     return config 
 
 def normalize_spatial_params(params, *, random_state: int, collate_fn): 
-    conv = params.get("conv_channels")
-    if isinstance(conv, str): 
-        params["conv_channels"] = tuple(int(x) for x in conv.split("-") if x)
-
     params.setdefault("random_state", random_state)
     params.setdefault("collate_fn", collate_fn)
     params.setdefault("early_stopping_rounds", 15)
-    params.setdefault("eval_fraction", 0.15)
+    params.setdefault("eval_fraction", 0.2)
     params.setdefault("min_delta", 1e-3)
     params.setdefault("batch_size", 32)
     return params 

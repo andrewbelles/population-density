@@ -6,7 +6,7 @@
 # supervised/unsupervised datasets for ues by models 
 # 
 
-import json, os 
+import json, os, torch 
 
 import numpy as np 
 
@@ -28,7 +28,7 @@ from utils.helpers import (
     align_on_fips
 )
 
-from preprocessing.tensors import SpatialLazyLoader, SpatialPackedLoader, SpatialTileLoader
+from preprocessing.tensors import TileLoader 
 
 _CLIMATE_GROUPS: tuple[str, ...] = ("degree_days", "palmer_indices")
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -938,177 +938,90 @@ def load_concat_datasets(
 class SpatialDatasetDict(TypedDict): 
     dataset: Any 
     labels: NDArray 
-    coords: NDArray
     sample_ids: NDArray[np.str_]
     collate_fn: Callable | None 
     in_channels: int 
-    sample_labels: NDArray  
-    sample_ids_full: NDArray 
-    sample_groups: NDArray
 
 SpatialDatasetLoader = Callable[[str], SpatialDatasetDict]
 
-def _collate_packed(batch): 
-    return batch[0]
+def dynamic_tile_collate(batch): 
 
-def _collate_spatial(batch, *, canvas_hw, tile_hw): 
-    return SpatialLazyLoader.pack(batch, canvas_hw=canvas_hw, tile_hw=tile_hw)
+    tiles_list, labels, num_tiles_list = [], [], []
 
-def _collate_tiles(batch): 
-    tiles_list    = []
-    masks_list    = []
-    labels        = []
-    fips_list     = []
-    group_ids     = []
-    group_weights = []
-
-    for i, (tiles, masks, label, fip) in enumerate(batch): 
-        if tiles.shape[0] == 0: 
-            continue 
-
-        n = tiles.shape[0]
-        tiles_list.append(tiles)
-        masks_list.append(masks)
+    for tiles, label, _ in batch: 
+        tiles_list.append(torch.from_numpy(np.array(tiles, copy=True)))
         labels.append(label)
-        fips_list.append(fip)
+        num_tiles_list.append(tiles.shape[0])
 
-        group_ids.extend([i] * n)
-        group_weights.extend([float(m.sum()) for m in masks])
+    flat_inputs = torch.cat(tiles_list, dim=0)
+    flat_inputs = flat_inputs.contiguous(memory_format=torch.channels_last)
+    labels      = torch.tensor(labels, dtype=torch.long)
+    sections    = torch.tensor(num_tiles_list, dtype=torch.long)
 
-    if not tiles_list: 
-        raise ValueError("collate produced no tiles")
+    return flat_inputs, labels, sections 
 
-    tiles         = np.concatenate(tiles_list, axis=0)
-    masks         = np.concatenate(masks_list, axis=0)
-    labels        = np.asarray(labels, dtype=np.int64)
-    fips          = np.asarray(fips_list, dtype="U5")
-    group_ids     = np.asarray(group_ids, dtype=np.int64)
-    group_weights = np.asarray(group_weights, dtype=np.float32)
-    return tiles, masks, None, labels, fips, group_ids, group_weights 
-
-
-def load_spatial_roi_manifest(
+def load_spatial_mmap_manifest(
     root_dir: str, 
-    *, 
-    canvas_hw: tuple[int, int] = (512, 512), 
-    bag_tiles: bool = False, 
-    tile_hw: tuple[int, int] = (512, 512),
-    cache_mb: int | None = None, 
-    cache_items: int | None = None 
+    *,
+    tile_shape: tuple[int, int, int], 
+    max_bag_size: int, 
+    sample_frac: float | None = None, 
+    random_state: int = 0, 
+    shuffle_tiles: bool = True, 
+    pad_value: float = 0.0, 
+    should_validate_index: bool = False
 ) -> SpatialDatasetDict:
+    root      = Path(root_dir)
+    index_csv = root / "index.csv"
+    bin_path  = root / "dataset.bin"
 
-    root     = Path(root_dir)
-    manifest = root / "manifest.jsonl"
-    records  = [
-        json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() 
-        if line.strip() 
-    ]
-    if not records: 
-        raise ValueError(f"empty manifest: {manifest}")
+    if not index_csv.exists() or not bin_path.exists(): 
+        raise FileNotFoundError(f"missing dataset.bin/index.csv in {root}")
 
-    if bag_tiles: 
-        ds          = SpatialTileLoader(
-            root_dir, 
-            tile_hw=tile_hw,
-            cache_tiles=True,
-            max_tiles_per_sample=64,
-            tile_sample_frac=None, 
-        ) 
-        labels      = np.asarray([r["label"] for r in ds.records], dtype=np.int64)
-        fips        = np.asarray([r["fips"] for r in ds.records], dtype="U5")
-        coords      = np.zeros((labels.shape[0], 2), dtype=np.float64)
-        shape       = ds.records[0]["shape"]
-        in_channels = shape[0] if len(shape) == 3 else 1 
+    ds = TileLoader(
+        index_csv=str(index_csv),
+        bin_path=str(bin_path),
+        tile_shape=tile_shape,
+        max_bag_size=max_bag_size,
+        sample_frac=sample_frac,
+        random_state=random_state,
+        shuffle_tiles=shuffle_tiles,
+        pad_value=pad_value,
+        return_fips=True,
+        return_num_tiles=False,
+        should_validate_index=should_validate_index
+    )
 
-        return {
-            "dataset": ds, 
-            "labels": labels, 
-            "coords": coords,
-            "sample_ids": fips, 
-            "collate_fn": _collate_tiles, 
-            "in_channels": in_channels,
-            "sample_labels": np.array([]),
-            "sample_ids_full": np.array([]), 
-            "sample_groups": np.array([])
-        }
-
-    is_packed = "n_rois" in records[0]
-
-    if is_packed: 
-        if cache_mb is None: 
-            cache_mb    = int(os.environ.get("TOPG_PACK_CACHE_MB", "0"))
-        if cache_items is None: 
-            cache_items = int(os.environ.get("TOPG_PACK_CACHE_ITEMS", "0"))
-
-        ds = SpatialPackedLoader(root_dir, cache_mb=cache_mb, cache_items=cache_items)
-        
-        with np.load(root / records[0]["path"]) as npz: 
-            in_channels = int(npz["canvases"].shape[1])
-
-        meta_path = root / "packed" / "meta.npz" 
-        if meta_path.exists(): 
-            meta = np.load(meta_path)
-            labels_full = np.asarray(meta["sample_labels"], dtype=np.int64)
-            fips_full   = np.asarray(meta["sample_ids_full"], dtype="U5")
-            groups_full = np.asarray(meta["sample_groups"], dtype=np.int64)
-            pack_labels = np.asarray(meta["pack_labels"], dtype=np.int64)
-        else: 
-            pack_groups = []
-            all_labels  = []
-            all_fips    = []
-
-            for i, rec in enumerate(records): 
-                with np.load(root / rec["path"]) as npz: 
-                    labels = np.asarray(npz["labels"]).reshape(-1)
-                    fips   = np.asarray(npz["fips"], dtype="U5").reshape(-1)
-                all_labels.append(labels)
-                all_fips.append(fips)
-                pack_groups.append(np.full(labels.shape[0], i, dtype=np.int64))
-
-
-            labels_full = np.concatenate(all_labels) 
-            fips_full   = np.concatenate(all_fips)
-            groups_full = np.concatenate(pack_groups)
-
-
-            pack_labels = []
-            for labels in all_labels:
-                uniq, counts = np.unique(labels, return_counts=True)
-                pack_labels.append(uniq[int(counts.argmax())])
-
-            pack_labels = np.asarray(pack_labels, dtype=np.int64)
-
-        coords = np.zeros((0, 2), dtype=np.float64) # backwards compatible (useless)
-        pack_ids = np.asarray([f"pack_{i:05d}" for i in range(len(records))], dtype="U16")
-        
-        return {
-            "dataset": ds, 
-            "labels": pack_labels,
-            "coords": coords,
-            "sample_ids": pack_ids, 
-            "collate_fn": _collate_packed, 
-            "in_channels": in_channels,
-            "sample_labels": labels_full, 
-            "sample_ids_full": fips_full,
-            "sample_groups": groups_full
-        }
-
-    ds     = SpatialLazyLoader(root_dir)
-    labels = np.asarray([r["label"] for r in ds.records], dtype=np.int64)
-    fips   = np.asarray([r["fips"] for r in ds.records], dtype="U5")
-    coords = np.zeros((labels.shape[0], 2), dtype=np.float64)
-    
-    shape       = ds.records[0]["shape"]
-    in_channels = shape[0] if len(shape) == 3 else 1 
+    labels = np.asarray(ds.labels, dtype=np.int64)
+    fips   = np.asarray(ds.fips, dtype="U5")
 
     return {
-        "dataset": ds, 
+        "dataset": ds,
         "labels": labels, 
-        "coords": coords, 
         "sample_ids": fips, 
-        "collate_fn": bind(_collate_spatial, canvas_hw=canvas_hw, tile_hw=tile_hw),
-        "in_channels": in_channels,
-        "sample_labels": np.array([]),
-        "sample_ids_full": np.array([]),
-        "sample_groups": np.array([])
+        "collate_fn": dynamic_tile_collate, 
+        "in_channels": int(tile_shape[0])
     }
+
+# Convenience wrapper over loader 
+def mmap_loader(
+    path,
+    *,
+    tile_shape,
+    max_bag_size,
+    sample_frac=None,
+    random_state=0,
+    shuffle_tiles=True,
+    pad_value=0.0,
+    should_validate_index=False
+):
+    return load_spatial_mmap_manifest(
+        path,
+        tile_shape=tile_shape,
+        max_bag_size=max_bag_size,
+        sample_frac=sample_frac,
+        random_state=random_state,
+        shuffle_tiles=shuffle_tiles,
+        pad_value=pad_value,
+        should_validate_index=should_validate_index
+    )

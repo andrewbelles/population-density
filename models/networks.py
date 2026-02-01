@@ -10,478 +10,155 @@ import torch
 
 from torch import nn 
 
-from kernels.network import (
-    MaskedGroupNormTritonFn, 
-    masked_pooling
-) 
+import torchvision.models as tvm 
 
-import torch.nn.functional as F 
+from torch.nn.utils.rnn import pad_sequence
 
-import torchvision.ops as tops 
+from utils.loss_funcs import LearnableLogitScaling
 
-import torch.utils.checkpoint as cp
+class GatedAttentionPooling(nn.Module): 
 
-
-def best_num_groups(
-    ch: int, 
-    max_groups: int = 32, 
-    min_cpg: int = 8, 
-    target_cpg: int = 16
-) -> int:
-    candidates = [g for g in range(1, max_groups + 1) if ch % g == 0]
-    if not candidates:
-        return 1
-    viable = [g for g in candidates if (ch // g) >= min_cpg]
-    if not viable:
-        viable = candidates
-    return min(viable, key=lambda g: abs((ch // g) - target_cpg))
-
-
-class MaskedGroupNorm(nn.Module): 
     '''
-    Uses GroupNorm but Masks out padding to ensure zeros do not pollute normalization 
+    Gated attention pooling for multi-instance learning (Maximillian et. al)
+    Input: 
+        tensor of shape (B, N, F)
+    Output: 
+        embedding of shape (B, F)
     '''
 
-    def __init__(
-        self, 
-        num_groups,
-        num_channels,
-        eps: float = 1e-4, 
-        affine: bool = True 
-    ): 
-        super().__init__()
-        self.num_groups   = num_groups 
-        self.num_channels = num_channels
-        self.eps          = eps 
-
-        if affine: 
-            self.weight = nn.Parameter(torch.ones(num_channels))
-            self.bias   = nn.Parameter(torch.zeros(num_channels))
-        else: 
-            self.register_parameter("weight", None)
-            self.register_parameter("bias", None)
-
-    def forward(self, x, mask=None): 
-        return MaskedGroupNormTritonFn.apply(
-            x, mask, self.weight, self.bias, 
-            self.num_groups, self.eps
-        )
-
-class MaskedConvBlock(nn.Module): 
-    '''
-    A single convolutional block using MaskedGroupNorm
-    '''
-
-    def __init__(
-        self, 
-        in_ch,  
-        out_ch,
-        kernel_size=3,
-        dilation=1, 
-        use_norm=True 
-    ): 
-        super().__init__()
-        self.conv = nn.Conv2d(
-            in_ch, 
-            out_ch,
-            kernel_size=kernel_size,
-            stride=1,
-            dilation=dilation,
-            padding=dilation,
-            bias=not use_norm 
-        )
-        self.norm = None 
-        if use_norm: 
-            num_groups = best_num_groups(out_ch) 
-            self.norm  = MaskedGroupNorm(num_groups, out_ch)
-        self.gelu = nn.GELU()
-
-    def forward(self, x, mask=None): 
-        out = self.conv(x)
-
-        if self.norm is not None: 
-            norm_mask = mask 
-            if norm_mask is not None: 
-                if norm_mask.ndim == 3: 
-                    norm_mask = norm_mask.unsqueeze(1)
-
-                if norm_mask.shape[-2:] != out.shape[-2:]:
-                    norm_mask = F.interpolate(norm_mask, size=out.shape[-2:], mode="nearest")
-
-            out = self.norm(out, norm_mask)
-
-        out = self.gelu(out)
-        return out, mask 
-
-
-class DilatedResidualBlock(nn.Module): 
-    '''
-    Residual dilated block implemented with masked normalization
-    '''
     def __init__(
         self,
-        in_ch,
-        out_ch,
-        kernel_size=3,
-        dilation=1,
-        num_convs: int = 2, 
-        use_norm=True
+        in_dim: int, 
+        attn_dim: int = 256, 
+        attn_dropout: float = 0.0 
+    ): 
+        super().__init__()
+        self.in_dim   = in_dim 
+        self.attn_dim = attn_dim 
+
+        self.V = nn.Linear(in_dim, attn_dim)
+        self.U = nn.Linear(in_dim, attn_dim)
+        self.w = nn.Linear(attn_dim, 1)
+
+        self.tanh    = nn.Tanh() 
+        self.sigmoid = nn.Sigmoid() 
+        self.dropout = nn.Dropout(attn_dropout) if attn_dropout > 0 else nn.Identity() 
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3: 
+            raise ValueError(f"expected (B, N, F), got {x.shape}")
+
+        V = self.tanh(self.V(x))
+        U = self.sigmoid(self.U(x))
+
+        A = self.w(V * U)
+        A = A.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        A = torch.softmax(A, dim=1)
+        A = self.dropout(A)
+
+
+        pooled = torch.sum(A * x, dim=1) 
+        return pooled 
+
+
+class ResNetMIL(nn.Module): 
+    '''
+    ResNet-18 backbone + gated attention pooled for multi-instance learning 
+
+    Input: 
+    - x (B, N, C, H, W) and mask (B, N) 
+    Output:
+    - pooled embedding (B, 512)
+    '''
+
+    def __init__(
+        self, 
+        in_channels: int = 5, 
+        attn_dim: int = 256, 
+        attn_dropout: float = 0.0, 
+        weights=None
+    ): 
+        super().__init__()
+        self.in_channels = int(in_channels)
+
+        backbone = tvm.resnet18(weights=weights)
+        backbone.conv1 = nn.Conv2d(
+            self.in_channels, 64,  kernel_size=7, stride=2, padding=3, bias=False
+        )
+        backbone.fc = nn.Identity() 
+        self.backbone = backbone 
+
+        self.pool   = GatedAttentionPooling(
+            in_dim=512,
+            attn_dim=attn_dim,
+            attn_dropout=attn_dropout
+        )
+        self.out_dim = 512 
+
+    def forward(self, x: torch.Tensor, sections) -> torch.Tensor: 
+        if x.ndim != 4: 
+            raise ValueError(f"expected x (T, C, H, W), got {x.shape}")
+
+        t, c, h, w = x.shape 
+        if c != self.in_channels:
+            raise ValueError(f"expected {self.in_channels} channels, got {c}")
+
+        feats = self.backbone(x)
+        feats_split = torch.split(feats, sections.tolist(), dim=0)
+        feats_pad   = pad_sequence(feats_split, batch_first=True, padding_value=0.0)
+
+        B, N, _ = feats_pad.shape 
+        device  = feats_pad.device 
+
+        mask    = torch.arange(N, device=device).expand(B, N) < sections.unsqueeze(1)
+
+        pooled = self.pool(feats_pad, mask)
+        return pooled 
+
+
+class MILOrdinalHead(nn.Module):
+    '''
+    Hybrid Ordinal classifier head for MIL embeddings  
+    
+    Outputs: 
+    - emb: (B, fc_dim)
+    - logits: (B, n_classes - 1)
+    - proj: (B, supcon_dim)
+    '''
+
+    def __init__(
+        self,
+        in_dim: int, 
+        fc_dim: int, 
+        n_classes: int, 
+        dropout: float = 0.15, 
+        supcon_dim: int | None = None, # optional for detaching at inference 
+        use_logit_scaler: bool = True  # platt/temperature scaling 
     ):
         super().__init__()
-        if num_convs < 2: 
-            raise ValueError("num_convs must be >= 2")
-        self.num_convs = num_convs
+        if n_classes < 2: 
+            raise ValueError("ordinal head requires n_classes >= 2")
 
-        self.convs = nn.ModuleList() 
-        self.norms = nn.ModuleList() 
+        self.fc   = nn.Linear(in_dim, fc_dim)
+        self.act  = nn.GELU() 
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
+        self.out  = nn.Linear(fc_dim, n_classes - 1)
 
-        for i in range(num_convs):
-            d = dilation if i == 0 else 1 
-            p = d * (kernel_size // 2)  
-            in_i = in_ch if i == 0 else out_ch 
-            conv = nn.Conv2d(
-                in_i,
-                out_ch,
-                kernel_size=kernel_size,
-                stride=1,
-                dilation=d,
-                padding=p,
-                bias=not use_norm
-            )
-            self.convs.append(conv)
-            if use_norm:
-                num_groups = best_num_groups(out_ch) 
-                self.norms.append(MaskedGroupNorm(num_groups, out_ch))
-            else: 
-                self.norms.append(None)
-
-        self.gelu = nn.GELU()
+        self.scaler = LearnableLogitScaling(1.0) if use_logit_scaler else nn.Identity() 
 
         self.proj = None 
-        if in_ch != out_ch:
-            self.proj = nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, bias=False)
-
-    def forward(self, x, mask=None):
-        out = x 
-        for i, conv in enumerate(self.convs):
-            out = conv(out)
-            if self.norms[i] is not None: 
-                norm_mask = mask 
-                if norm_mask is not None and norm_mask.ndim == 3: 
-                    norm_mask = norm_mask.unsqueeze(1)
-                if norm_mask is not None and norm_mask.shape[-2:] != out.shape[-2:]: 
-                    norm_mask = F.interpolate(norm_mask, size=out.shape[-2:], mode="nearest") 
-                out = self.norms[i](out, norm_mask)
-            if i < self.num_convs - 1: 
-                out = self.gelu(out)
-
-        res = x if self.proj is None else self.proj(x)
-        out = out + res 
-
-        out = self.gelu(out)
-
-        return out, mask 
-
-
-class SpatialBackbone(nn.Module): 
-    '''
-    CNN Backbone tailored for masked, spatial satellite data for NLCD/VIIRS  
-    
-    Leverages Region of Interest pooling on packed samples.
-
-    Manually downsamples masks to preserve them through model.
-    '''
-
-    def __init__(
-        self,
-        in_channels: int, 
-        categorical_input: bool = False, 
-        categorical_embed_dim: int = 4,
-        categorical_cardinality: int | None = None, 
-        conv_channels: tuple[int, ...] = (32, 64, 128),
-        kernel_size: int = 3, 
-        use_bn: bool = True, 
-        roi_output_size: int | tuple[int, int] = 7, 
-        sampling_ratio: int = 2, 
-        batch_size: int = 32, 
-        use_channels_last: bool = False, 
-        aligned: bool = True,
-        features: list[str] | None = None         
-    ): 
-        super().__init__()
-
-        self.model_in_channels = in_channels 
-        self.spatial_scale     = 1.0 
-        self.roi_output_size   = roi_output_size
-        self.sampling_ratio    = sampling_ratio 
-        self.batch_size        = batch_size 
-        self.aligned           = aligned 
-        if features is None: 
-            features = ["logsum", "gem", "max", "entropy", "var"]
-        self.features          = features 
-        self.out_dim           = conv_channels[-1] * len(self.features)
-
-        # Categorical information for NLCD
-        self.categorical_input       = categorical_input
-        self.categorical_embed_dim   = categorical_embed_dim
-        self.categorical_cardinality = (categorical_cardinality or 
-                                        (in_channels if in_channels > 1 else 8))
-        self.use_channels_last       = use_channels_last
-        
-        if self.categorical_input: 
-            self.embedding = nn.Embedding(self.categorical_cardinality + 1,
-                                          self.categorical_embed_dim,
-                                          padding_idx=0)
-        layers    = []
-        ch        = self.categorical_embed_dim if self.categorical_input else in_channels
-        dilations = [2**i for i in range(len(conv_channels))] 
-        for dilation, out_ch in zip(dilations, conv_channels): 
-            layers.append(DilatedResidualBlock(
-                ch,
-                out_ch,
-                kernel_size=kernel_size,
-                dilation=dilation,
-                num_convs=2,
-                use_norm=use_bn
-            ))
-            ch = out_ch 
-
-        self.net = nn.ModuleList(layers)
-
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        mask: torch.Tensor | None = None,
-        rois: list[tuple[int, int, int, int, int]] | None = None 
-    ) -> torch.Tensor: 
-
-        if mask is not None: 
-            if mask.ndim == 3: 
-                mask = mask.unsqueeze(1)
-            mask = mask.to(device=x.device)
-        else: 
-            mask = (x > 0).to(device=x.device)
-
-        sizes    = {(x.shape[-2], x.shape[-1])}
-        mask_pyr = self._build_masks(mask, sizes, x.device) if mask is not None else None  
-
-        MICRO_BATCH_SIZE = self.batch_size if self.batch_size > 1 else 128   
-        n_tiles = x.shape[0]
-
-        if rois is None: 
-            pooled_chunks = []
-            for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
-
-                x_chunk = x[i:i+MICRO_BATCH_SIZE] 
-                m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
-                if mask_pyr is not None: 
-                    m_chunk = mask_pyr[(x.shape[-2], x.shape[-1])][i:i+MICRO_BATCH_SIZE]
-
-                feat_chunk = self._run_chunk(x_chunk, m_chunk) 
-
-                if not isinstance(feat_chunk, torch.Tensor): 
-                    raise TypeError 
-                pooled = self._global_pool_chunk(feat_chunk, m_chunk, x_chunk)
-                pooled_chunks.append(pooled)
-            
-            if not pooled_chunks: 
-                return x.new_zeros((0, self.out_dim))
-            return torch.cat(pooled_chunks, dim=0)
-
-        rois_t = self.rois_to_tensor(rois, x.device)
-        if rois_t.numel() == 0: 
-            return x.new_zeros((0, self.out_dim))
-
-        b_idx   = rois_t[:, 0].long() 
-        outputs = None 
-        for i in range(0, n_tiles, MICRO_BATCH_SIZE): 
-            x_chunk = x[i:i+MICRO_BATCH_SIZE] 
-            m_chunk = mask[i:i+MICRO_BATCH_SIZE] if mask is not None else None 
-            if mask_pyr is not None: 
-                m_chunk = mask_pyr[(x.shape[-2], x.shape[-1])][i:i+MICRO_BATCH_SIZE]
-
-            sel = (b_idx >= i) & (b_idx < i + MICRO_BATCH_SIZE)
-            if not sel.any(): 
-                continue 
-
-            rois_chunk = rois_t[sel].clone() 
-            rois_chunk[:, 0] -= i 
-
-            feat_chunk = self._run_chunk(x_chunk, m_chunk) 
-
-            if not isinstance(feat_chunk, torch.Tensor): 
-                raise TypeError 
-            pooled = self._roi_pool_chunk(feat_chunk, m_chunk, rois_chunk, x_chunk)
-            
-            if outputs is None: 
-                outputs = pooled.new_zeros((rois_t.size(0), pooled.shape[1]))
-            outputs[sel] = pooled
-
-        if outputs is None: 
-            raise ValueError("outputs were not computed")
-        return outputs
-
-    def global_pool(
-        self, 
-        feats: torch.Tensor, 
-        mask: torch.Tensor | None, 
-        x: torch.Tensor
-    ) -> torch.Tensor: 
-        m = self.prep_mask(x, mask).to(dtype=feats.dtype)
-        m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        return self.masked_pooling_head(feats, m, features=self.features)
-
-    def _roi_pool_chunk(
-        self, 
-        feats: torch.Tensor, 
-        mask: torch.Tensor | None, 
-        rois: torch.Tensor, 
-        x: torch.Tensor
-    ) -> torch.Tensor: 
-        if rois.numel() == 0: 
-            return feats.new_zeros((0, self.out_dim))
-
-        spatial_scale = self.spatial_scale 
-
-        m = self.prep_mask(x, mask)
-        m = m.to(dtype=feats.dtype)
-
-        chunk_size    = 128 
-        pooled_chunks = []
-        mask_chunks   = []
-    
-        for i in range(0, rois.size(0), chunk_size): 
-            rois_i   = rois[i:i+chunk_size]
-            pooled_i = tops.roi_align(
-                feats, rois_i, output_size=self.roi_output_size,
-                spatial_scale=spatial_scale, 
-                sampling_ratio=self.sampling_ratio, aligned=self.aligned
-            )
-            mask_i = tops.roi_align(
-                m, rois_i, output_size=self.roi_output_size,
-                spatial_scale=spatial_scale,
-                sampling_ratio=self.sampling_ratio, aligned=self.aligned
+        if supcon_dim is not None: 
+            self.proj = nn.Sequential(
+                nn.Linear(in_dim, in_dim),
+                nn.GELU(),
+                nn.Linear(in_dim, supcon_dim)
             )
 
-            pooled_chunks.append(pooled_i)
-            mask_chunks.append(mask_i)
+        self.out_dim = fc_dim 
 
-        pooled      = torch.cat(pooled_chunks, dim=0)
-        mask_pooled = torch.cat(mask_chunks, dim=0)
-        mask_pooled = (mask_pooled > 0).to(mask_pooled.dtype)
-        mask_pooled = mask_pooled.to(dtype=pooled.dtype)
-
-        return self.masked_pooling_head(pooled, mask_pooled, features=self.features)
-
-    def _run_chunk(self, chunk, mask=None): 
-
-        if mask is not None: 
-            mask = self.prep_mask(chunk, mask)
-
-        if not chunk.is_contiguous():
-            chunk = chunk.contiguous() 
-
-        def _run_segment(x, m, blocks): 
-            for block in blocks: 
-                x, _ = block(x, m)
-            return x 
-
-        SEGMENT_SIZE = 4 
-        segments     = [self.net[i:i + SEGMENT_SIZE] 
-                        for i in range(0, len(self.net), SEGMENT_SIZE)]
-        
-        for segment in segments: 
-            if self.training: 
-                chunk = cp.checkpoint(
-                    lambda x, m: _run_segment(x, m, segment), 
-                    chunk, 
-                    mask, 
-                    use_reentrant=True, 
-                    preserve_rng_state=False
-                )
-            else: 
-                chunk = _run_segment(chunk, mask, segment)
-
-        return chunk
-
-    def _global_pool_chunk(
-        self,
-        feats: torch.Tensor, 
-        mask: torch.Tensor | None, 
-        x: torch.Tensor 
-    ) -> torch.Tensor: 
-        m = self.prep_mask(x, mask).to(dtype=feats.dtype)
-        m = F.interpolate(m, size=feats.shape[-2:], mode="nearest")
-        return self.masked_pooling_head(feats, m, features=self.features)
-
-    def _build_masks(self, mask, sizes, device): 
-        if mask is None: 
-            return None 
-        if mask.ndim == 3: 
-            mask = mask.unsqueeze(1)
-        mask = mask.to(device=device)
-        out = {}
-        for (h, w) in sizes: 
-            if mask.shape[-2:] == (h, w):
-                out[(h, w)] = mask 
-            else: 
-                m = F.interpolate(mask.float(), size=(h, w), mode="nearest")
-                out[(h, w)] = (m > 0)
-        return out 
-
-    @staticmethod 
-    def prep_mask(
-        x: torch.Tensor, 
-        mask: torch.Tensor | None
-    ) -> torch.Tensor: 
-        if mask is None: 
-            mask = torch.ones(
-                (x.shape[0], 1, x.shape[2], x.shape[3]), 
-                device=x.device,
-                dtype=torch.bool
-            )
-        elif mask.ndim == 3: 
-            mask = mask.unsqueeze(1)
-        mask = mask.to(device=x.device)
-        if mask.dtype != torch.bool: 
-            mask = mask > 0
-        return mask
-
-    @staticmethod 
-    def rois_to_tensor(rois, device) -> torch.Tensor: 
-        if len(rois) == 0: 
-            return torch.zeros((0, 5), device=device, dtype=torch.float32)
-        return torch.tensor(
-            [(b, x0, y0, x1, y1) for (b, y0, x0, y1, x1) in rois],
-            device=device,
-            dtype=torch.float32
-        )
-
-    @staticmethod
-    def masked_pooling_head(
-        x: torch.Tensor, 
-        mask: torch.Tensor, 
-        p: float = 3.0, 
-        eps: float = 1e-6,
-        features: list[str] | None = None 
-    ) -> torch.Tensor: 
-        '''
-        Concatenates log sum, generalized mean, max, and shannon entropy 
-        of features over a block. 
-        '''
-
-        # call to triton kernel 
-        log_sum, gem, mx, entropy, var = masked_pooling(x, mask, p, eps)
-
-        blocks = {
-            "logsum": log_sum, 
-            "gem": gem, 
-            "max": mx, 
-            "entropy": entropy,
-            "var": var 
-        }
-        
-        if features is None: 
-            features = ["logsum", "gem", "max", "entropy", "var"]
-
-        return torch.cat([blocks[f] for f in features], dim=1)
+    def forward(self, feats: torch.Tensor): 
+        emb    = self.act(self.fc(feats))
+        logits = self.out(self.drop(emb))
+        logits = self.scaler(logits)
+        proj   = self.proj(feats) if self.proj is not None else None 
+        return emb, logits, proj 

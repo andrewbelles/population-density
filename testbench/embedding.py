@@ -26,7 +26,7 @@ from sklearn.model_selection   import StratifiedGroupKFold
 
 from sklearn.decomposition     import PCA 
 
-from preprocessing.loaders     import load_spatial_roi_manifest
+from preprocessing.loaders     import load_spatial_mmap_manifest
 
 from testbench.utils.paths     import (
     CONFIG_PATH,
@@ -35,8 +35,8 @@ from testbench.utils.paths     import (
 
 from testbench.utils.data      import (
     load_spatial_dataset,
-    make_dataset_loader, 
-    make_roi_loader, 
+    make_dataset_loader,
+    make_mmap_loader, 
     load_embedding_mat 
 )
 
@@ -102,9 +102,9 @@ from utils.resources import ComputeStrategy
 
 strategy = ComputeStrategy.from_env()
 
-VIIRS_ROOT = project_path("data", "tensors", "viirs_roi")
-NLCD_ROOT  = project_path("data", "tensors", "nlcd_roi") 
-USPS_ROOT  = project_path("data", "tensors", "usps_roi")
+VIIRS_ROOT = project_path("data", "tensors", "viirs")
+NLCD_ROOT  = project_path("data", "tensors", "nlcd") 
+USPS_ROOT  = project_path("data", "tensors", "usps")
 
 VIIRS_KEY  = "Spatial/VIIRS_ROI"
 NLCD_KEY   = "Spatial/NLCD_ROI"
@@ -124,7 +124,7 @@ def _resolve_root(path: str) -> str:
     return str(p) if p.is_absolute() else project_path(path)
 
 def _row_score(name: str, score: float): 
-    return {"Name": name, "Loss": format_metric(score)}
+    return {"Name": name, "RPS": format_metric(score)}
 
 def _projector_fold_factory(name: str, proj_trials: int, random_state: int): 
     cached_params = None 
@@ -246,8 +246,9 @@ def _spatial_opt(
     *,
     root_dir: str, 
     model_key: str, 
-    canvas_hw: tuple[int, int] = (512, 512), 
-    tile_hw: tuple[int, int] = (512, 512), 
+    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    max_bag_size: int = 64, 
+    sample_frac: float | None = None, 
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
@@ -255,25 +256,30 @@ def _spatial_opt(
     config_path: str = CONFIG_PATH,
     **_
 ): 
-    spatial = load_spatial_roi_manifest(
-        root_dir, canvas_hw=canvas_hw, bag_tiles=bag_tiles, tile_hw=tile_hw)
-    loader  = make_roi_loader(canvas_hw=canvas_hw, tile_hw=tile_hw, bag_tiles=bag_tiles) 
+
+    spatial = load_spatial_mmap_manifest(
+        root_dir, 
+        tile_shape=tile_shape,
+        max_bag_size=max_bag_size,
+        sample_frac=sample_frac,
+        random_state=random_state
+    )
+
+    loader  = make_mmap_loader(
+        tile_shape=tile_shape,
+        max_bag_size=max_bag_size,
+        sample_frac=sample_frac,
+        random_state=random_state
+    )
+
     factory = make_spatial_sfe(compute_strategy=strategy)
     factory = with_spatial_channels(factory, spatial)
-
-    is_packed = getattr(spatial["dataset"], "is_packed", False)
-
-    def _spatial_space(trial):
-        params = define_spatial_space(trial)
-        if is_packed: 
-            params["target_global_batch"] = 1 
-        return params 
 
     evaluator = SpatialEvaluator(
         filepath=root_dir,
         loader_func=loader,
         model_factory=factory,
-        param_space=_spatial_space,
+        param_space=define_spatial_space,
         compute_strategy=strategy,
         task=OPT_TASK,
         config=cv_config(folds, random_state)
@@ -287,7 +293,7 @@ def _spatial_opt(
         sampler_type="multivariate-tpe",
         mp_enabled=False,#(True if devices else False),
         devices=devices,
-        pruner_type="hyperband",
+        pruner_type=None,
         pruner_warmup_steps=5,
     )
 
@@ -300,7 +306,7 @@ def _spatial_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "QWK"],
+        "header": ["Name", "RPS"],
         "row": _row_score(model_key, best_value),
         "params": best_params
     }

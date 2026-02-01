@@ -34,6 +34,7 @@ from preprocessing.loaders import (
     DatasetDict,
     MetaSpec,
     PassthroughSpec,
+    load_spatial_mmap_manifest,
     load_stacking,
     load_tensor_data,
     load_viirs_nchs,
@@ -43,7 +44,7 @@ from preprocessing.loaders import (
     make_oof_dataset_loader,
     load_oof_predictions, 
     ConcatSpec,
-    load_spatial_roi_manifest
+    load_spatial_mmap_manifest
 )
 
 from preprocessing.loaders import load_passthrough
@@ -383,20 +384,21 @@ def _roi_loader(
     )
 
 
-def make_roi_loader(
-    canvas_hw: tuple[int, int] = (512, 512), 
-    cache_mb: int | None = None, 
-    cache_items: int | None = None,
-    bag_tiles: bool = False, 
-    tile_hw: tuple[int, int] = (256, 256) 
+def make_mmap_loader(
+    *,
+    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    max_bag_size: int = 64, 
+    sample_frac: float | None = None, 
+    random_state: int = 0, 
+    shuffle_tiles: bool = True 
 ): 
     return bind(
-        _roi_loader,
-        canvas_hw=canvas_hw,
-        cache_mb=cache_mb,
-        cache_items=cache_items,
-        bag_tiles=bag_tiles,
-        tile_hw=tile_hw
+        load_spatial_mmap_manifest,
+        tile_shape=tile_shape,
+        max_bag_size=max_bag_size,
+        sample_frac=sample_frac,
+        random_state=random_state,
+        shuffle_tiles=shuffle_tiles
     )
 
 def load_embedding_mat(path: str): 
@@ -407,15 +409,26 @@ def load_embedding_mat(path: str):
     y = np.asarray(mat["labels"]).reshape(-1).astype(np.int64)
     return X, y
 
-def load_spatial_dataset(root_dir: str, canvas_hw: tuple[int, int]): 
-    data = make_roi_loader(canvas_hw=canvas_hw)(root_dir)
+def load_spatial_dataset(
+    root_dir: str,
+    *,
+    tile_shape: tuple[int, int, int],
+    max_bag_size: int, 
+    sample_frac: float | None = None, 
+    random_state: int = 0 
+): 
+
+    data = make_mmap_loader(
+        tile_shape=tile_shape,
+        max_bag_size=max_bag_size,
+        sample_frac=sample_frac,
+        random_state=random_state
+    )(root_dir)
+
     return (
-        data["dataset"], 
-        data["labels"], 
-        data["sample_ids"], 
-        data["collate_fn"], 
-        data["in_channels"],
-        data.get("sample_labels", np.array([])), 
-        data.get("sample_ids_full", np.array([])),
-        data.get("sample_groups", np.array([]))
+        data["dataset"],
+        data["labels"],
+        data["sample_ids"],
+        data["collate_fn"],
+        data["in_channels"]
     )

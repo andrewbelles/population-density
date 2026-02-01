@@ -416,23 +416,10 @@ def _iter_spatial_splits(
     task,
     config: CVConfig
 ): 
-    is_packed = getattr(dataset, "is_packed", False)
-
-    if is_packed: 
-        y        = data["sample_labels"]
-        groups   = data["sample_groups"]
-        splitter = StratifiedGroupKFold(
-            n_splits=config.n_splits,
-            shuffle=True, 
-            random_state=config.random_state
-        )
-        splits   = splitter.split(np.zeros_like(y), y, groups)
-        return splits, groups, True 
-
     y      = labels 
     idx    = np.arange(len(y))
     splits = config.get_splitter(task).split(idx, y)
-    return splits, None, False
+    return splits, None
 
 
 def _spatial_eval_fold(
@@ -447,45 +434,28 @@ def _spatial_eval_fold(
     batch_size: int, 
     compute_strategy: ComputeStrategy,
     groups=None,
-    is_packed: bool,
     trial=None, 
     fold_idx=0 
 ):
-    if is_packed:
-        if groups is None: 
-            raise ValueError("if is_packed then groups is not None at runtime")
-        train_packs = np.unique(groups[train_idx])
-        test_packs  = np.unique(groups[test_idx])
-        train_ds    = Subset(dataset, train_packs)
-        test_ds     = Subset(dataset, test_packs)
-    else: 
-        train_ds    = Subset(dataset, train_idx)
-        test_ds     = Subset(dataset, test_idx)
-
+    train_ds    = Subset(dataset, train_idx)
+    test_ds     = Subset(dataset, test_idx)
+    '''
     def pruning_callback(epoch, metrics): 
         if trial is None: 
             return 
-
         current_score = metrics.get("val_loss")
         if current_score is not None: 
-            trial.report(-1.0 * current_score, step=epoch)
+            step = fold_idx * 1_000_000 + epoch 
+            trial.report(-1.0 * current_score, step=step)
             if trial.should_prune(): 
                 raise optuna.TrialPruned()
-
+    '''
     model = model_factory(collate_fn=collate_fn, **params)
 
     val_loader   = _make_spatial_loader(
         test_ds, collate_fn, batch_size, compute_strategy, shuffle=False)
 
-    if is_packed: 
-        train_loader = _make_spatial_loader(
-            train_ds, collate_fn, batch_size, compute_strategy, shuffle=True)
-        model.fit(train_loader, y=None, val_loader=val_loader, callbacks=[pruning_callback])
-        val_loss     = model.loss(val_loader)
-
-    else: 
-        model.fit(train_ds, labels[train_idx], callbacks=[pruning_callback])
-        val_loss     = model.loss(test_ds)
+    model.fit(train_ds, labels[train_idx])
 
     y_true_list = []
     prob_list = [] 
@@ -494,7 +464,7 @@ def _spatial_eval_fold(
     with torch.no_grad(): 
         for batch in val_loader: 
             if isinstance(batch, (tuple, list)): 
-                xb, mb, rois, yb = batch[0], batch[1], batch[2], batch[3] 
+                yb = batch[1]
             else: 
                 yb = batch["labels"]
 
@@ -636,7 +606,7 @@ class SpatialEvaluator(OptunaEvaluator):
 
         scores = []
 
-        splits, groups, is_packed = _iter_spatial_splits(
+        splits, groups = _iter_spatial_splits(
             self.data, self.dataset, self.labels, self.task, self.config)
 
         with DevicePool.get_instance().claim() as device_id: 
@@ -654,7 +624,6 @@ class SpatialEvaluator(OptunaEvaluator):
                     batch_size=self.batch_size,
                     compute_strategy=thread_strategy,
                     groups=groups,
-                    is_packed=is_packed,
                     trial=trial,
                     fold_idx=fold_idx
                 )

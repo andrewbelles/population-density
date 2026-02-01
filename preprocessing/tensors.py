@@ -6,17 +6,21 @@
 # canvas counties together so that they are on uniform images for SpatialClassifier to use. 
 # 
 
-import imageio, fiona, csv, json, rasterio, rasterio.mask, argparse, sys, time, os
+import fiona, csv, rasterio, rasterio.mask, argparse, sys, os, time
 
 import numpy as np 
 
 from pathlib import Path 
 
-from typing import Tuple, Dict, Iterable 
+from typing import Tuple, Dict, Iterable, Protocol, Iterable  
 
 from numpy.typing import NDArray
 
 from abc import ABC, abstractmethod
+
+from dataclasses import dataclass 
+
+from torch.utils.data import Dataset, get_worker_info
 
 from rasterio.warp import (
     transform_geom,
@@ -28,7 +32,6 @@ from rasterio.features import (
     rasterize 
 )
 
-from shapely import is_empty
 from shapely.geometry import (
     shape,
     mapping 
@@ -38,381 +41,300 @@ from rasterio.errors import WindowError
 
 from utils.helpers import project_path 
 
-from utils.resources import LRUCache
+# --------------------------------------------------------- 
+# Tiled MMap Loader 
+# --------------------------------------------------------- 
 
-# --------------------------------------------------------
-# Tensor Loaders. Pre-packed and Lazy Loader  
-# --------------------------------------------------------
+class TileLoader(Dataset): 
 
-class SpatialLazyLoader: 
     '''
-    Loads saved spatial samples (VIIRS, NLCD, TIGER) and packs into ROI canvases.
-    '''
-    def __init__(self, root_dir: str): 
-        self.is_packed = False 
-        self.root_dir  = Path(root_dir)
-        manifest       = self.root_dir / "manifest.jsonl"
-        self.records   = [
-            json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+    Memory-mapped tiled tensor dataset 
 
-    def __len__(self):
-        return len(self.records)
-
-    def __getitem__(self, idx): 
-        rec = self.records[idx]
-        with np.load(self.root_dir / rec["path"]) as npz: 
-            spatial = npz["spatial"]
-            mask    = npz["mask"]
-        return spatial, mask, int(rec["label"]), rec["fips"]
-
-    @staticmethod 
-    def pack(batch, canvas_hw=(512, 512), tile_hw=None, weight_by_mask=True, gap: int = 32): 
-        '''
-        Greedy packing tool designed for ROI pooling, takes batches and aggressively packs 
-        samples together on (H,W) images. 
-        '''
-
-        if tile_hw is None: 
-            tile_hw = canvas_hw 
-        
-        H, W          = canvas_hw 
-        canvases      = []
-        rois          = [] # list of (canvas index, y0, x0, y1, x1)
-        labels, fips  = [], []
-        group_ids     = []
-        group_weights = [] 
-
-        for sample_idx, (spatial, mask, label, fip) in enumerate(batch): 
-            labels.append(label)
-            fips.append(fip)
-
-            if spatial.ndim == 2: 
-                spatial = spatial[None, ...]
-            elif spatial.ndim != 3: 
-                raise ValueError(f"spatial must be 2d/3d, got {spatial.shape}")
-
-            if mask.ndim == 3: 
-                mask = mask[0]
-            elif mask.ndim != 2: 
-                raise ValueError(f"mask must be 2d/3d, got {mask.shape}")
-
-            for tile, tile_mask in SpatialLazyLoader._iter_tiles(spatial, mask, tile_hw): 
-                h, w   = tile.shape[-2], tile.shape[-1] 
-                weight = float(tile_mask.sum()) if weight_by_mask else 1.0 
-
-                placed = False 
-
-                # Try to place current bbox on any active canvases, if not make a new one 
-                for c_idx, (canvas, mask_canvas, cursor) in enumerate(canvases): 
-                    y, x, row_h = cursor 
-
-                    if x + w > W: 
-                        y     = y + row_h + gap 
-                        x     = 0 
-                        row_h = 0
-
-                    if y + h <= H and x + w <= W: 
-
-                        canvas[:, y:y+h, x:x+w]      = tile 
-                        mask_canvas[0, y:y+h, x:x+w] = tile_mask 
-
-                        rois.append((c_idx, y, x, y + h, x + w))
-
-                        group_ids.append(sample_idx)
-                        group_weights.append(weight)
-
-                        cursor[:] = [y, x + w + gap, max(row_h, h)]   
-                        placed = True 
-                        break 
-
-                    new_y = y + h + gap 
-                    if new_y + h <= H: 
-                        
-                        cursor[0] = new_y 
-                        cursor[1] = 0 
-                        
-                        canvas[:, new_y:new_y+h, 0:w] = tile 
-                        mask_canvas[0, new_y:new_y+h, 0:w] = tile_mask 
-                        rois.append((c_idx, new_y, 0, new_y + h, w))
-
-                        group_ids.append(sample_idx)
-                        group_weights.append(weight)
-
-                        cursor[1] = w + gap 
-                        placed = True 
-                        break 
-
-                if not placed: 
-
-                    canvas      = np.zeros((spatial.shape[0], H, W), dtype=spatial.dtype)
-                    mask_canvas = np.zeros((1, H, W), dtype=np.uint8)
-
-                    canvas[:, :h, :w]      = tile 
-                    mask_canvas[0, :h, :w] = tile_mask
-
-                    canvases.append([canvas, mask_canvas, [0, w + gap, h]])
-                    rois.append((len(canvases) - 1, 0, 0, h, w)) 
-                    group_ids.append(sample_idx)
-                    group_weights.append(weight)
-
-        if not canvases: 
-            raise ValueError("pack() produced no canvases")
-
-        packed_images = np.stack([c[0] for c in canvases], axis=0)
-        packed_masks  = np.stack([c[1] for c in canvases], axis=0)
-        return (packed_images, packed_masks, rois, np.asarray(labels), 
-                fips, group_ids, group_weights)
-
-    @staticmethod 
-    def _iter_tiles(spatial, mask, tile_hw): 
-        H, W = tile_hw 
-        h, w = spatial.shape[-2:]
-        for y0 in range(0, h, H): 
-            for x0 in range(0, w, W): 
-                y1 = min(y0 + H, h)
-                x1 = min(x0 + W, w)
-                tile      = spatial[:, y0:y1, x0:x1] 
-                tile_mask = mask[y0:y1, x0:x1]
-                if tile_mask.sum() == 0: 
-                    continue 
-                yield tile, tile_mask 
-
-
-class SpatialPackedLoader: 
-    '''
-    Loads pre-packed canvases created by SpatialTensorDataset.save_packed. 
-    Each item contains full batch-ready tensors and ROI metadata 
-    '''
-
-    def __init__(self, root_dir: str, *, cache_mb: int = 0, cache_items: int = 0): 
-        self.is_packed = True 
-        self.root_dir  = Path(root_dir)
-        manifest       = self.root_dir / "manifest.jsonl"
-        self.records   = [
-            json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() 
-            if line.strip() 
-        ]
-
-        self.cache = None 
-        if cache_mb > 0 or cache_items > 0: 
-            self.cache = LRUCache(
-                max_bytes=(cache_mb * 1024 * 1024) if cache_mb > 0 else None, 
-                max_items=(cache_items if cache_items > 0 else None)
-            )
-
-        self.prefetch_workers = 0 
-        self.prefetch_factor  = 4
-
-        # cache metadata 
-        self._cache_reads  = 0 
-        self._cache_hits   = 0 
-        self._cache_misses = 0
-
-    def __len__(self): 
-        return len(self.records)
-
-    def __getitem__(self, idx): 
-        rec = self.records[idx]
-        key = rec["path"]
-
-        self._cache_reads += 1 
-
-        if self.cache is not None: 
-            hit = self.cache.get(key)
-            if hit is not None: 
-                self._cache_hits += 1 
-                canvases, masks, rois, labels, fips, group_ids, group_weights = hit 
-                return (
-                    canvases, 
-                    masks, 
-                    rois.tolist(),
-                    labels,
-                    list(fips),
-                    group_ids, 
-                    group_weights 
-                )
-            else: 
-                self._cache_misses += 1 
-
-        with np.load(self.root_dir / rec["path"]) as npz: 
-            canvases      = npz["canvases"]
-            masks         = npz["masks"]
-            rois          = npz["rois"]
-            labels        = npz["labels"]
-            fips          = npz["fips"]
-            group_ids     = npz["group_ids"]
-            group_weights = npz["group_weights"]
-
-        if self.cache is not None: 
-            self.cache.put(key, (canvases, masks, rois, labels, fips, group_ids, group_weights))
-
-        return (
-            canvases, 
-            masks, 
-            rois.tolist(),
-            labels,
-            list(fips),
-            group_ids, 
-            group_weights 
-        )
-
-class SpatialTileLoader:
-    '''
-    Loads per-county samples and slices them into fixed tiles. 
-    Returns a list/stack of tiles & masks 
+    Returns: (bag, label) by default 
+    - bag: NDArray shape (max_bag_size, C, H, W), dtype float32  
+    - label: int 
+    - mask: bool array shape (max_bag_size,) 
+    
+    Optionally:
+    - include fips in output 
+    - include original (not subsampled) tile count 
     '''
 
     def __init__(
-        self,
-        root_dir: str, 
-        tile_hw=(256, 256), 
+        self, 
         *,
-        min_mask_frac: float = 0.0, # if mask % < frac then discards 
-        cache_tiles: bool = True, 
-        cache_dir: str | None = None, 
-        cache_compress: bool = False,
-        max_tiles_per_sample: int = None, 
-        tile_sample_frac: float | None = None, 
-        tile_sample_seed: int | None = None
-    ):
-        self.is_packed      = False 
-        self.is_tiles       = True 
-        self.root_dir       = Path(root_dir)
-        self.tile_hw        = tile_hw 
-        self.min_mask_frac  = float(min_mask_frac)
- 
-        self.cache_tiles    = bool(cache_tiles)
-        self.cache_compress = bool(cache_compress)
-        if cache_dir is None: 
-            self.cache_dir = self.root_dir / "tile_cache" 
-        else: 
-            self.cache_dir = Path(cache_dir)
+        index_csv: str, 
+        bin_path: str, 
+        tile_shape: tuple[int, int, int], 
+        max_bag_size: int, 
+        dtype: np.dtype = np.float32,
+        sample_frac: float | None = None, 
+        random_state: int = 0, 
+        shuffle_tiles: bool = True, 
+        pad_value: float = 0.0, 
+        return_fips: bool = False, 
+        return_num_tiles: bool = False, 
+        should_validate_index: bool = False 
+    ): 
+        self.index_csv             = index_csv
+        self.bin_path              = bin_path
+        self.tile_shape            = tuple(int(x) for x in tile_shape)
+        self.tile_elems            = int(np.prod(self.tile_shape))
+        self.max_bag_size          = int(max_bag_size)
+        self.dtype                 = np.dtype(dtype)
+        self.sample_frac           = sample_frac
+        self.random_state          = random_state
+        self.shuffle_tiles         = bool(shuffle_tiles)
+        self.pad_value             = float(pad_value)
+        self.return_fips           = bool(return_fips)
+        self.return_num_tiles      = bool(return_num_tiles)
+        self.should_validate_index = bool(should_validate_index)
 
-        if self.cache_tiles: 
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._rng  = None 
+        self.epoch = 0
 
-        manifest = self.root_dir / "manifest.jsonl"
-        self.records = [
-            json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
-            if line.strip() 
-        ]
+        self.fips, self.labels, self.offset_elements, self.num_tiles = self.load_index() 
 
-        self.max_tiles_per_sample = max_tiles_per_sample 
-        self.tile_sample_frac     = tile_sample_frac 
-        self.tile_sample_seed     = tile_sample_seed
+        self.mmap = np.memmap(self.bin_path, mode="r", dtype=self.dtype)
 
-    def __len__(self): 
-        return len(self.records)
+        if self.should_validate_index:
+            self.validate_offsets() 
 
-    def __getitem__(self, idx):
-        rec = self.records[idx]
-        
-        cache_path = None 
-        if self.cache_tiles: 
-            stem       = Path(rec["path"]).stem 
-            cache_path = self.cache_dir / f"{idx:06d}_{stem}_tiles.npz"
-            if cache_path.exists(): 
-                with np.load(cache_path) as npz: 
-                    tiles = npz["tiles"]
-                    masks = npz["masks"]
-                return tiles, masks, int(rec["label"]), rec["fips"]
+    def __len__(self) -> int: 
+        return len(self.labels)
 
-        with np.load(self.root_dir / rec["path"]) as npz: 
-            spatial = npz["spatial"]
-            mask    = npz["mask"]
+    def __getitem__(self, idx: int): 
+        n_tiles = int(self.num_tiles[idx])
+        label   = int(self.labels[idx])
 
-        if spatial.ndim == 2: 
-            spatial = spatial[None, ...]
-        elif spatial.ndim != 3: 
-            raise ValueError(f"spatial must be 2d/3d, got {spatial.shape}")
+        if n_tiles <= 0: 
+            bag  = np.zeros((self.max_bag_size, *self.tile_shape), dtype=self.dtype)
+            # mask = np.zeros((self.max_bag_size,), dtype=bool)
+            return self.format_output(bag, label, idx, n_tiles)
 
-        if mask.ndim == 3: 
-            mask = mask[0]
-        elif mask.ndim != 2: 
-            raise ValueError(f"mask must be 2d/3d, got {mask.shape}")
+        start = int(self.offset_elements[idx])
+        end   = start + n_tiles * self.tile_elems 
+        raw   = self.mmap[start:end]
+        tiles = raw.reshape(n_tiles, *self.tile_shape)
+        rng   = self.get_rng()
+        keep  = n_tiles 
 
-        tiles = []
-        masks = []
+        if self.sample_frac is not None: 
+            if not (0.0 < self.sample_frac <= 1.0): 
+                raise ValueError("sample_frac must be in (0, 1]")
+            keep = max(1, int(np.floor(n_tiles * self.sample_frac)))
 
-        Ht, Wt = self.tile_hw 
-        h, w   = spatial.shape[-2:]
+        keep = min(keep, self.max_bag_size)
+        if keep < n_tiles: 
+            indices  = rng.choice(n_tiles, size=keep, replace=False)
+            tiles    = tiles[indices] 
 
-        for y0 in range(0, h, Ht): 
-            for x0 in range(0, w, Wt): 
-                y1 = min(y0 + Ht, h)
-                x1 = min(x0 + Wt, w) 
-
-                tile      = spatial[:, y0:y1, x0:x1]
-                tile_mask = mask[y0:y1, x0:x1]
-
-                # ensure all tiles are contiguous size (tile_hw)
-                th, tw    = tile.shape[-2:]
-                if th != Ht or tw != Wt: 
-                    pad_tile = np.zeros((spatial.shape[0], Ht, Wt), dtype=spatial.dtype)
-                    pad_mask = np.zeros((Ht, Wt), dtype=tile_mask.dtype)
-                    pad_tile[:, :th, :tw] = tile 
-                    pad_mask[:th, :tw]    = tile_mask 
-                    tile      = pad_tile 
-                    tile_mask = pad_mask 
-
-                valid     = int(tile_mask.sum())
-                if valid == 0: 
-                    continue 
-
-                frac = valid / float(tile_mask.size)
-                if frac < self.min_mask_frac: 
-                    continue 
-
-                tiles.append(tile)
-                masks.append(tile_mask)
-
-        if not tiles:  
-            tiles = np.zeros((0, spatial.shape[0], Ht, Wt), dtype=spatial.dtype)
-            masks = np.zeros((0, Ht, Wt), dtype=mask.dtype)
-        else: 
-            tiles = np.stack(tiles, axis=0)
-            masks = np.stack(masks, axis=0)
-
-        if self.cache_tiles and cache_path is not None: 
-            tmp = cache_path.with_suffix(".tmp.npz")
-            if self.cache_compress:
-                np.savez_compressed(tmp, tiles=tiles, masks=masks)
+        if self.shuffle_tiles and keep > 1: 
+            if tiles.flags.writeable:
+                rng.shuffle(tiles)
             else: 
-                np.savez(tmp, tiles=tiles, masks=masks)
-            tmp.replace(cache_path)
+                perm  = rng.permutation(tiles.shape[0])
+                tiles = tiles[perm] 
 
-        return tiles, masks, int(rec["label"]), rec["fips"]
+        '''
+        if keep < self.max_bag_size:
+            pad = np.full(
+                (self.max_bag_size, *self.tile_shape), 
+                self.pad_value, dtype=self.dtype
+            )
+            pad[:keep] = tiles 
+            tiles      = pad 
 
-    def subsample(self, tiles, masks): 
-        n = tiles.shape[0]
+        mask = np.zeros((self.max_bag_size,), dtype=bool)
+        mask[:keep] = True 
+        '''
 
-        if n == 0: 
-            return tiles, masks 
+        return self.format_output(tiles, label, idx, n_tiles)
 
-        keep = None 
+    def format_output(self, tiles, label, idx, n_tiles): 
+        out = [tiles, label]
+        if self.return_fips or self.return_num_tiles:
+            if self.return_fips:
+                out.append(self.fips[idx])
+            if self.return_num_tiles:
+                out.append(int(n_tiles))
+        return tuple(out)
 
-        if self.tile_sample_frac is not None: 
-            if not (0.0 < self.tile_sample_frac <= 1.0): 
-                raise ValueError("tile_sample_frac must be in (0, 1]")
-            keep = max(1, int(np.floor(n * self.tile_sample_frac)))
+    def set_epoch(self, epoch: int): 
+        self.epoch = int(epoch)
+        self._rng  = None 
 
-        if self.max_tiles_per_sample is not None: 
-            keep = min(keep, self.max_tiles_per_sample) if keep is not None else self.max_tiles_per_sample
+    def get_rng(self) -> np.random.Generator:
+        if self._rng is not None: 
+            return self._rng 
 
-        if keep is None or keep >= n: 
-            return tiles, masks 
+        worker_info = get_worker_info() 
+        if worker_info is None: 
+            base = self.random_state 
+        else: 
+            base = worker_info.seed ^ self.random_state
 
-        rng = np.random.default_rng(self.tile_sample_seed)
-        idx = rng.choice(n, size=keep, replace=False)
-        return tiles[idx], masks[idx]
+        base      = base ^ (self.epoch + 0x9E3779B9)
+        self._rng = np.random.default_rng(base)
+        return self._rng 
+
+    def load_index(self): 
+
+        fips    = []
+        labels  = []
+        offsets = []
+        counts  = []
+
+        with open(self.index_csv, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f) 
+            for row in reader: 
+                f = (row.get("fips") or "").strip() 
+                if f.isdigit():
+                    f = f.zfill(5)
+
+                label       = int(row["label"])
+                byte_offset = int(row["byte_offset"])
+                num_tiles   = int(row["num_tiles"])
+
+                if byte_offset % self.dtype.itemsize != 0: 
+                    raise ValueError("byte_offset is not aligned to dtype size")
+
+                offsets.append(byte_offset // self.dtype.itemsize)
+                counts.append(num_tiles)
+                labels.append(label)
+                fips.append(f)
+
+        return (
+            np.asarray(fips, dtype="U5"),
+            np.asarray(labels, dtype=np.int64),
+            np.asarray(offsets, dtype=np.int64),
+            np.asarray(counts, dtype=np.int64)
+        )
+
+    def validate_offsets(self): 
+        file_elems = os.path.getsize(self.bin_path) // self.dtype.itemsize 
+        for i in range(len(self.labels)): 
+            start   = int(self.offset_elements[i])
+            n_tiles = int(self.num_tiles[i])
+            end     = start + n_tiles * self.tile_elems 
+            if end > file_elems:
+                raise ValueError(f"index row {i} points past end of dataset.bin")
+
+# ---------------------------------------------------------
+# Binary Data Writer 
+# ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class CountyTileStream: 
+    fips: str 
+    label: int 
+    tiles: Iterable[np.ndarray]
+
+class TileStreamSource(Protocol): 
+    '''
+    Contract on how to produce per-county stream of tiles. 
+    Writer does not care about how tiles are generated 
+    '''
+
+    def iter_bags(self) -> Iterable[CountyTileStream]: 
+        ...
+
+    @property
+    def tile_shape(self) -> tuple[int, int, int]: 
+        ...
+
+    @property 
+    def dtype(self) -> np.dtype: 
+        ...
+
+
+class BinaryTileWriter: 
+    '''
+    Writes monolithic dataset.bin + index.csv from any TileStreamSource 
+    Streams tiles to avoid large in-memory bags 
+    '''
+
+    def __init__(
+        self, 
+        source: TileStreamSource,
+        *,
+        out_bin_path: str, 
+        out_index_path: str, 
+        empty_threshold: float = 0.95 # fraction of zeros in mask
+    ): 
+        self.source          = source 
+        self.out_bin_path    = out_bin_path 
+        self.out_index_path  = out_index_path 
+        self.empty_threshold = empty_threshold
+
+    def write(self): 
+
+        tile_shape = self.source.tile_shape 
+        dtype      = np.dtype(self.source.dtype)
+
+        bytes_per_tile = dtype.itemsize 
+        for d in tile_shape: 
+            bytes_per_tile *= int(d)
+
+        os.makedirs(os.path.dirname(self.out_bin_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.out_index_path), exist_ok=True)
+
+        # For output print 
+        t0        = time.perf_counter()
+        last      = t0 
+        bag_count = 0 
+
+        with (open(self.out_bin_path, "wb") as bin_f, 
+              open(self.out_index_path, "w", newline="", encoding="utf-8") as csv_f): 
+            writer = csv.DictWriter(
+                csv_f, 
+                fieldnames=["fips", "label", "byte_offset", "num_tiles"]
+            )
+            writer.writeheader()
+
+            byte_offset = 0 
+
+            for bag in self.source.iter_bags():
+                n_written = 0 
+                
+                for tile in bag.tiles: 
+                    if tile.shape != tile_shape: 
+                        raise ValueError(f"tile shape {tile.shape} != expected {tile_shape}")
+                    if tile.dtype != dtype: 
+                        tile = tile.astype(dtype, copy=False)
+
+                    zero_frac = float((tile == 0).sum()) / float(tile.size)
+                    if zero_frac >= self.empty_threshold:
+                        continue 
+
+                    bin_f.write(tile.tobytes(order="C"))
+                    n_written += 1 
+
+                if n_written == 0: 
+                    continue 
+
+                writer.writerow({
+                    "fips": bag.fips, 
+                    "label": int(bag.label),
+                    "byte_offset": byte_offset,
+                    "num_tiles": n_written
+                })
+                byte_offset += n_written * bytes_per_tile
+
+                bag_count += 1 
+                if bag_count % 200 == 0: 
+                    now = time.perf_counter()
+                    print(
+                        f"[binary writer] {bag_count} bags | +{now - last:.2f}s | "
+                        f"total {now - t0:.2f}s", file=sys.stderr, flush=True 
+                    )
+                    last = now 
 
 # ---------------------------------------------------------
 # Tensor Dataset Parent Class 
 # ---------------------------------------------------------
 
-class SpatialTensorDataset(ABC): 
+class SpatialTensorDataset(ABC, TileStreamSource): 
 
     '''
     Parent Class for spatial tensor datasets (VIIRS, NLCD, TIGER).
@@ -421,14 +343,10 @@ class SpatialTensorDataset(ABC):
 
     def __init__(
         self,
-        raster_path: str | None = None, 
         counties_path: str | None = None, 
         labels_path: str | None = None, 
-        *,
-        canvas_size: Tuple[int, int] | None = None, 
         max_counties: int | None = None, 
-        debug_png_dir: str | None = None, 
-        tight_crop: bool = True 
+        tile_hw: tuple[int, int] = (224, 224)
     ): 
         if counties_path is None: 
             counties_path = project_path(
@@ -437,227 +355,31 @@ class SpatialTensorDataset(ABC):
         if labels_path is None: 
             labels_path = project_path("data", "nchs", "nchs_classification.csv")
 
-        self.raster_path   = raster_path 
         self.counties_path = counties_path 
         self.labels_path   = labels_path 
-        self.canvas_size   = canvas_size
+        self.tile_hw       = tuple(int(x) for x in tile_hw)
         self.max_counties  = max_counties if max_counties is None else int(max_counties)
-        self.debug_png_dir = debug_png_dir 
-        self.tight_crop    = bool(tight_crop)
-        self.label_map     = self._load_labels()
+        self.label_map     = self.load_labels()
 
-    def save(self, output_dir: str): 
-        out_dir    = Path(output_dir)
-        sample_dir = out_dir / "samples"
-        sample_dir.mkdir(parents=True, exist_ok=True)
-
-        records = []
-        t0      = time.perf_counter() 
-        last    = t0
-        count   = 0 
-        for rec in self._iter_samples(): 
-            fips    = rec["fips"]
-            label   = int(rec["label"])
-            spatial = rec["spatial"]
-            mask    = rec["mask"]
-
-            if self.tight_crop: 
-                spatial, mask = self._tight_crop(spatial, mask)
-
-            if spatial.size == 0:
-                continue 
-
-            if np.issubdtype(spatial.dtype, np.floating): 
-                spatial_out = spatial.astype(np.float16, copy=False) 
-            else: 
-                spatial_out = spatial 
-
-            out_path = sample_dir / f"fips_{fips}.npz"
-            np.savez_compressed(
-                out_path,
-                spatial=spatial_out,
-                mask=mask.astype(np.uint8),
-                label=np.int64(label),
-                fips=fips
-            )
-
-            records.append({
-                "fips": fips,
-                "label": label,
-                "path": str(out_path.relative_to(out_dir)),
-                "shape": [int(x) for x in spatial.shape],
-                "mask_sum": int(mask.sum())
-            })
-
-            if self.debug_png_dir: 
-                self._write_debug_png(fips, spatial, mask)
-
-            count += 1 
-            if count % 250 == 0: 
-                now = time.perf_counter()
-                print(
-                    f"[save] {count} samples | +{now - last:.2f}s | total {now - t0:.2f}s",
-                    file=sys.stderr,
-                    flush=True
-                )
-                last = now 
-            if self.max_counties is not None and count >= self.max_counties: 
-                break 
-
-        manifest_path = out_dir / "manifest.jsonl"
-        with manifest_path.open("w", encoding="utf-8") as f: 
-            for r in records: 
-                f.write(json.dumps(r) + "\n")
-
-        print(f"[save] wrote {len(records)} samples to {out_dir} (manifest: {manifest_path})")
-
-    def save_packed(
+    def save(
         self,
-        out_dir, 
-        pack_batch: int = 8,
-        canvas_hw=(512, 512),
-        tile_hw=None,
-        gap: int = 32,
-        weight_by_mask: bool = True, 
-        pack_ram_mb: int | None = None, 
-        max_canvases: int | None = 8
+        *,
+        out_bin_path: str, 
+        out_index_path: str, 
+        empty_threshold: float = 0.95
     ):
-        out_dir    = Path(out_dir)
-        packed_dir = out_dir / "packed" 
-        packed_dir.mkdir(parents=True, exist_ok=True)
-
-        if pack_ram_mb is None: 
-            env_mb      = os.environ.get("TOPG_TENSOR_RAM_MB", "")
-            pack_ram_mb = int(env_mb) if env_mb.strip() else None 
-
-        ram_bytes = None 
-        if pack_ram_mb is not None and pack_ram_mb > 0: 
-            ram_bytes = pack_ram_mb * 1024 * 1024 
-
-        pack_batch_eff   = int(pack_batch)
-        max_canvases_eff = max_canvases
-        
-        def _apply_ram_limits(spatial, mask): 
-            nonlocal pack_batch_eff, max_canvases_eff 
-            if ram_bytes is None: 
-                return 
-            sample_bytes = spatial.nbytes + mask.nbytes 
-            if sample_bytes > 0: 
-                est_batch      = max(1, int((ram_bytes * 0.5) / sample_bytes))
-                pack_batch_eff = max(1, min(pack_batch_eff, est_batch))
-
-            bytes_per_canvas = self._estimate_canvas_bytes(spatial, canvas_hw)
-            if bytes_per_canvas > 0: 
-                est_canvases = max(1, int((ram_bytes * 0.5) / bytes_per_canvas))
-                if max_canvases_eff is None: 
-                    max_canvases_eff = est_canvases 
-                else: 
-                    max_canvases_eff = min(max_canvases_eff, est_canvases)
-
-        batch          = []
-        records        = []
-        all_labels     = []
-        all_fips       = []
-        all_groups     = []
-        pack_labels    = []
-        pack_n_samples = []
-        pack_idx       = 0
-        count          = 0 
-
-        t0   = time.perf_counter() 
-        last = t0
-
-        def _record_pack(batch, pack_idx):
-            pack_y = [b[2] for b in batch]
-            pack_f = [b[3] for b in batch]
-
-            uniq, counts = np.unique(pack_y, return_counts=True)
-            pack_labels.append(int(uniq[counts.argmax()]))
-            pack_n_samples.append(len(pack_y))
-            all_labels.extend(pack_y)
-            all_fips.extend(pack_f)
-            all_groups.extend([pack_idx] * len(pack_y))
-
-        def _flush_capped(batch):
-            nonlocal pack_idx
-            if not batch: 
-                return []
-            batch, overflow = self._pack_with_cap(
-                batch,
-                max_canvases=max_canvases,
-                canvas_hw=canvas_hw,
-                tile_hw=tile_hw,
-                gap=gap,
-                weight_by_mask=weight_by_mask,
-            )
-
-            _record_pack(batch, pack_idx)
-            meta = self._flush_pack(
-                batch, pack_idx, out_dir, 
-                canvas_hw=canvas_hw,
-                tile_hw=tile_hw,
-                gap=gap,
-                weight_by_mask=weight_by_mask
-            )
-            records.append(meta)
-            pack_idx += 1 
-            return overflow 
-
-        for rec in self._iter_samples(): 
-            spatial, mask, label, fips = (rec["spatial"], rec["mask"], 
-                                          int(rec["label"]), rec["fips"])
-
-            if self.tight_crop: 
-                spatial, mask = self._tight_crop(spatial, mask)
-
-            if spatial.size == 0: 
-                continue 
-
-            _apply_ram_limits(spatial, mask)
-
-            batch.append((spatial, mask, label, fips))
-            count += 1 
-
-            if len(batch) >= pack_batch: 
-                overflow = _flush_capped(batch)
-                batch[:] = overflow 
-
-            if count % 250 == 0: 
-                now = time.perf_counter()
-                print(
-                    f"[save] {count} samples | +{now - last:.2f}s | total {now - t0:.2f}s",
-                    file=sys.stderr,
-                    flush=True
-                )
-                last = now 
-
-            if self.max_counties is not None and count >= self.max_counties: 
-                break 
-
-        overflow = _flush_capped(batch)
-        while overflow: 
-            overflow = _flush_capped(overflow)
-
-        meta_path = out_dir / "packed" / "meta.npz" 
-        np.savez(
-            meta_path,
-            sample_labels=np.asarray(all_labels, dtype=np.int64),
-            sample_ids_full=np.asarray(all_fips, dtype="U5"),
-            sample_groups=np.asarray(all_groups, dtype=np.int64),
-            pack_labels=np.asarray(pack_labels, dtype=np.int64),
-            pack_n_samples=np.asarray(pack_n_samples, dtype=np.int64)
+        '''
+        Wraps BinaryTileWriter
+        '''
+        writer = BinaryTileWriter(
+            self,
+            out_bin_path=out_bin_path,
+            out_index_path=out_index_path,
+            empty_threshold=empty_threshold
         )
-        print(f"[save_packed] wrote meta: {meta_path}")
+        writer.write() 
 
-        manifest_path = out_dir / "manifest.jsonl"
-        with manifest_path.open("w", encoding="utf-8") as f: 
-            for r in records: 
-                f.write(json.dumps(r) + "\n")
-
-        print(f"[save_packed] wrote {len(records)} packs to {out_dir} "
-              f"(manifest: {manifest_path})")
-
-    def _load_labels(self) -> Dict[str, int]: 
+    def load_labels(self) -> Dict[str, int]: 
         path = Path(self.labels_path)
         if not path.exists(): 
             raise FileNotFoundError(f"label CSV not found: {path}")
@@ -684,7 +406,7 @@ class SpatialTensorDataset(ABC):
             raise ValueError("label map is empty")
         return labels 
 
-    def _iter_counties(
+    def iter_counties(
         self, 
         source: fiona.Collection,
         raster_crs 
@@ -704,161 +426,89 @@ class SpatialTensorDataset(ABC):
 
             yield fips, geom
 
-    def _pack_with_cap(
-        self,
-        batch,
-        *,
-        max_canvases: int | None, 
-        canvas_hw, 
-        tile_hw, 
-        gap,
-        weight_by_mask
-    ): 
-        if max_canvases is None: 
-            return batch, None 
+    def iter_tiles(self, data: NDArray) -> Iterable[NDArray]: 
 
-        overflow = []
-        while len(batch) > 1: 
-            canvases = SpatialLazyLoader.pack(
-                batch, 
-                canvas_hw=canvas_hw,
-                tile_hw=tile_hw,
-                gap=gap,
-                weight_by_mask=weight_by_mask
-            )[0]
+        ht, wt = self.tile_hw 
 
-            if canvases.shape[0] <= max_canvases:
-                break 
-            overflow.append(batch.pop()) 
+        if data.ndim == 2: 
+            h, w   = data.shape 
+            for y0 in range(0, h, ht): 
+                for x0 in range(0, w, wt): 
+                    y1 = min(y0 + ht, h)
+                    x1 = min(x0 + wt, w)
 
-        if len(batch) == 1:
-            canvases = SpatialLazyLoader.pack(
-                batch,
-                canvas_hw=canvas_hw,
-                tile_hw=tile_hw,
-                gap=gap,
-                weight_by_mask=weight_by_mask,
-            )[0]
+                    tile = data[y0:y1, x0:x1]
 
-        overflow.reverse()
-        return batch, overflow
+                    if tile.shape != (ht, wt):
+                        padded = np.zeros((ht, wt), dtype=data.dtype)
+                        padded[:tile.shape[0], :tile.shape[1]] = tile 
+                        tile   = padded 
 
-    @abstractmethod
-    def _iter_samples(self):
-        '''
-        Yield dicts with: fips, label, spatial, mask
-        '''
-        raise NotImplementedError
+                    if not np.any(tile): 
+                        continue 
 
-    def _write_debug_png(self, fips, spatial, mask): 
-        if self.debug_png_dir is None: 
-            return 
-        out_dir = Path(self.debug_png_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+                    yield tile
 
-        spatial_u8 = self._to_uint8(self._as_2d(spatial))
-        mask_u8    = (self._as_2d(mask).astype(np.uint8) * 255)
+        elif data.ndim == 3: 
+            c, h, w   = data.shape 
+            for y0 in range(0, h, ht): 
+                for x0 in range(0, w, wt): 
+                    y1 = min(y0 + ht, h)
+                    x1 = min(x0 + wt, w)
 
-        imageio.imwrite(out_dir / f"fips_{fips}_spatial.png", spatial_u8)
-        imageio.imwrite(out_dir / f"fips_{fips}_mask.png", mask_u8)
+                    tile = data[:, y0:y1, x0:x1]
 
-    @staticmethod 
-    def _flush_pack(
-        batch,
-        pack_idx: int,
-        out_dir: Path,
-        *,
-        canvas_hw=(512, 512),
-        tile_hw=None,
-        gap: int = 32, 
-        weight_by_mask: bool = True,
-        compress: bool = True
-    ) -> dict: 
+                    if tile.shape[-2:] != (ht, wt):
+                        padded = np.zeros((c, ht, wt), dtype=data.dtype)
+                        padded[:, :tile.shape[1], :tile.shape[2]] = tile 
+                        tile   = padded 
 
-        packed = SpatialLazyLoader.pack(
-            batch, 
-            canvas_hw=canvas_hw,
-            tile_hw=tile_hw,
-            gap=gap,
-            weight_by_mask=weight_by_mask
-        )
-        canvases, masks, rois, labels, fips, group_ids, group_weights = packed
+                    if not np.any(tile): 
+                        continue 
 
-        out_path = out_dir / "packed" / f"pack_{pack_idx:05d}.npz"
+                    yield tile
 
-        if np.issubdtype(canvases.dtype, np.floating): 
-            canvases_out = canvases.astype(np.float16, copy=False) 
         else: 
-            canvases_out = canvases
-
-        save_fn = np.savez_compressed if compress else np.savez 
-        save_fn(
-            out_path,
-            canvases=canvases_out,
-            masks=masks.astype(np.uint8),
-            rois=np.asarray(rois, dtype=np.int32),
-            labels=np.asarray(labels, dtype=np.int64),
-            fips=np.asarray(fips),
-            group_ids=np.asarray(group_ids, dtype=np.int64),
-            group_weights=np.asarray(group_weights, dtype=np.float32)
-        )
-
-        return {
-            "path": str(out_path.relative_to(out_dir)),
-            "n_samples": int(len(labels)),
-            "n_canvases": int(canvases.shape[0]),
-            "n_rois": int(len(rois))
-        }
-
+            return ValueError(f"expected 2d/3d data, got shape {data.shape}")
 
     @staticmethod 
-    def _tight_crop(data, mask): 
+    def tight_crop(data: NDArray, mask: NDArray) -> NDArray:
         ys, xs = np.nonzero(mask)
         if ys.size == 0: 
             if data.ndim == 3: 
-                return np.zeros((0, 0, 0), dtype=np.float32), np.zeros((0, 0), dtype=np.uint8)
-            return np.zeros((0, 0), dtype=np.float32), np.zeros((0, 0), dtype=np.uint8)
+                return np.zeros((data.shape[0], 0, 0), dtype=data.dtype)
+            else: 
+                return np.zeros((0, 0), dtype=np.float32)
 
         y0, y1 = ys.min(), ys.max() + 1 
         x0, x1 = xs.min(), xs.max() + 1 
 
-        if data.ndim == 2: 
-            crop_data = data[y0:y1, x0:x1]
-        elif data.ndim == 3: 
-            crop_data = data[:, y0:y1, x0:x1]
+        if data.ndim == 3: 
+            return data[:, y0:y1, x0:x1]
+        elif data.ndim == 2: 
+            return data[y0:y1, x0:x1]
         else: 
-            raise ValueError(f"expected 2d/3d data, got shape {data.shape}")
+            raise ValueError(f"expected 2d/3d shape, got shape {data.shape}")
 
-        crop_mask = mask[y0:y1, x0:x1].astype(np.uint8)
-        return crop_data.astype(np.float32), crop_mask 
+    @abstractmethod
+    def iter_bags(self):
+        '''
+        yields CountyTileStream objects. 
+        Each stream yields tiles shaped (C, H, W), dtype == self.dtype 
+        '''
+        raise NotImplementedError
 
-    @staticmethod 
-    def _as_2d(x): 
-        if x.ndim == 2: 
-            return x 
-        if x.ndim == 3: 
-            return x.mean(axis=0)
-        raise ValueError(f"expected 2d/3d, got shape {x.shape}")
+    @property 
+    @abstractmethod 
+    def tile_shape(self) -> tuple[int, int, int]: 
+        '''
+        Fixed tile shape (C, H, W) for specific dataset 
+        '''
+        raise NotImplementedError
 
-    @staticmethod 
-    def _to_uint8(x, vmin=None, vmax=None): 
-        if vmin is None: 
-            vmin = float(np.nanmin(x))
-        if vmax is None: 
-            vmax = float(np.nanmax(x))
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin: 
-            return np.zeros_like(x, dtype=np.uint8)
-        y = (x - vmin) / (vmax - vmin)
-        y = np.clip(y, 0.0, 1.0)
-        return (y * 255.0).astype(np.uint8)
-
-    @staticmethod 
-    def _estimate_canvas_bytes(spatial, canvas_hw): 
-        H, W       = canvas_hw 
-        channels   = spatial.shape[0] if spatial.ndim == 3 else 1 
-        data_bytes = channels * H * W * spatial.dtype.itemsize 
-        mask_bytes = H * W 
-        return data_bytes + mask_bytes
+    @property 
+    def dtype(self) -> np.dtype: 
+        return np.dtype(np.float32)
 
 # ---------------------------------------------------------
 # Viirs nighttime lights tensor dataset  
@@ -871,194 +521,86 @@ class ViirsTensorDataset(SpatialTensorDataset):
 
     def __init__(
         self,
+        *,
         viirs_path: str | None = None, 
         counties_path: str | None = None, 
         labels_path: str | None = None,
-        *,
+        tile_hw: tuple[int, int] = (224, 224), 
         all_touched: bool = False, 
         log_scale: bool = True, 
         max_counties: int | None = None, 
-        debug_png_dir: str | None = None 
+        force_tight_crop: bool = False, 
     ): 
         super().__init__(
-            raster_path=viirs_path,
             counties_path=counties_path,
             labels_path=labels_path,
             max_counties=max_counties,
-            debug_png_dir=debug_png_dir,
-            tight_crop=True
+            tile_hw=tile_hw
         )
-        self.all_touched = bool(all_touched)
-        self.log_scale   = bool(log_scale)
+        self.viirs_path        = viirs_path 
+        self.force_tight_crop  = bool(force_tight_crop)
+        self.all_touched       = bool(all_touched)
+        self.log_scale         = bool(log_scale)
 
-    def _iter_samples(self):
-        if self.raster_path is None: 
+    @property
+    def tile_shape(self) -> tuple[int, int, int]:
+        ht, wt = self.tile_hw 
+        return (1, ht, wt)
+
+    @property 
+    def dtype(self) -> np.dtype: 
+        return np.dtype(np.float32)
+
+    def iter_bags(self):
+        if self.viirs_path is None: 
             raise ValueError("viirs_path is required")
 
-        with rasterio.open(self.raster_path) as src: 
-            nodata = src.nodata 
-            with fiona.open(self.counties_path) as shp: 
-                for fips, geom in self._iter_counties(shp, src.crs): 
-                    try: 
-                        out_image, _ = rasterio.mask.mask(
-                            src, [geom], crop=True, filled=False, all_touched=self.all_touched
-                        )
-                    # if geometry does not overlap w/ raster bounds, just move on
-                    except (ValueError, WindowError):
-                        print("[viirs window error] skipping sample...", file=sys.stderr)
-                        continue 
-                    arr = out_image[0]
-                    if arr.size == 0: 
-                        continue 
+        count = 0 
+        with (rasterio.open(self.viirs_path) as src,
+              fiona.open(self.counties_path) as shp): 
+            
+            for fips, geom in self.iter_counties(shp, src.crs): 
+                try: 
+                    out_image, _ = rasterio.mask.mask(
+                        src, [geom], crop=True, filled=False, all_touched=self.all_touched
+                    )
+                # if geometry does not overlap w/ raster bounds, just move on
+                except (ValueError, WindowError):
+                    print("[viirs window error] skipping sample...", file=sys.stderr)
+                    continue 
 
-                    valid_mask = ~arr.mask if hasattr(arr, "mask") else np.isfinite(arr)
-                    if nodata is not None: 
-                        valid_mask &= arr != nodata 
-                    if not np.any(valid_mask): 
-                        continue 
+                arr = out_image[0]
+                if arr.size == 0: 
+                    continue 
 
-                    data = np.asarray(arr, dtype=np.float32)
-                    if self.log_scale: 
-                        data = np.log1p(np.maximum(data, 0.0))
-                    data[~valid_mask] = 0.0 
+                valid_mask = ~arr.mask if hasattr(arr, "mask") else np.isfinite(arr)
+                if src.nodata is not None: 
+                    valid_mask &= arr != src.nodata 
 
-                    yield {
-                        "fips": fips,
-                        "label": self.label_map[fips],
-                        "spatial": data, 
-                        "mask": valid_mask.astype(np.uint8)
-                    }
+                if not np.any(valid_mask): 
+                    continue 
 
-# ---------------------------------------------------------
-# National land usage tensor dataset  
-# ---------------------------------------------------------
+                data = np.asarray(arr, dtype=np.float32)
+                if self.log_scale: 
+                    data = np.log1p(np.maximum(data, 0.0))
 
-class NlcdTensorDataset(SpatialTensorDataset): 
-    '''
-    NLCD multi-channel categorical tensor generator 
-    channel_groups: dict[str, list[int]] mapping NLCD codes to channels 
-    '''
+                data[~valid_mask] = 0.0 
 
-    def __init__(
-        self,
-        nlcd_path: str | None = None, 
-        counties_path: str | None = None, 
-        labels_path: str | None = None, 
-        *,
-        channel_groups: dict[str, list[int]] | None = None, 
-        all_touched: bool = False, 
-        max_counties: int | None = None,
-        downsample: int = 1, 
-        debug_png_dir: str | None = None 
-    ): 
-        super().__init__(
-            raster_path=nlcd_path,
-            counties_path=counties_path,
-            labels_path=labels_path,
-            max_counties=max_counties,
-            debug_png_dir=debug_png_dir,
-            tight_crop=True
-        )
-        self.all_touched = bool(all_touched)
+                if self.force_tight_crop:
+                    data = self.tight_crop(data, valid_mask)
 
-        if channel_groups is None: 
-            channel_groups = {
-                "water": [11, 12],
-                "developed": [21, 22, 23, 24],
-                "forest": [41, 42, 43],
-                "shrub": [52],
-                "grass": [71, 72, 73, 74],
-                "cropland": [81, 82],
-                "wetlands": [90, 95]
-            }
-        self.channel_groups = channel_groups 
-        self.downsample     = downsample
-        self._lut           = self._build_lut(self.channel_groups)
+                label      = self.label_map[fips]
+                tiles_iter = (tile[None, ...] for tile in self.iter_tiles(data)) 
 
-    def _build_lut(self, groups: dict[str, list[int]]) -> dict[int, int]: 
-        lut = {}
-        for idx, codes in enumerate(groups.values()): 
-            for c in codes: 
-                lut[int(c)] = idx + 1 
-        return lut 
+                yield CountyTileStream(
+                    fips=fips,
+                    label=label,
+                    tiles=tiles_iter, 
+                )
 
-    def _iter_samples(self): 
-        if self.raster_path is None: 
-            raise ValueError("nlcd_path is required")
-
-        with rasterio.open(self.raster_path) as src: 
-            nodata = src.nodata 
-            with fiona.open(self.counties_path) as shp: 
-                for fips, geom in self._iter_counties(shp, src.crs): 
-                    try: 
-                        out_image, _ = rasterio.mask.mask(
-                            src, [geom], crop=True, filled=False, all_touched=self.all_touched
-                        )
-                    # if geometry does not overlap w/ raster bounds, just move on
-                    except (ValueError, WindowError):
-                        print("[nlcd window error] skipping sample...", file=sys.stderr)
-                        continue 
-                    arr = out_image[0]
-                    if arr.size == 0: 
-                        continue 
-
-                    valid_mask = ~arr.mask if hasattr(arr, "mask") else np.isfinite(arr)
-                    if nodata is not None: 
-                        valid_mask &= arr != nodata 
-                    if not np.any(valid_mask): 
-                        continue 
-
-                    data = np.asarray(arr, dtype=np.float32)
-                    data[~valid_mask] = -1 
-
-                    H, W = data.shape 
-                    spatial = np.zeros((H, W), dtype=np.uint8)
-                    for code, ch in self._lut.items():
-                        spatial[data == code] = ch
-
-                    if self.downsample > 1: 
-                        spatial, valid_mask = self._block_mode_downsample(
-                            spatial, valid_mask, self.downsample 
-                        )
-
-                    yield {
-                        "fips": fips,
-                        "label": self.label_map[fips],
-                        "spatial": spatial,
-                        "mask": valid_mask.astype(np.uint8)
-                    }
-
-    @staticmethod 
-    def _block_mode_downsample(spatial: NDArray, mask: NDArray, factor: int): 
-        if factor <= 1: 
-            return spatial, mask 
-
-        H, W = spatial.shape 
-        h    = (H // factor) * factor 
-        w    = (W // factor) * factor 
-        
-        spatial = spatial[:h, :w]
-        mask    = mask[:h, :w].astype(bool)
-
-        hf = h // factor 
-        wf = w // factor 
-
-        s = spatial.reshape(hf, factor, wf, factor)
-        m = mask.reshape(hf, factor, wf, factor) 
-
-        s = s.reshape(hf, wf, factor * factor)
-        m = m.reshape(hf, wf, factor * factor) 
-
-        s = np.where(m, s, -1)
-
-        n_classes = int(spatial.max()) + 1 
-        counts    = np.zeros((hf, wf, n_classes), dtype=np.int32)
-        for c in range(n_classes): 
-            counts[..., c] = np.sum(s == c, axis=2)
-
-        out      = counts.argmax(axis=2).astype(np.uint8)
-        out_mask = (m.any(axis=2)).astype(np.uint8)
-        return out, out_mask
+                count += 1 
+                if self.max_counties is not None and count >= self.max_counties: 
+                    break 
 
 # ---------------------------------------------------------
 # United States Postal Service vacant and active addresses.  
@@ -1074,51 +616,66 @@ class UspsTensorDataset(SpatialTensorDataset):
 
     def __init__(
         self,
+        *,
         usps_vector_path: str | None = None, 
         reference_path: str | None = None,   # VIIRS raster as grid reference 
         nlcd_path: str | None = None,        # suppression of water pixels in mask 
         counties_path: str | None = None, 
         labels_path: str | None = None, 
-        *,
+        tile_hw: tuple[int, int] = (224, 224), 
         usps_layer: str | None = None, 
         water_codes: tuple[int, ...] = (11, 12), 
         developed_codes: tuple[int, ...] = (21, 22, 23, 24), 
         all_touched: bool = False, 
         max_counties: int | None = None, 
-        debug_png_dir: str | None = None 
+        force_tight_crop: bool = False 
     ): 
         super().__init__(
-            raster_path=reference_path,
             counties_path=counties_path,
             labels_path=labels_path,
             max_counties=max_counties,
-            debug_png_dir=debug_png_dir,
-            tight_crop=True 
+            tile_hw=tile_hw 
         )
 
         self.usps_vector_path = usps_vector_path 
+        self.reference_path   = reference_path 
         self.nlcd_path        = nlcd_path 
         self.usps_layer       = usps_layer 
         self.all_touched      = bool(all_touched) 
         self.water_codes      = tuple(int(x) for x in water_codes)
         self.developed_codes  = tuple(int(x) for x in developed_codes)
+        self.force_tight_crop = bool(force_tight_crop)
 
-    def _iter_samples(self):
-        if self.raster_path is None: 
-            raise ValueError("reference path (VIIRS) is required")
+    @property
+    def tile_shape(self) -> tuple[int, int, int]: 
+        ht, wt = self.tile_hw 
+        return (4, ht, wt)
+
+    @property 
+    def dtype(self) -> np.dtype: 
+        return np.dtype(np.float32)
+
+    def iter_bags(self):
+        if self.reference_path is None: 
+            raise ValueError("reference path is required")
         if self.usps_vector_path is None: 
             raise ValueError("usps_vector_path is required")
         if self.nlcd_path is None: 
             raise ValueError("nlcd_path is required")
+        if self.counties_path is None: 
+            raise ValueError("counties_path is required")
+        if self.labels_path is None: 
+            raise ValueError("labels_path is required")
 
-        with (rasterio.open(self.raster_path) as ref, 
+        count = 0 
+        with (rasterio.open(self.reference_path) as ref, 
               rasterio.open(self.nlcd_path) as nlcd, 
               fiona.open(self.usps_vector_path, layer=self.usps_layer) as tracts,
               fiona.open(self.counties_path) as shp): 
 
             tracts_crs = tracts.crs 
 
-            for fips, geom in self._iter_counties(shp, ref.crs): 
+            for fips, geom in self.iter_counties(shp, ref.crs): 
                 try: 
                     out_image, out_transform = rasterio.mask.mask(
                         ref, [geom], crop=True, filled=False, all_touched=self.all_touched,
@@ -1137,7 +694,8 @@ class UspsTensorDataset(SpatialTensorDataset):
                 if not np.any(valid_mask): 
                     continue 
 
-                H, W = arr.shape 
+                H, W     = arr.shape 
+                channels = np.zeros((4, H, W), dtype=np.float32) 
 
                 nlcd_dst = np.zeros((H, W), dtype=nlcd.dtypes[0])
                 reproject(
@@ -1153,13 +711,11 @@ class UspsTensorDataset(SpatialTensorDataset):
 
                 nlcd_valid = np.ones_like(nlcd_dst, dtype=bool) 
                 if nlcd.nodata is not None: 
-                    nlcd_value = nlcd_dst != nlcd.nodata 
+                    nlcd_valid = nlcd_dst != nlcd.nodata 
 
                 water_mask     = np.isin(nlcd_dst, self.water_codes) & nlcd_valid 
                 developed_mask = np.isin(nlcd_dst, self.developed_codes) & nlcd_valid 
                 land_mask      = (~water_mask) & nlcd_valid 
-
-                channels       = np.zeros((4, H, W), dtype=np.float32)
 
                 county_shape   = shape(geom)
                 bbox           = county_shape.bounds 
@@ -1222,12 +778,21 @@ class UspsTensorDataset(SpatialTensorDataset):
                 if not np.any(mask):
                     continue 
 
-                yield {
-                    "fips": fips,
-                    "label": self.label_map[fips],
-                    "spatial": channels,
-                    "mask": mask
-                }
+                if self.force_tight_crop: 
+                    channels = self.tight_crop(channels, mask)
+
+                tiles_iter = (tile for tile in self.iter_tiles(channels))
+                label      = self.label_map[fips]
+
+                yield CountyTileStream(
+                    fips=fips,
+                    label=label,
+                    tiles=tiles_iter
+                ) 
+
+                count += 1 
+                if self.max_counties is not None and count >= self.max_counties:
+                    break 
 
     @staticmethod 
     def _as_float(props, key): 
@@ -1251,7 +816,7 @@ class UspsTensorDataset(SpatialTensorDataset):
 def main(): 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--viirs-path", default=project_path(
-        "data", "viirs", "viirs_2023_avg_masked.dat.tif"))
+        "data", "viirs", "viirs_2013_median_masked.tif"))
     parser.add_argument("--nlcd-path", default=project_path(
         "data", "nlcd", "Annual_NLCD_LndCov_2023_CU_C1V1.tif"))
     parser.add_argument("--usps-gpkg", default=project_path(
@@ -1264,73 +829,45 @@ def main():
 
     parser.add_argument("--out-root", default=project_path("data", "tensors"))
     parser.add_argument("--viirs-out", default=None)
-    parser.add_argument("--nlcd-out", default=None)
     parser.add_argument("--usps-out", default=None)
 
-    parser.add_argument("--debug-png-dir", default=None)
     parser.add_argument("--no-log-scale", action="store_true")
     
     # hooks to run
     parser.add_argument("--viirs", action="store_true")
-    parser.add_argument("--nlcd", action="store_true")
     parser.add_argument("--usps", action="store_true")
-
-    parser.add_argument("--packed", action="store_true")
-    parser.add_argument("--pack-size", type=int, default=8)
-    parser.add_argument("--pack-ram-mb", type=int, default=None)
-    parser.add_argument("--downsample", type=int, default=1)
     args = parser.parse_args()
 
     out_root  = Path(args.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    viirs_out = args.viirs_out or str(out_root / "viirs_roi")
-    nlcd_out  = args.nlcd_out  or str(out_root / "nlcd_roi")
-    usps_out  = args.usps_out  or str(out_root / "usps_roi")
+    viirs_out = args.viirs_out or str(out_root / "viirs")
+    usps_out  = args.usps_out  or str(out_root / "usps")
 
     if args.viirs:
+        bin_out   = Path(viirs_out) / "dataset.bin" 
+        index_out = Path(viirs_out) / "index.csv"
+
         viirs = ViirsTensorDataset(
             viirs_path=args.viirs_path,
             counties_path=args.counties_path,
             labels_path=args.labels_path,
             log_scale=not args.no_log_scale,
-            debug_png_dir=args.debug_png_dir
         )
-        viirs.save(viirs_out) if not args.packed else viirs.save_packed(
-            viirs_out,
-            pack_batch=args.pack_size,
-            pack_ram_mb=args.pack_ram_mb
-        )
-
-    if args.nlcd: 
-        nlcd = NlcdTensorDataset(
-            nlcd_path=args.nlcd_path,
-            counties_path=args.counties_path,
-            labels_path=args.labels_path,
-            debug_png_dir=args.debug_png_dir,
-            downsample=args.downsample
-        )
-        nlcd.save(nlcd_out) if not args.packed else nlcd.save_packed(
-            nlcd_out,
-            pack_batch=args.pack_size,
-            pack_ram_mb=args.pack_ram_mb
-        )
+        viirs.save(out_bin_path=str(bin_out), out_index_path=str(index_out))
 
     if args.usps:
+        bin_out   = Path(usps_out) / "dataset.bin" 
+        index_out = Path(usps_out) / "index.csv"
+
         usps = UspsTensorDataset(
             usps_vector_path=args.usps_gpkg, 
             reference_path=args.viirs_path,
             nlcd_path=args.nlcd_path,
             counties_path=args.counties_path,
             labels_path=args.labels_path,
-            debug_png_dir=args.debug_png_dir
         )
-        usps.save(usps_out) if not args.packed else usps.save_packed(
-            usps_out, 
-            pack_batch=args.pack_size,
-            pack_ram_mb=args.pack_ram_mb
-        )
-
+        usps.save(out_bin_path=str(bin_out), out_index_path=str(index_out))
 
 if __name__ == "__main__": 
     main() 
