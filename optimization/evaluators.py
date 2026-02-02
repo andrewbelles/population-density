@@ -457,6 +457,9 @@ def _spatial_eval_fold(
 
     model.fit(train_ds, labels[train_idx])
 
+    if hasattr(model, "best_val_score_"): 
+        return float(model.best_val_score_)
+
     y_true_list = []
     prob_list = [] 
 
@@ -502,6 +505,10 @@ def _spatial_eval_fold(
 
     del model 
     _cleanup_cuda()
+
+    base = getattr(dataset, "dataset", dataset) 
+    if hasattr(base, "close"): 
+        base.close() 
 
     return float(rps)
 

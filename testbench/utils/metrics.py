@@ -190,3 +190,19 @@ def distance_correlation(X, Y):
 
     denom = np.sqrt(dvarx * dvary) + 1e-12 
     return float(dcov / denom)
+
+def moran_i(x: NDArray, W) -> float:
+
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    n = x.size 
+
+    if n == 0 or W.nnz == 0: 
+        return float("nan")
+    x = x - x.mean() 
+    denom = np.dot(x, x)
+    if denom == 0.0: 
+        return 0.0 
+
+    S0 = W.sum()
+    num = x @ (W @ x) 
+    return float((n / S0) * (num / denom))

@@ -15,7 +15,7 @@ from analysis.cross_validation import (
     ScaledEstimator
 )
 
-from models.estimators         import EmbeddingProjector
+from models.estimators         import EmbeddingProjector, SpatialClassifier
 
 from scipy.io                  import savemat 
 
@@ -28,8 +28,12 @@ from optimization.engine       import (
 
 from optimization.evaluators   import ProjectorEvaluator, StandardEvaluator
 
-from optimization.spaces import define_manifold_projector_space
-from testbench.utils.data      import BASE 
+from optimization.spaces       import define_manifold_projector_space
+
+from testbench.utils.data      import (
+    BASE, 
+    load_spatial_dataset 
+) 
 
 from testbench.utils.etc       import (
     format_metric,
@@ -43,7 +47,15 @@ from testbench.utils.metrics   import (
     metrics_from_probs
 )
 
-from testbench.utils.config    import normalize_params
+from testbench.utils.config    import (
+    load_model_params,
+    normalize_params,
+    normalize_spatial_params,
+)
+
+from testbench.utils.paths     import (
+    CONFIG_PATH
+)
 
 from preprocessing.loaders     import load_compact_dataset 
 
@@ -53,6 +65,7 @@ from utils.helpers             import project_path
 
 strategy = ComputeStrategy.from_env() 
 
+VIIRS_KEY = "Spatial/VIIRS" 
 
 def _resolve_dataset(spec: str): 
     if spec in BASE: 
@@ -126,7 +139,76 @@ def _fit_eval(train_path, train_loader, test_path, test_loader, model_name, para
     probs        = model.predict_proba(X_te, coords_te)
     class_labels = np.sort(np.unique(y_tr))
     metrics      = metrics_from_probs(y_te, probs, class_labels)
-    return metrics 
+    return metrics
+
+def _spatial_fit_extract(
+    *,
+    train_root: str, 
+    test_root: str, 
+    out_path: str,
+    model_key: str, 
+    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    sample_frac: float | None = None, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH, 
+    **_
+): 
+    train_ds, train_y, _, train_collate, in_ch = load_spatial_dataset(
+        train_root, 
+        tile_shape=tile_shape,
+        sample_frac=sample_frac,
+        random_state=random_state 
+    )
+
+    test_ds, test_y, test_fips, test_collate, in_ch_te = load_spatial_dataset(
+        test_root, 
+        tile_shape=tile_shape,
+        sample_frac=sample_frac,
+        random_state=random_state 
+    )
+
+    if in_ch_te != in_ch: 
+        raise ValueError(f"in_channels mismatch: train={in_ch}, test={in_ch_te}")
+
+    params = load_model_params(config_path, model_key)
+    params = normalize_spatial_params(
+        params, 
+        random_state=random_state, 
+        collate_fn=train_collate
+    )
+
+    model  = SpatialClassifier(
+        in_channels=in_ch, 
+        compute_strategy=strategy,
+        **params 
+    )
+
+    model.fit(train_ds, train_y)
+
+    test_emb = model.extract(test_ds)
+    val_rps  = model.eval_loss(model.as_eval_loader(test_ds))
+
+    feature_names = np.array(
+        [f"{model_key.split('/')[-1].lower()}_emb_{i}" for i in range(test_emb.shape[1])],
+        dtype="U32"
+    )
+
+    savemat(out_path, {
+        "features": test_emb, 
+        "labels": test_y.reshape(-1, 1), 
+        "fips_codes": test_fips, 
+        "feature_names": feature_names, 
+        "n_counties": np.array([len(test_y)], dtype=np.int64)
+    })
+
+    return {
+        "header": ["Name", "Dim", "RPS"],
+        "row": {
+            "Name": f"{model_key}/2013->2023",
+            "Dim": test_emb.shape[1],
+            "RPS": val_rps 
+        }
+    }
 
 def _row(name, metrics): 
     return {
@@ -173,7 +255,7 @@ def test_fit_eval(
         "rows": rows,
     }
 
-def test_manifold_generate(
+def test_saipe_manifold(
     _buf,
     *,
     train: str, 
@@ -248,10 +330,35 @@ def test_manifold_generate(
         }
     }
 
+def test_viirs_manifold(
+    _buf,
+    *,
+    train: str, 
+    test: str, 
+    out: str,
+    model_key: str = VIIRS_KEY, 
+    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    sample_frac: float | None = None, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH, 
+    **_
+): 
+    return _spatial_fit_extract(
+        train_root=train, 
+        test_root=test, 
+        out_path=out,
+        model_key=model_key,
+        tile_shape=tile_shape,
+        sample_frac=sample_frac,
+        random_state=random_state,
+        config_path=config_path,
+    )
+
 
 TESTS = {
     "fit_eval": test_fit_eval,
-    "manifold": test_manifold_generate
+    "saipe-manifold": test_saipe_manifold,
+    "viirs-manifold": test_viirs_manifold
 }
 
 
@@ -260,6 +367,7 @@ def main():
     parser.add_argument("--tests", nargs="*", default=None)
     parser.add_argument("--train", required=True)
     parser.add_argument("--test", required=True)
+    parser.add_argument("--out", default=None)
     parser.add_argument("--models", nargs="*", default=None)
     parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--folds", type=int, default=3)
@@ -276,6 +384,7 @@ def main():
         targets=targets,
         train=args.train,
         test=args.test,
+        out=args.out,
         models=args.models,
         trials=args.trials,
         folds=args.folds,

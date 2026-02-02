@@ -66,23 +66,40 @@ def _log(msg, quiet=False):
 # Testbench Data Fetchers 
 # ---------------------------------------------------------
 
-def build_stacking_data(*, cross: str = "off", **_):
+def build_stacking_data(
+    *, 
+    cross: str = "off", 
+    datasets: list[str] | None = None, 
+    plots=None, **_
+):
 
-    buf = io.StringIO() 
+    need_experts  = (plots is None) or ("expert_confusion" in plots)
+    need_stacking = (plots is None) or any(
+        p in {"confusion", "class_distance", "confidence", "map_confidence"}
+        for p in plots 
+    ) 
 
-    expert_data  = stacking.test_expert_oof(buf)
-    expert_paths = expert_data["experts"] 
+    out = {}
+
+
+    if need_experts: 
+        expert_data  = stacking.test_expert_oof(datasets=datasets)
+        out["experts"] = expert_data["experts"]
+
+    if not need_stacking: 
+        return out 
 
     def _run(passthrough: bool): 
         return {
-            "stacking": stacking.test_stacking(buf, passthrough)["metadata"],
-            "cs": stacking.test_cs_opt(buf, passthrough)["metadata"]
+            "stacking": stacking.test_stacking(passthrough)["metadata"],
+            "cs": stacking.test_cs_opt(passthrough)["metadata"]
         }
 
     if cross == "both":
-        return {"base": _run(False), "passthrough": _run(True), "experts": expert_paths}
-    return {("passthrough" if cross == "on" else "base"): _run(cross == "on"),
-            "experts": expert_paths}
+        out.update({"base": _run(False), "passthrough": _run(True)})
+    else:
+        out.update({("passthrough" if cross == "on" else "base"): _run(cross == "on")})
+    return out 
 
 def build_adjacency_data(*, metric_keys=None, **_): 
     
@@ -413,7 +430,7 @@ class Plotter:
 
     def run(self, selected=None):
         _log(f"[{self.group.name}] build data", quiet=self.quiet)
-        data  = self.group.build(cross=self.cross, **self.kwargs)
+        data  = self.group.build(cross=self.cross, plots=selected, **self.kwargs)
         plots = self.group.plots if not selected else {k: self.group.plots[k] for k in selected}
         _log(f"[{self.group.name}] plots: {len(plots)}", quiet=self.quiet)
 
@@ -489,6 +506,7 @@ def main():
     parser.add_argument("--cross", choices=["off", "on", "both"], default="both")
     parser.add_argument("--out", default=OUT_DIR)
     parser.add_argument("--metric-keys", nargs="*", default=None)
+    parser.add_argument("--datasets", nargs="*", default=None)
     parser.add_argument("--log-hist", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--embedding-paths", nargs="*", default=None)
@@ -499,6 +517,7 @@ def main():
         out_dir=args.out,
         log_hist=args.log_hist, 
         quiet=args.quiet, 
+        datasets=args.datasets,
         metric_keys=args.metric_keys,
         embedding_paths=args.embedding_paths
     )
@@ -509,14 +528,14 @@ def main():
                 group,
                 **plot_kwargs 
             )
-            plotter.run()
+            plotter.run(selected=args.plots)
     else: 
         group   = PLOT_GROUPS[args.group]
         plotter = Plotter(
             group,
             **plot_kwargs 
         )
-        plotter.run()
+        plotter.run(selected=args.plots)
 
 
 if __name__ == "__main__": 

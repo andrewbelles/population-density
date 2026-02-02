@@ -151,6 +151,22 @@ class TileLoader(Dataset):
 
         return self.format_output(tiles, label, idx, n_tiles)
 
+    def close(self): 
+        mm = getattr(self, "mmap", None)
+        if mm is None: 
+            return 
+        try: 
+            if hasattr(mm, "_mmap") and mm._mmap is not None: 
+                mm._mmap.close() 
+        finally: 
+            self.mmap = None 
+
+    def __del__(self): 
+        try: 
+            self.close()
+        except Exception: 
+            pass 
+
     def format_output(self, tiles, label, idx, n_tiles): 
         out = [tiles, label]
         if self.return_fips or self.return_num_tiles:
@@ -260,7 +276,7 @@ class BinaryTileWriter:
         *,
         out_bin_path: str, 
         out_index_path: str, 
-        empty_threshold: float = 0.95 # fraction of zeros in mask
+        empty_threshold: float = 1.0 # fraction of zeros in mask
     ): 
         self.source          = source 
         self.out_bin_path    = out_bin_path 
@@ -366,7 +382,7 @@ class SpatialTensorDataset(ABC, TileStreamSource):
         *,
         out_bin_path: str, 
         out_index_path: str, 
-        empty_threshold: float = 0.95
+        empty_threshold: float = 1.0
     ):
         '''
         Wraps BinaryTileWriter

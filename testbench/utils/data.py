@@ -70,7 +70,7 @@ BASE: dict[str, ConcatSpec] = {
     },
     "VIIRS_MANIFOLD": {
         "name": "VIIRS_MANIFOLD",
-        "path": project_path("data", "datasets", "viirs_pooled.mat"),
+        "path": project_path("data", "datasets", "viirs_2023_pooled.mat"),
         "loader": load_compact_dataset
     },
     "TIGER": {
@@ -413,7 +413,7 @@ def load_spatial_dataset(
     root_dir: str,
     *,
     tile_shape: tuple[int, int, int],
-    max_bag_size: int, 
+    max_bag_size: int = 64, 
     sample_frac: float | None = None, 
     random_state: int = 0 
 ): 

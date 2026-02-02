@@ -194,12 +194,10 @@ class HybridOrdinalLoss(nn.Module):
     def forward(self, logits, embeddings, labels): 
         corn_loss = self.corn_fn_(logits, labels)
 
-        log_cond_probs = F.logsigmoid(logits)
-        log_cdf        = torch.cumsum(log_cond_probs, dim=1)
-        cdf = torch.exp(log_cdf)
+        probs_exceed = torch.sigmoid(logits)
 
         targets  = self.corn_fn_._ordinal_targets(labels, self.n_classes_)
-        per_sample_rps = torch.sum((cdf - targets)**2, dim=1)
+        per_sample_rps = torch.sum((probs_exceed - targets)**2, dim=1)
 
         K = max(self.n_classes_ - 1, 1)
         per_sample_rps /= float(K) 

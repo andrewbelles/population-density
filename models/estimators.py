@@ -880,6 +880,7 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
                 val_loss = self.eval_loss(val_loader)
                 if val_loss < best_val - self.min_delta: 
                     best_val   = val_loss 
+                    self.best_val_score_ = best_val  
                     best_state = copy.deepcopy(self.model_.state_dict())
                     patience   = 0 
                 else:
@@ -912,9 +913,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
     def predict(self, batch) -> torch.Tensor: 
         self.model_.eval() 
-        inputs, labels, sections = self.unpack_batch(batch)
+        inputs, labels, batch_indices = self.unpack_batch(batch)
         with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-            feats        = self.forward_feats(inputs, sections)
+            feats        = self.forward_feats(inputs, batch_indices)
             _, logits, _ = self.forward_logits(feats, with_supcon=False)
             probs        = self.logits_to_probs(logits)
             idx          = torch.argmax(probs, dim=1)
@@ -922,9 +923,9 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
 
     def predict_proba(self, batch) -> torch.Tensor: 
         self.model_.eval() 
-        inputs, labels, sections = self.unpack_batch(batch)
+        inputs, labels, batch_indices = self.unpack_batch(batch)
         with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-            feats        = self.forward_feats(inputs, sections)
+            feats        = self.forward_feats(inputs, batch_indices)
             _, logits, _ = self.forward_logits(feats, with_supcon=False)
             probs        = self.logits_to_probs(logits)
         return probs 
@@ -935,8 +936,8 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader: 
-                inputs, labels, sections = self.unpack_batch(batch)
-                feats     = self.forward_feats(inputs, sections)
+                inputs, labels, batch_indices = self.unpack_batch(batch)
+                feats     = self.forward_feats(inputs, batch_indices)
                 emb, _, _ = self.forward_logits(feats, with_supcon=False)
                 outs.append(emb.cpu().numpy())
         return np.vstack(outs)
@@ -946,17 +947,17 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
     # -----------------------------------------------------
 
     def unpack_batch(self, batch): 
-        inputs, labels, sections = batch 
-        return inputs, labels, sections  
+        inputs, labels, batch_indices = batch 
+        return inputs, labels, batch_indices   
 
-    def prepare_inputs(self, tiles, sections): 
-        xb  = tiles.to(self.device, non_blocking=True)
-        sec = sections.to(self.device, non_blocking=True) 
-        return xb, sec 
+    def prepare_inputs(self, tiles, batch_indices): 
+        xb   = tiles.to(self.device, non_blocking=True)
+        bidx = batch_indices.to(self.device, non_blocking=True) 
+        return xb, bidx 
 
-    def forward_feats(self, tiles, sections): 
-        xb, sec = self.prepare_inputs(tiles, sections)
-        feats   = self.model_.backbone(xb, sec)
+    def forward_feats(self, tiles, batch_indices): 
+        xb, bidx = self.prepare_inputs(tiles, batch_indices)
+        feats    = self.model_.backbone(xb, bidx)
         return feats 
 
     def forward_logits(self, feats, with_supcon: bool): 
@@ -969,14 +970,20 @@ class SpatialClassifier(BaseEstimator, ClassifierMixin):
         if self.n_classes_ is None or self.classes_ is None: 
             raise TypeError 
 
-        inputs, labels, sections = self.unpack_batch(batch)
+        inputs, labels, batch_indices = self.unpack_batch(batch)
 
         y_np  = np.asarray(labels).reshape(-1)
         y_idx = np.searchsorted(self.classes_, y_np)
         yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
 
+        if self.model_.training: 
+            k      = np.random.randint(0, 4)
+            inputs = torch.rot90(inputs, k, dims=[2, 3])
+            if np.random.random() > 0.5: 
+                inputs = torch.flip(inputs, dims=[3])
+
         with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-            feats = self.forward_feats(inputs, sections)
+            feats = self.forward_feats(inputs, batch_indices)
             _, logits, proj = self.forward_logits(feats, with_supcon=with_supcon)
             loss, loss_corn, loss_rps, loss_sup = self.loss_fn_(logits, proj, yb)
 
@@ -1439,501 +1446,6 @@ class EmbeddingProjector(BaseEstimator):
         self.model_.head   = self.head_ 
         self.model_.scaler = self.scaler_ 
         self.model_.to(self.device)
-
-class XGBOrdinalRegressor(BaseEstimator, ClassifierMixin): 
-
-    '''
-    Implementation of Frank-Hall method for ordinal multi-classification using the 
-    XGBoost model. 
-    '''
-    
-    def __init__(
-        self,
-        n_estimators: int = 300,
-        max_depth: int = 6,
-        learning_rate: float = 0.1,
-        subsample: float = 1.0,
-        colsample_bytree: float = 1.0,
-        min_child_weight: int = 1, 
-        reg_alpha: float = 0.0, 
-        reg_lambda: float = 1.0, 
-        gamma: float = 0.0, 
-        early_stopping_rounds: int | None = None,
-        eval_fraction: float = 0.2,
-        gpu: bool = False,
-        random_state: int | None = None,
-        n_jobs: int = -1,  
-        **kwargs,
-    ): 
-        self.n_estimators          = n_estimators
-        self.max_depth             = max_depth
-        self.learning_rate         = learning_rate
-        self.subsample             = subsample
-        self.colsample_bytree      = colsample_bytree
-        self.min_child_weight      = min_child_weight
-        self.reg_alpha             = reg_alpha
-        self.reg_lambda            = reg_lambda
-        self.gamma                 = gamma 
-        self.early_stopping_rounds = early_stopping_rounds
-        self.eval_fraction         = eval_fraction
-        self.gpu                   = gpu
-        self.random_state          = random_state
-        self.n_jobs                = n_jobs 
-        self.kwargs                = kwargs
-
-        self.models_ = []
-
-    def fit(self, X, y): 
-        X                   = np.asarray(X, dtype=np.float32)
-        y_idx, classes      = self._encode_labels(y)
-        self.classes_       = classes 
-        self.n_classes_     = classes.size  
-        train_idx, eval_idx = self._split_indices(X.shape[0])
-        self.models_        = []
-
-        for k in range(self.n_classes_ - 1): 
-            y_bin = (y_idx > k).astype(np.int64)
-            model = self._build_model()
-
-            if eval_idx is not None: 
-                model.fit(
-                    X[train_idx],
-                    y_bin[train_idx],
-                    eval_set=[(X[eval_idx], y_bin[eval_idx])],
-                    verbose=False
-                )
-            else: 
-                model.fit(X, y_bin)
-
-            self.models_.append(model)
-
-        return self 
-
-    def loss(self, X, y):
-        y     = np.asarray(y, dtype=np.int64).reshape(-1)
-        y_idx = np.searchsorted(self.classes_, y) 
-        if not np.all(self.classes_[y_idx] == y): 
-            raise ValueError("y contains values not in fitted classes")
-
-        prob_gt = self._prob_gt(X)
-        eps     = 1e-12 
-        total   = 0.0 
-
-        for k in range(prob_gt.shape[1]): 
-            y_bin  = (y_idx > k).astype(np.float32)
-            p      = np.clip(prob_gt[:, k], eps, 1.0 - eps)
-            ll     = -(y_bin * np.log(p) + (1.0 - y_bin) * np.log(1.0 - p)).mean() 
-            total += ll
-
-        return float(total / prob_gt.shape[1])
-
-    def transform(
-        self,
-        X,
-        *,
-        embed_dim: int = 0, 
-        out_dim: int = 64, 
-        pooling: str = "mean"
-    ): 
-        '''
-        Bag of Leaves embedding. computes lookup table of leaf embeddings, pools across trees 
-        then projects to out_dim
-        '''
-    
-        self._init_leaf_projection(embed_dim, out_dim)
-
-        leaf_ids = self.leaves(X)
-        emb      = self.leaf_embed_table_[leaf_ids]
-
-        if pooling == "sum": 
-            pooled = emb.sum(axis=1)
-        elif pooling == "mean": 
-            pooled = emb.mean(axis=1)
-        else: 
-            raise ValueError("invalid pooling method")
-
-        return pooled @ self.leaf_proj_ + self.leaf_proj_bias_
-
-    def leaf_matrix(
-        self,
-        X,
-        *,
-        dense: bool = False 
-    ): 
-        leaf_ids = self.leaves(X)
-        n, t     = leaf_ids.shape 
-        n_cols   = int(self.leaf_table_size_)
-
-        if dense: 
-            mat = np.zeros((n, n_cols), dtype=np.float32)
-            mat[np.arange(n)[:, None], leaf_ids] = 1.0 
-            return mat 
-
-        rows = np.repeat(np.arange(n), t)
-        cols = leaf_ids.reshape(-1)
-        data = np.ones(rows.shape[0], dtype=np.float32)
-        return csr_matrix((data, (rows, cols)), shape=(n, n_cols))
-
-    def leaves(self, X): 
-        X      = np.asarray(X, dtype=np.float32)
-        dmat   = xgboost.DMatrix(X, nthread=self.n_jobs) 
-
-        if not hasattr(self, "leaf_table_size_"):
-            self._build_leaf_table()
-
-        leaves = []
-
-        for model_idx, model in enumerate(self.models_): 
-            booster   = model.get_booster() 
-            best_iter = getattr(model, "best_iteration", None)
-            if best_iter is None: 
-                raw = booster.predict(dmat, pred_leaf=True)
-            else: 
-                raw = booster.predict(dmat, pred_leaf=True, iteration_range=(0, best_iter + 1))
-
-            raw     = raw.astype(np.int64)
-            maps    = self.leaf_maps_[model_idx]
-            offsets = self.leaf_offsets_[model_idx]
-            mapped  = np.empty_like(raw, dtype=np.int64)
-            for t in range(raw.shape[1]): 
-                ids = raw[:, t] 
-                map_arr = maps[t]
-                if ids.max() >= map_arr.size: 
-                    raise ValueError("leaf id out of range for tree")
-                mapped[:, t] = map_arr[ids] + offsets[t]
-
-            leaves.append(mapped)
-
-        return np.hstack(leaves)
-
-    def  _build_leaf_table(self):
-        '''
-        Builds a per-tree leaf ID map w/ global offests. 
-        '''
-
-        self.leaf_maps_    = []
-        self.leaf_offsets_ = []
-        offset             = 0 
-
-        for model in self.models_: 
-            booster = model.get_booster() 
-            df      = booster.trees_to_dataframe() 
-            n_trees = self._num_trees(model)
-
-            model_maps    = []
-            model_offsets = []
-            for t in range(n_trees): 
-                leaf_nodes = (df.loc[(df["Tree"] == t) & (df["Feature"] == "Leaf"), "Node"]
-                    .to_numpy())
-                leaf_nodes = np.unique(leaf_nodes.astype(np.int64))
-
-                if leaf_nodes.size == 0: 
-                    map_arr = np.array([0], dtype=np.int64)
-                    n_leaf  = 1
-                else: 
-                    max_id  = int(leaf_nodes.max())
-                    map_arr = np.full(max_id + 1, -1, dtype=np.int64)
-                    map_arr[leaf_nodes] = np.arange(leaf_nodes.size, dtype=np.int64) 
-                    n_leaf  = leaf_nodes.size 
-
-                model_maps.append(map_arr)
-                model_offsets.append(offset)
-                offset += n_leaf 
-
-            self.leaf_maps_.append(model_maps)
-            self.leaf_offsets_.append(np.asarray(model_offsets, dtype=np.int64))
-
-        self.leaf_table_size_ = int(offset)
-
-    def _build_model(self): 
-        return XGBClassifier(
-            n_estimators=self.n_estimators,
-            max_depth=self.max_depth,
-            learning_rate=self.learning_rate,
-            subsample=self.subsample,
-            colsample_bytree=self.colsample_bytree,
-            min_child_weight=self.min_child_weight,
-            reg_alpha=self.reg_alpha,
-            reg_lambda=self.reg_lambda,
-            gamma=self.gamma,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            device="cuda" if self.gpu else "cpu",
-            random_state=self.random_state,
-            n_jobs=self.n_jobs,
-            early_stopping_rounds=self.early_stopping_rounds,
-            **self.kwargs,
-        )
-
-    def _init_leaf_projection(self, embed_dim: int, out_dim: int): 
-        if (getattr(self, "leaf_embed_dim_", None) == embed_dim and 
-            getattr(self, "leaf_out_dim_", None) == out_dim): 
-            return 
-
-        if not hasattr(self, "leaf_table_size_"): 
-            self._build_leaf_table()
-
-        rng = np.random.default_rng(self.random_state)
-
-        # Zero initialization for bag of leaves projection 
-        self.leaf_embed_dim_   = int(embed_dim)
-        self.leaf_out_dim_     = int(out_dim)
-        self.leaf_embed_table_ = rng.normal(
-            0.0, 0.1, size=(self.leaf_table_size_, self.leaf_embed_dim_)
-        ).astype(np.float32)
-        self.leaf_proj_        = rng.normal(
-            0.0, 0.1, size=(self.leaf_embed_dim_, self.leaf_out_dim_)
-        ).astype(np.float32)
-        self.leaf_proj_bias_   = np.zeros((self.leaf_out_dim_,), dtype=np.float32)
-
-    def _encode_labels(self, y): 
-        y = np.asarray(y, dtype=np.int64).reshape(-1)
-        classes = np.unique(y)
-        classes = np.sort(classes)
-        if classes.size <= 2: 
-            raise ValueError("expected n_classes > 2")
-        y_idx = np.searchsorted(classes, y)
-        if not np.all(classes[y_idx] == y): 
-            raise ValueError("y contains values not in sorted classes")
-        return y_idx, classes 
-
-    def _num_trees(self, model): 
-        best_iter = getattr(model, "best_iteration", None)
-        if best_iter is None: 
-            return model.get_booster().num_boosted_rounds() 
-        return int(best_iter) + 1 
-
-    def _split_indices(self, n): 
-        if not (self.early_stopping_rounds and self.eval_fraction > 0): 
-            return np.arange(n), None 
-        n_eval = max(1, int(n * self.eval_fraction))
-        rng    = np.random.default_rng(self.random_state)
-        idx    = rng.permutation(n)
-        return idx[n_eval:], idx[:n_eval]
-
-    def _prob_gt(self, X): 
-        X = np.asarray(X, dtype=np.float32)
-        return np.column_stack([m.predict_proba(X)[:, 1] for m in self.models_])
-
-# ---------------------------------------------------------
-# Spatial Ablation Study 
-# ---------------------------------------------------------
-
-class SpatialAblation: 
-
-    def __init__(
-        self, 
-        classifier_factory, 
-        classifier_kwargs: dict, 
-        *,
-        pooling_features: list[str], 
-        ablation_groups: list[list[str]] | None = None, 
-        ablation_mode: str = "one_vs_rest", 
-        device: str = "cuda", 
-        batch_size: int = 128, 
-        epochs: int = 100,
-        lr: float = 5e-3, 
-        weight_decay: float = 1.5e-5,
-        early_stopping_rounds: int = 15, 
-        random_state: int = 0
-    ): 
-        self.classifier_factory    = classifier_factory
-        self.classifier_kwargs     = dict(classifier_kwargs)
-        self.pooling_features      = pooling_features
-        self.ablation_groups       = ablation_groups
-        self.ablation_mode         = ablation_mode
-        self.device                = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.batch_size            = batch_size
-        self.epochs                = epochs
-        self.lr                    = lr
-        self.weight_decay          = weight_decay
-        self.early_stopping_rounds = early_stopping_rounds
-        self.random_state          = random_state
-
-    def run(self, X, y, devices: list[int] | None = None): 
-        feature_names = self.pooling_features 
-        ablations     = self._build_ablations(feature_names)
-
-        if devices is None or len(devices) <= 1: 
-            results = []
-            for name, keep_blocks in ablations: 
-                results.append(self._run_single_ablation(X, y, keep_blocks, feature_names, name))
-            return results 
-
-        context = mp.get_context("spawn")
-        q       = context.Queue()
-        procs   = []
-
-        chunks  = [[] for _ in devices] 
-        for i, item in enumerate(ablations):
-            chunks[i % len(devices)].append(item)
-
-        for dev, chunk in zip(devices, chunks): 
-            if not chunk: 
-                continue 
-            p = context.Process(
-                target=self._run_subset,
-                args=(X, y, chunk, feature_names, dev, q)
-            )
-            p.start() 
-            procs.append(p)
-        
-        results = []
-        for _ in procs: 
-            results.extend(q.get())
-
-        for p in procs: 
-            p.join() 
-
-        return results 
-
-    def _fit_head(self, X, y, in_dim): 
-        y         = np.asarray(y, dtype=np.int64).reshape(-1)
-        classes   = np.unique(y)
-        n_classes = len(classes)
-        y_idx     = np.searchsorted(classes, y)
-
-        class_counts  = np.bincount(y_idx, minlength=n_classes)
-        class_weights = class_counts.max() / np.clip(class_counts, 1, None)
-
-        head    = nn.Linear(in_dim, n_classes - 1).to(self.device)
-        loss_fn = CornLoss(n_classes=n_classes, class_weights=class_weights)
-        opt     = torch.optim.AdamW(
-            head.parameters(), 
-            lr=self.lr, 
-            weight_decay=self.weight_decay
-        )
-
-        splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
-        train_idx, val_idx = next(splitter.split(X, y))
-
-        X_train, y_train = X[train_idx], y_idx[train_idx]
-        X_val, y_val     = X[val_idx], y_idx[val_idx]
-
-        train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
-        val_ds   = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
-
-        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
-        val_loader   = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
-
-        best_state = None
-        best_val   = float("inf")
-        patience   = 0
-        qwk        = float("nan") 
-
-        for _ in range(self.epochs):
-            head.train()
-            for xb, yb in train_loader:
-                xb = xb.to(self.device, dtype=torch.float32)
-                yb = yb.to(self.device, dtype=torch.int64)
-                logits = head(xb)
-                loss = loss_fn(logits, yb)
-
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-
-            head.eval()
-            total = 0.0
-            count = 0
-            with torch.no_grad():
-                for xb, yb in val_loader:
-                    xb = xb.to(self.device, dtype=torch.float32)
-                    yb = yb.to(self.device, dtype=torch.int64)
-                    logits = head(xb)
-                    loss = loss_fn(logits, yb)
-                    total += loss.item() * yb.size(0)
-                    count += yb.size(0)
-            val_loss = total / max(count, 1)
-
-            head.eval() 
-            with torch.no_grad(): 
-                xb = torch.from_numpy(X_val).to(self.device, dtype=torch.float32) 
-                logits = head(xb) 
-                probs  = self._corn_probs(logits)
-                preds  = probs.argmax(axis=1)
-                qwk    = cohen_kappa_score(y_val, preds, weights="quadratic")
-
-            if val_loss < best_val - 1e-4:
-                best_val = val_loss
-                best_state = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
-                patience = 0
-            else:
-                patience += 1
-                if patience >= self.early_stopping_rounds:
-                    break
-
-        if best_state is not None:
-            head.load_state_dict(best_state)
-
-        return head, best_val, float(qwk)
-
-    def _corn_probs(self, logits):
-        prob_gt = torch.sigmoid(logits).cpu().numpy() 
-        n, k    = prob_gt.shape 
-        probs   = np.zeros((n, k + 1), dtype=np.float32) 
-        probs[:, 0] = 1.0 - prob_gt[:, 0]
-        for i in range(1, k): 
-            probs[:, i] = prob_gt[:, i - 1] - prob_gt[:, i] 
-        probs[:, -1] = prob_gt[:, -1]
-        probs = np.clip(probs, 1e-9, 1.0)
-        probs = probs / probs.sum(axis=1, keepdims=True)
-        return probs 
-
-    def _build_ablations(self, feature_names): 
-        
-        if self.ablation_groups is not None: 
-            ablations = []
-            for group in self.ablation_groups: 
-                keep = [feature_names.index(f) for f in group] 
-                name = "keep=" + "+".join(group) 
-                ablations.append((name, keep))
-            return ablations 
-
-        n_blocks  = len(feature_names)
-        ablations = [("keep=all", list(range(n_blocks)))]
-
-        if self.ablation_mode == "one_vs_rest": 
-            for k in range(n_blocks): 
-                keep = [i for i in range(n_blocks) if i != k]
-                ablations.append(("drop_" + str(k), keep))
-        
-        return ablations 
-
-    def _run_subset(self, X, y, ablations, feature_names, device_id, q): 
-        if device_id is not None and torch.cuda.is_available(): 
-            torch.cuda.set_device(device_id)
-
-        self.device = torch.device(f"cuda:{device_id}" if device_id is not None 
-            and torch.cuda.is_available() else "cpu") 
-
-        results = []
-        for name, keep_blocks in ablations: 
-            result = self._run_single_ablation(X, y, keep_blocks, feature_names, name)
-            results.append(result)
-
-        q.put(results)
-
-    def _run_single_ablation(self, X, y, keep_blocks, feature_names, name): 
-        clf = self.classifier_factory(**self.classifier_kwargs)
-        active_features = [feature_names[i] for i in keep_blocks]
-        clf.features    = list(active_features)
-        clf.fit(X, y)
-
-        pooled = clf.extract_pooled(X)
-        pooled = np.asarray(pooled, dtype=np.float32)
-
-        X_ablate = pooled
-
-        head, val_loss, qwk = self._fit_head(X_ablate, y, in_dim=X_ablate.shape[1])
-
-        return {
-            "name": name, 
-            "val_loss": float(val_loss),
-            "qwk": float(qwk), 
-            "dim": int(X_ablate.shape[1]),
-            "features": ",".join(active_features)
-        }
 
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)

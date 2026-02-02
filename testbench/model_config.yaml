@@ -179,15 +179,18 @@ models:
     reg_lambda: 0.03621694052083294
     max_delta_step: 1
     gamma: 0.886755443790972
-  Spatial/VIIRS_ROI:
-    conv_channels: 64-128
-    roi_output_size: 128
-    kernel_size: 7
+  Spatial/VIIRS:
+    attn_dim: 384
+    attn_dropout: 0.293586
     fc_dim: 64
-    dropout: 0.12613878991046223
-    lr: 1.0975815419380153e-05
-    weight_decay: 0.0003146730406166008
-    lambda_supcon: 0.8003410758548655
+    dropout: 0.1355
+    lr: 0.0001905
+    weight_decay: 2.69191e-06
+    alpha_rps: 8.473
+    beta_supcon: 1.091512
+    supcon_temperature: 0.15367
+    supcon_dim: 128
+    batch_size: 384
   XGB/Ordinal:
     n_estimators: 754
     learning_rate: 0.005089553213697213
@@ -271,10 +274,17 @@ models:
     max_delta_step: 7
     gamma: 0.8340018913945823
   SAIPE_MANIFOLD/SVM:
-    C: 16.314228204492267
-    gamma: 0.0004698238931337501
-    class_weight: balanced
+    C: 0.8219337802562704
+    gamma: 0.011574389276193617
+    class_weight: null
   SAIPE_2023/SVM:
-    C: 88.12888706644083
-    gamma: 0.00018193581531331194
+    C: 94.48222629814344
+    gamma: 0.004410652742580192
+    class_weight: null
+  VIIRS_MANIFOLD/SVM:
+    C: 15.819961002882298
+    gamma: 0.0006573220471004352
+    class_weight: null
+  VIIRS_MANIFOLD/Logistic:
+    C: 0.08878089778234538
     class_weight: balanced

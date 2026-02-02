@@ -101,10 +101,9 @@ EXPERT_PROBA    = {
     "VIIRS": project_path("data", "stacking", "viirs_optimized_probs.mat"),
     # "TIGER": project_path("data", "stacking", "tiger_optimized_probs.mat"),
     "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat"),
+    "SAIPE": project_path("data", "datasets", "saipe_optimized_probs.mat"),
     "SAIPE_2023": project_path("data", "stacking", "saipe_optimized_probs.mat"),
     "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"),
-    "VIIRS_MANIFOLD_LOGITS": project_path("data", "stacking", 
-                                          "viirs_pooled_with_logits_probs.mat"),
     "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat")
 }
 
@@ -114,7 +113,7 @@ STACKED_PASSTHROUGH_PROBS = project_path("data", "results", "final_stacked_passt
 STACKING_BASE_KEY        = "Stacking"
 STACKING_PASSTHROUGH_KEY = "StackingPassthrough"
 
-MODELS = ("SVM",)
+MODELS = ("SVM", "Logistic")
 
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 
@@ -470,7 +469,7 @@ def test_expert_oof(
     return {
         "header": ["Name", "Acc", "F1", "ROC", "ECE", "QWK", "RPS"],
         "rows": rows,
-        # "experts": {k: EXPERT_PROBA[k] for k in DATASETS}
+        "experts": {name: EXPERT_PROBA[name] for name in targets}
     }
 
 def test_stacking_optimize(

@@ -61,10 +61,11 @@ def cv_config(folds: int, random_state: int) -> CVConfig:
 def normalize_spatial_params(params, *, random_state: int, collate_fn): 
     params.setdefault("random_state", random_state)
     params.setdefault("collate_fn", collate_fn)
+    params.setdefault("epochs", 200)
     params.setdefault("early_stopping_rounds", 15)
     params.setdefault("eval_fraction", 0.2)
-    params.setdefault("min_delta", 1e-3)
-    params.setdefault("batch_size", 32)
+    params.setdefault("min_delta", 1e-4)
+    params.setdefault("target_global_batch", 1024)
     return params 
 
 def _spatial_factory(
