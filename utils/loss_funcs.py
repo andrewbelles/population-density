@@ -12,6 +12,8 @@ import torch.nn as nn
 
 import torch.nn.functional as F 
 
+import numpy as np 
+
 class WassersteinLoss(nn.Module): 
     '''
     Efficient and Stable loss for ordinal classification 
@@ -219,3 +221,22 @@ class HybridOrdinalLoss(nn.Module):
 
         total_loss = corn_loss + weighted_rps + weighted_supcon
         return total_loss, corn_loss, weighted_rps, weighted_supcon 
+
+
+def compute_ens_weights(class_counts, beta=0.999):
+    '''
+    Computes Effective Number of Samples weights proposed by cui et al.
+    '''
+    class_counts = np.asarray(class_counts)
+    
+    # avoiding divide by zero for empty classes
+    class_counts = np.clip(class_counts, 1, None) 
+    
+    effective_num = 1.0 - np.power(beta, class_counts)
+    weights = (1.0 - beta) / effective_num
+    
+    # Normalize so that the weights sum to the number of classes
+    # This keeps the gradient magnitude roughly consistent
+    weights = weights / np.sum(weights) * len(class_counts)
+    
+    return torch.tensor(weights, dtype=torch.float32)

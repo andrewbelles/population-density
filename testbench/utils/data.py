@@ -386,7 +386,7 @@ def _roi_loader(
 
 def make_mmap_loader(
     *,
-    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    tile_shape: tuple[int, int, int] = (1, 256, 256), 
     max_bag_size: int = 64, 
     sample_frac: float | None = None, 
     random_state: int = 0, 

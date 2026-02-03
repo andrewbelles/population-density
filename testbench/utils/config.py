@@ -10,9 +10,20 @@ from functools import partial
 
 from pathlib import Path
 
+
+from models.estimators import SpatialGATClassifier
 from utils.helpers import load_yaml_config 
 
 from analysis.cross_validation import CVConfig
+
+from models.graph.construction import (
+    LOGRADIANCE_GATE_LOW,
+    LOGRADIANCE_GATE_HIGH
+)
+
+from utils.helpers   import bind 
+
+from utils.resources import ComputeStrategy
 
 def load_model_params(config_path: str, key: str) -> dict: 
 
@@ -61,12 +72,49 @@ def cv_config(folds: int, random_state: int) -> CVConfig:
 def normalize_spatial_params(params, *, random_state: int, collate_fn): 
     params.setdefault("random_state", random_state)
     params.setdefault("collate_fn", collate_fn)
-    params.setdefault("epochs", 200)
+    params.setdefault("epochs", 350)
     params.setdefault("early_stopping_rounds", 15)
     params.setdefault("eval_fraction", 0.2)
     params.setdefault("min_delta", 1e-4)
-    params.setdefault("target_global_batch", 1024)
+    params.setdefault("target_global_batch", 2048)
     return params 
+
+def spatial_gat_factory(
+    *,
+    collate_fn,
+    compute_strategy,
+    fixed,
+    in_channels=None,
+    **params
+): 
+    merged = dict(fixed)
+    merged.update(params)
+
+    merged.pop("in_channels", None)
+
+    scale = merged.pop("threshold_scale", 1.0)
+    merged.setdefault("thresh_low", LOGRADIANCE_GATE_LOW * scale)
+    merged.setdefault("thresh_high", LOGRADIANCE_GATE_HIGH * scale)
+
+    collate = merged.pop("collate_fn", collate_fn)
+    return SpatialGATClassifier(
+        collate_fn=collate,
+        compute_strategy=compute_strategy,
+        **merged
+    )
+
+def make_spatial_gat(
+    *,
+    collate_fn=None,
+    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+    **fixed
+): 
+    return bind(
+        spatial_gat_factory,
+        collate_fn=collate_fn,
+        compute_strategy=compute_strategy,
+        fixed=fixed 
+    )
 
 def _spatial_factory(
     factory, 

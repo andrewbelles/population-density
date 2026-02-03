@@ -362,7 +362,7 @@ class SpatialTensorDataset(ABC, TileStreamSource):
         counties_path: str | None = None, 
         labels_path: str | None = None, 
         max_counties: int | None = None, 
-        tile_hw: tuple[int, int] = (224, 224)
+        tile_hw: tuple[int, int] = (256, 256)
     ): 
         if counties_path is None: 
             counties_path = project_path(
@@ -541,7 +541,7 @@ class ViirsTensorDataset(SpatialTensorDataset):
         viirs_path: str | None = None, 
         counties_path: str | None = None, 
         labels_path: str | None = None,
-        tile_hw: tuple[int, int] = (224, 224), 
+        tile_hw: tuple[int, int] = (256, 256), 
         all_touched: bool = False, 
         log_scale: bool = True, 
         max_counties: int | None = None, 
@@ -638,7 +638,7 @@ class UspsTensorDataset(SpatialTensorDataset):
         nlcd_path: str | None = None,        # suppression of water pixels in mask 
         counties_path: str | None = None, 
         labels_path: str | None = None, 
-        tile_hw: tuple[int, int] = (224, 224), 
+        tile_hw: tuple[int, int] = (256, 256), 
         usps_layer: str | None = None, 
         water_codes: tuple[int, ...] = (11, 12), 
         developed_codes: tuple[int, ...] = (21, 22, 23, 24), 

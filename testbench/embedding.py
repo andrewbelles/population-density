@@ -48,7 +48,8 @@ from optimization.evaluators   import (
 from optimization.spaces       import (
     define_projector_space,
     define_manifold_projector_space,
-    define_spatial_space
+    define_spatial_space,
+    define_hgnn_space
 )
 
 from optimization.engine       import (
@@ -60,16 +61,13 @@ from testbench.utils.config    import (
     cv_config,
     load_model_params,
     eval_config,
+    make_spatial_gat,
     normalize_spatial_params,
     with_spatial_channels
 )
 
 from testbench.utils.metrics   import (
     OPT_TASK,
-    linear_cka,
-    cca_score,
-    block_mi,
-    distance_correlation
 )
 
 from testbench.utils.etc       import (
@@ -77,18 +75,8 @@ from testbench.utils.etc       import (
     format_metric 
 )
 
-from testbench.utils.oof       import (
-    extract_pooled,
-    extract_with_logits,
-    fit_without_labels,
-    holdout_embeddings,
-    make_spatial_classifier,
-    subset_by_groups
-)
-
 from models.estimators         import (
     EmbeddingProjector,
-    SpatialAblation, 
     SpatialClassifier, 
     make_spatial_sfe,
 )
@@ -102,7 +90,7 @@ from utils.resources import ComputeStrategy
 
 strategy = ComputeStrategy.from_env()
 
-VIIRS_ROOT = project_path("data", "tensors", "viirs")
+VIIRS_ROOT = project_path("data", "tensors", "viirs_2013")
 NLCD_ROOT  = project_path("data", "tensors", "nlcd") 
 USPS_ROOT  = project_path("data", "tensors", "usps")
 
@@ -118,10 +106,6 @@ NLCD_OUT              = project_path("data", "datasets", "nlcd_pooled.mat")
 # ---------------------------------------------------------
 # Test Helpers 
 # ---------------------------------------------------------
-
-def _resolve_root(path: str) -> str: 
-    p = Path(path)
-    return str(p) if p.is_absolute() else project_path(path)
 
 def _row_score(name: str, score: float): 
     return {"Name": name, "RPS": format_metric(score)}
@@ -164,28 +148,6 @@ def _projector_fold_factory(name: str, proj_trials: int, random_state: int):
         return proj.transform(val_emb)
 
     return _projector_fold
-
-def _pca_logits_fold_factory(n_components: int = 11): 
-    stats = []
-
-    def _pca_logits_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
-        n_classes = len(np.unique(train_y))
-        logit_dim = max(1, n_classes - 1) 
-
-        if train_emb.shape[1] <= logit_dim or val_emb.shape[1] <= logit_dim: 
-            raise ValueError("expected embeddings concatenated with logits")
-
-        train_feats = train_emb[:, :-logit_dim]
-        val_feats   = val_emb[:, :-logit_dim]
-        val_logits  = val_emb[:, -logit_dim:]
-
-        pca = PCA(n_components=n_components, random_state=random_state + fold)
-        pca.fit(train_feats)
-        stats.append(float(np.sum(pca.explained_variance_ratio_)))
-
-        val_pca = pca.transform(val_feats)
-        return np.concatenate([val_pca, val_logits], axis=1)
-    return _pca_logits_fold, stats
 
 def _holdout_embeddings(
     ds,
@@ -246,7 +208,7 @@ def _spatial_opt(
     *,
     root_dir: str, 
     model_key: str, 
-    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    tile_shape: tuple[int, int, int] = (1, 256, 256), 
     max_bag_size: int = 64, 
     sample_frac: float | None = None, 
     trials: int = 50, 
@@ -272,14 +234,14 @@ def _spatial_opt(
         random_state=random_state
     )
 
-    factory = make_spatial_sfe(compute_strategy=strategy)
+    factory = make_spatial_gat(compute_strategy=strategy)
     factory = with_spatial_channels(factory, spatial)
 
     evaluator = SpatialEvaluator(
         filepath=root_dir,
         loader_func=loader,
         model_factory=factory,
-        param_space=define_spatial_space,
+        param_space=define_hgnn_space,
         compute_strategy=strategy,
         task=OPT_TASK,
         config=cv_config(folds, random_state)

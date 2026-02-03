@@ -67,9 +67,13 @@ pkgs.mkShell {
       PIP_QUIET="python -m pip -q"
 
       $PIP_QUIET install --upgrade pip || echo "[pip] upgrade failed" >&2 
-      $PIP_QUIET install torch torchvision torchaudio \
+      $PIP_QUIET install torch torchvision torchaudio\
         --index-url https://download.pytorch.org/whl/cu124 || 
         echo "[pip] torch install failed" >&2 
+      $PIP_QUIET install torch-scatter torch-sparse \
+        -f https://data.pyg.ord/whl/torch-2.6.0+cu124.html ||
+        echo "[pip] pyg deps failed" >&2 
+
       $PIP_QUIET install torch-geometric rasterstats pyrosm networkit imageio || 
         echo "[pip] extra deps failed" >&2 
 

@@ -147,7 +147,7 @@ def _spatial_fit_extract(
     test_root: str, 
     out_path: str,
     model_key: str, 
-    tile_shape: tuple[int, int, int] = (1, 224, 224), 
+    tile_shape: tuple[int, int, int] = (1, 256, 256), 
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 

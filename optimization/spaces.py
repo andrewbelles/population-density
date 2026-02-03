@@ -123,11 +123,49 @@ def define_spatial_space(trial):
 
         "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
 
-        "epochs": 200, 
+        "ens": 0.999, # effective number of samples hyperparam   
+        "epochs": 350, 
+        "early_stopping_rounds": 10, 
+        "eval_fraction": 0.2,
+        "min_delta": 1e-4,
+        "target_global_batch": 2048
+    }
+
+# ---------------------------------------------------------
+# HyperGAT Spatial Classifier 
+# ---------------------------------------------------------
+
+def define_hgnn_space(trial: optuna.Trial): 
+    return {
+        "patch_size": trial.suggest_categorical("patch_size", [16, 32, 64]), 
+        "embed_dim": trial.suggest_categorical("embed_dim", [32, 64, 128]), 
+        "gnn_dim": trial.suggest_categorical("gnn_dim", [64, 128, 256]),
+        "gnn_layers": trial.suggest_int("gnn_layers", 3, 3), 
+        "gnn_heads": trial.suggest_categorical("gnn_heads", [1, 2, 4]), 
+        "fc_dim": trial.suggest_categorical("fc_dim", [64, 128, 256]),
+        
+        "dropout": trial.suggest_float("dropout", 0.1, 0.5),
+        "attn_dropout": trial.suggest_float("attn_dropout", 0.0, 0.4), 
+
+        "max_bag_frac": trial.suggest_float("max_bag_frac", 0.5, 1.0), 
+
+        "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 10.0, log=True),
+        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 2.0), 
+        "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.3),
+        "ens": trial.suggest_float("ens", 0.9, 0.999),
+        "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
+
+        "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+
+        "threshold_scale": trial.suggest_float("threshold_scale", 0.8, 1.2), 
+
+        "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
+        "epochs": 350, 
         "early_stopping_rounds": 15, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,
-        "target_global_batch": 1024
+        "target_global_batch": 2048
     }
 
 # ---------------------------------------------------------

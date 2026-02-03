@@ -5,20 +5,30 @@
 # Graph Utilities for Adjacency Graph Construction 
 # 
 
+import torch 
+
+import torch.nn.functional as F 
+
+from torch_sparse import SparseTensor
 
 from typing import Callable, Optional 
 
 import numpy as np 
+
 from numpy.typing import NDArray 
 
 import geopandas as gpd 
 
 from sklearn.neighbors import kneighbors_graph 
+
 from libpysal.weights import Queen 
+
 from scipy import sparse 
+
 from scipy.io import loadmat 
 
 import utils.helpers as h 
+
 from preprocessing.loaders import load_oof_predictions
 
 from utils.helpers import _mat_str_vector, bind
@@ -26,6 +36,9 @@ from utils.helpers import _mat_str_vector, bind
 from utils.resources import ComputeStrategy
 
 EARTH_RADIUS_KM = 6371.0
+
+LOGRADIANCE_GATE_LOW   = 0.4654 # Lower partition on log radiance for type 0 nodes 
+LOGRADIANCE_GATE_HIGH  = 1.8548 # Upper partition on log radiance for type 2 nodes  
 
 def build_knn_graph_from_coords(
     coords: NDArray[np.float64], 
@@ -333,3 +346,153 @@ def compute_adaptive_graph(
 
     adj_refined = topk_by_column(adj_refined, k_neighbors)
     return adj_refined, fips_mob 
+
+# ---------------------------------------------------------
+# Hypergraph Construction for Spatial Classification
+# ---------------------------------------------------------
+
+class HypergraphBuilder: 
+
+    def __init__(
+        self,
+        tile_size=256, 
+        patch_size=32,
+        thresh_low=LOGRADIANCE_GATE_LOW, 
+        thresh_high=LOGRADIANCE_GATE_HIGH
+    ):
+        self.tile_size   = tile_size 
+        self.patch_size  = patch_size 
+        self.thresh_low  = thresh_low
+        self.thresh_high = thresh_high
+
+        # Should be eq 
+        self.grid_h      = tile_size // patch_size 
+        self.grid_w      = tile_size // patch_size 
+        self.L           = self.grid_h * self.grid_w
+
+        self._spatial_cache = {}
+
+    def build(self, p95, batch_size, idx=None): 
+        '''
+        Build hypergraph per patch per tile. 
+
+        Returns: 
+        - node_type, 
+        - incidence_index, 
+        - hyperedge_type,
+        - hyperedge_batch,
+        - H (SparseTensor)
+        '''
+
+        device = p95.device 
+        B = batch_size
+
+        if idx is None: 
+            idx = torch.arange(self.L, device=device).unsqueeze(0).repeat(B, 1)
+
+        B, K = idx.shape 
+        N = B * K 
+
+        assert p95.numel() == N, "p95 size mismatch"
+
+        node_type = self.node_types(p95)
+
+        neighbor, _, base_nodes, base_hedges, counts = self.spatial_template(device)
+
+        inv = torch.full((B, self.L), -1, device=device, dtype=torch.long)
+        inv.scatter_(1, idx, torch.arange(K, device=device).expand(B, K))
+
+        neighbors = neighbor[idx]
+        valid     = neighbors >= 0 
+        neighbors_safe = neighbors.clamp_min(0)
+
+        local     = inv.gather(1, neighbors_safe.reshape(B, -1)).reshape(B, K, 9)
+        local     = torch.where(valid, local, torch.full_like(local, -1))
+
+        mask_local    = local >= 0 
+        b_idx         = torch.arange(B, device=device).view(B, 1, 1).expand(B, K, 9)
+        spatial_nodes = (b_idx * K + local)[mask_local] 
+
+        counts_local   = mask_local.sum(dim=2).reshape(-1)
+        hedges_base    = torch.arange(B * K, device=device)
+        spatial_hedges = hedges_base.repeat_interleave(counts_local) 
+
+        E_per_tile     = K + 4
+        spatial_hedges = (spatial_hedges // K) * E_per_tile + (spatial_hedges % K)
+        node_type_2d = node_type.view(B, K)
+        semantic_nodes_list  = []
+        semantic_hedges_list = []
+        
+        # semantic hyperedge creation, one for each strata 
+        for t in (0, 1, 2): 
+            mask = node_type_2d == t 
+            if mask.any(): 
+                nodes = torch.nonzero(mask, as_tuple=False)
+                n     = nodes[:, 0] * K + nodes[:, 1]
+                h     = nodes[:, 0] * E_per_tile + (K + t)
+                semantic_nodes_list.append(n)
+                semantic_hedges_list.append(h)
+
+        # concat if valid else initialize as empty
+        if semantic_nodes_list: 
+            semantic_nodes  = torch.cat(semantic_nodes_list, dim=0)
+            semantic_hedges = torch.cat(semantic_hedges_list, dim=0)
+        else: 
+            semantic_nodes  = torch.empty((0,), device=device, dtype=torch.long)
+            semantic_hedges = torch.empty((0,), device=device, dtype=torch.long)
+
+        # global hyperedge, all nodes per tile 
+        global_nodes  = torch.arange(N, device=device)
+        global_hedges = (global_nodes // K) * E_per_tile + (K + 3) 
+
+        all_nodes  = torch.cat([spatial_nodes, semantic_nodes, global_nodes], dim=0)
+        all_hedges = torch.cat([spatial_hedges, semantic_hedges, global_hedges], dim=0)
+
+        incidence_index = torch.stack([all_nodes, all_hedges], dim=0)
+
+        edge_type_tile = torch.cat([
+            torch.zeros(K, device=device, dtype=torch.long),
+            torch.ones(3, device=device, dtype=torch.long),
+            torch.full((1,), 2, device=device, dtype=torch.long)
+        ], dim=0)
+
+        hyperedge_type  = edge_type_tile.repeat(B)
+        hyperedge_batch = torch.arange(B, device=device).repeat_interleave(E_per_tile)
+
+        H = SparseTensor(
+            row=all_nodes, 
+            col=all_hedges,
+            value=torch.ones_like(all_nodes, dtype=torch.float32),
+            sparse_sizes=(N, B * E_per_tile)
+        )
+
+        return node_type, incidence_index, hyperedge_type, hyperedge_batch, H
+
+    def node_types(self, p95): 
+        '''
+        Separate node types on defined thresholds 
+        '''
+        t = torch.zeros_like(p95, dtype=torch.long)
+        t = torch.where(p95 > self.thresh_low, 1, t)
+        t = torch.where(p95 > self.thresh_high, 2, t) 
+        return t 
+
+    def spatial_template(self, device): 
+        '''
+        Pre-compute and cache template for which hypergraph per patch in tile 
+        should be build off of. 
+        '''
+        if device in self._spatial_cache: 
+            return self._spatial_cache[device]
+
+        grid = torch.arange(self.L, device=device).reshape(1, 1, self.grid_h, self.grid_w) + 1 
+        neighbor = F.unfold(grid.float(), kernel_size=3, padding=1, stride=1)
+        neighbor = neighbor.long()[0].transpose(0, 1) - 1 
+        mask     = neighbor >= 0 
+
+        base_nodes  = neighbor[mask]
+        counts      = mask.sum(dim=1)
+        base_hedges = torch.arange(self.L, device=device).repeat_interleave(counts)
+
+        self._spatial_cache[device] = (neighbor, mask, base_nodes, base_hedges, counts)
+        return self._spatial_cache[device] 
