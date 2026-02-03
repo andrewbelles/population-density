@@ -225,7 +225,7 @@ def _optimize_dataset(
             task=OPT_TASK,
             config=inner_config,
             outer_config=outer_config,
-            metric="qwk"
+            metric="rps"
         )
 
         config = EngineConfig(
@@ -294,7 +294,7 @@ def _optimize_cs(
 
     config = EngineConfig(
         n_trials=CS_TRIALS,
-        direction="maximize",
+        direction="minimize",
         sampler_type="multivariate-tpe",
         random_state=RANDOM_STATE,
         early_stopping_rounds=CS_EARLY_STOP,
@@ -415,7 +415,7 @@ def test_expert_optimize(
             name, 
             base["path"],
             loader, 
-            direction="maximize",
+            direction="minimize",
             n_trials=EXPERT_TRIALS,
             config_path=config_path,
             parallel_outer=False, 

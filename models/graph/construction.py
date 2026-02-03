@@ -395,7 +395,7 @@ class HypergraphBuilder:
 
         assert p95.numel() == N, "p95 size mismatch"
 
-        node_type = self.node_types(p95)
+        patch_types = self.node_types(p95)
 
         neighbor, _, base_nodes, base_hedges, counts = self.spatial_template(device)
 
@@ -419,7 +419,7 @@ class HypergraphBuilder:
 
         E_per_tile     = K + 4
         spatial_hedges = (spatial_hedges // K) * E_per_tile + (spatial_hedges % K)
-        node_type_2d = node_type.view(B, K)
+        node_type_2d = patch_types.view(B, K)
         semantic_nodes_list  = []
         semantic_hedges_list = []
         
@@ -442,11 +442,30 @@ class HypergraphBuilder:
             semantic_hedges = torch.empty((0,), device=device, dtype=torch.long)
 
         # global hyperedge, all nodes per tile 
-        global_nodes  = torch.arange(N, device=device)
-        global_hedges = (global_nodes // K) * E_per_tile + (K + 3) 
+        patch_global_nodes  = torch.arange(N, device=device)
+        patch_global_hedges = (patch_global_nodes // K) * E_per_tile + (K + 3) 
 
-        all_nodes  = torch.cat([spatial_nodes, semantic_nodes, global_nodes], dim=0)
-        all_hedges = torch.cat([spatial_hedges, semantic_hedges, global_hedges], dim=0)
+        readout_nodes = torch.arange(N, N + B, device=device)
+
+        batch_indices  = torch.arange(B, device=device)
+        readout_hedges = batch_indices * E_per_tile + (K + 3)
+        readout_types  = torch.full((B,), 3, device=device, dtype=torch.long)
+
+        all_nodes  = torch.cat([
+            spatial_nodes, 
+            semantic_nodes, 
+            patch_global_nodes,
+            readout_nodes
+        ], dim=0)
+
+        all_hedges = torch.cat([
+            spatial_hedges, 
+            semantic_hedges, 
+            patch_global_hedges,
+            readout_hedges
+        ], dim=0)
+
+        all_node_types = torch.cat([patch_types, readout_types], dim=0)
 
         incidence_index = torch.stack([all_nodes, all_hedges], dim=0)
 
@@ -463,10 +482,10 @@ class HypergraphBuilder:
             row=all_nodes, 
             col=all_hedges,
             value=torch.ones_like(all_nodes, dtype=torch.float32),
-            sparse_sizes=(N, B * E_per_tile)
+            sparse_sizes=(N + B, B * E_per_tile)
         )
 
-        return node_type, incidence_index, hyperedge_type, hyperedge_batch, H
+        return all_node_types, incidence_index, hyperedge_type, hyperedge_batch, H
 
     def node_types(self, p95): 
         '''

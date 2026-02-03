@@ -16,7 +16,7 @@ from analysis.cross_validation import (
 )
 
 from models.estimators         import (
-    ResidualTabular, 
+    TFTabular, 
     SpatialClassifier, 
     SpatialGATClassifier
 )
@@ -195,7 +195,7 @@ def _spatial_fit_extract(
     model.fit(train_ds, train_y)
 
     test_emb = model.extract(test_ds)
-    val_rps  = model.eal_loss(model.as_eval_loader(test_ds))
+    _, val_corn, val_rps  = model.eval_loss(model.as_eval_loader(test_ds))
 
     feature_names = np.array(
         [f"{model_key.split('/')[-1].lower()}_emb_{i}" for i in range(test_emb.shape[1])],
@@ -211,11 +211,12 @@ def _spatial_fit_extract(
     })
 
     return {
-        "header": ["Name", "Dim", "Loss + RPS"],
+        "header": ["Name", "Dim", "RPS", "Corn"],
         "row": {
             "Name": f"{model_key}/2013->2023",
             "Dim": test_emb.shape[1],
-            "Loss + RPS": val_rps 
+            "RPS": format_metric(val_rps),
+            "Corn": format_metric(val_corn)
         }
     }
 

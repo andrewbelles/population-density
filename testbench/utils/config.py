@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path
 
 
-from models.estimators import ResidualTabular, SpatialGATClassifier
+from models.estimators import TFTabular, SpatialGATClassifier
 from utils.helpers import load_yaml_config 
 
 from analysis.cross_validation import CVConfig
@@ -140,6 +140,6 @@ def make_residual_tabular(**fixed):
         merged = dict(fixed)
         merged.update(params)
 
-        return ResidualTabular(**merged)
+        return TFTabular(**merged)
 
     return _factory

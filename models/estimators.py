@@ -66,6 +66,7 @@ from models.networks         import (
     ResNetMIL,
     MILOrdinalHead,
     HypergraphBackbone,
+    TransformerProjector,
     ResidualMLP,
     Mixer
 ) 
@@ -977,8 +978,12 @@ class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
         bsz = yb.size(0)
         return loss, bsz, loss_corn, loss_rps, loss_sup 
 
-    def augment_inputs(self, inputs): 
-        return inputs 
+    def augment_inputs(self, inputs):
+        k = np.random.randint(0, 4)
+        x = torch.rot90(inputs, k, dims=[2, 3])
+        if np.random.random() > 0.5: 
+            x = torch.flip(x, dims=[3])
+        return x 
 
     def unpack_batch(self, batch): 
         inputs, labels, batch_indices = batch 
@@ -1390,7 +1395,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
 # Mixing Tabular, Residual MLP Model 
 # ---------------------------------------------------------
 
-class ResidualTabular(BaseEstimator, ClassifierMixin): 
+class TFTabular(BaseEstimator, ClassifierMixin): 
     
     def __init__(
         self, 
@@ -1403,7 +1408,6 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
         mix_alpha: float = 0.2, 
         mix_mult: int = 2, 
         max_mix: int | None = None,
-        with_mix_epochs: int = 1800, 
         anchor_power: float = 1.0, 
 
         alpha_rps: float = 0.5, 
@@ -1412,6 +1416,13 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
         supcon_dim: int = 128,
         ens: float = 0.999, 
 
+        transformer_dim: int,     
+        transformer_tokens: int, 
+        transformer_heads: int = 4, 
+        transformer_layers: int = 2,
+        transformer_dropout: float = 0.1, 
+        transformer_attn_dropout: float = 0.1, 
+        
         epochs: int = 2000, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
@@ -1424,33 +1435,39 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
         compile_model: bool = True 
     ):
-        self.in_dim                = in_dim
-        self.hidden_dim            = hidden_dim
-        self.depth                 = depth
-        self.dropout               = dropout
+        self.in_dim                   = in_dim
+        self.hidden_dim               = hidden_dim
+        self.depth                    = depth
+        self.dropout                  = dropout
 
-        self.mix_alpha             = mix_alpha
-        self.mix_mult              = mix_mult
-        self.max_mix               = max_mix
-        self.with_mix_epochs       = with_mix_epochs
-        self.anchor_power          = anchor_power
+        self.mix_alpha                = mix_alpha
+        self.mix_mult                 = mix_mult
+        self.max_mix                  = max_mix
+        self.anchor_power             = anchor_power
 
-        self.alpha_rps             = alpha_rps
-        self.beta_supcon           = beta_supcon
-        self.supcon_temperature    = supcon_temperature
-        self.supcon_dim            = supcon_dim
-        self.ens                   = ens
+        self.alpha_rps                = alpha_rps
+        self.beta_supcon              = beta_supcon
+        self.supcon_temperature       = supcon_temperature
+        self.supcon_dim               = supcon_dim
+        self.ens                      = ens
 
-        self.epochs                = epochs
-        self.lr                    = lr
-        self.weight_decay          = weight_decay
-        self.batch_size            = batch_size
-        self.early_stopping_rounds = early_stopping_rounds
-        self.eval_fraction         = eval_fraction
-        self.min_delta             = min_delta
-        self.random_state          = random_state
-        self.device                = self.resolve_device(compute_strategy.device)
-        self.compile_model         = bool(compile_model)
+        self.transformer_dim          = transformer_dim 
+        self.transformer_tokens       = transformer_tokens
+        self.transformer_heads        = transformer_heads 
+        self.transformer_layers       = transformer_layers
+        self.transformer_dropout      = transformer_dropout
+        self.transformer_attn_dropout = transformer_attn_dropout
+
+        self.epochs                   = epochs
+        self.lr                       = lr
+        self.weight_decay             = weight_decay
+        self.batch_size               = batch_size
+        self.early_stopping_rounds    = early_stopping_rounds
+        self.eval_fraction            = eval_fraction
+        self.min_delta                = min_delta
+        self.random_state             = random_state
+        self.device                   = self.resolve_device(compute_strategy.device)
+        self.compile_model            = bool(compile_model)
 
         self.classes_   = None
         self.n_classes_ = None
@@ -1469,11 +1486,6 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
 
         self.build_model(class_weights)
 
-        opt       = torch.optim.AdamW(
-            self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
-
         if self.eval_fraction and self.eval_fraction > 0: 
             splitter = StratifiedShuffleSplit(
                 n_splits=1, test_size=self.eval_fraction, random_state=self.random_state
@@ -1491,75 +1503,27 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
         train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
         val_loader   = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
 
-        best_state  = None 
-        best_val    = float("inf") 
-        patience    = 0 
-        t0          = time.perf_counter()
-        total_count = 0
-        total_rps   = 0.0 
-        total_corn  = 0.0 
+        best_soft = self.run_phase(
+            name="Manifold-Mixing",
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=self.epochs,
+            mixing=True 
+        )
 
-        for ep in range(self.epochs): 
-            with_mixing = self.with_mix_epochs <= ep 
+        if best_soft is not None: 
+            best_hard = self.run_phase(
+                name="Hard-Labels",
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=max(1, self.epochs), 
+                mixing=False, 
+                start_state=best_soft,
+                lr_scale=0.3
+            )
+            if best_hard is not None: 
+                self.model_.load_state_dict(best_hard)
 
-            self.model_.train() 
-            for xb, yb in train_loader: 
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
-
-                loss, _, _, _, _ = self.process_batch(xb, yb, with_mixing=with_mixing)
-
-                opt.zero_grad()
-                loss.backward()
-                opt.step() 
-
-            scheduler.step() 
-
-            self.model_.eval() 
-            val_rps  = 0.0 
-            val_corn = 0.0
-            count    = 0 
-            with torch.no_grad(): 
-                for xb, yb in val_loader: 
-                    xb = xb.to(self.device)
-                    yb = yb.to(self.device)
-
-                    feats = self.forward_feats(xb) 
-                    _, logits, proj = self.forward_logits(feats, with_supcon=False)
-
-                    _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
-
-                    corn = corn.mean() 
-                    rps  = rps.mean() 
-
-                    val_rps  += rps.item() * yb.size(0) 
-                    val_corn += corn.item() * yb.size(0)
-                    count    += yb.size(0)
-
-            val_corn  = (val_corn / max(count, 1))
-            val_rps   = (val_rps / max(count, 1)) / max(self.alpha_rps, 1e-9)
-            val_score = val_corn + val_rps 
-
-            if val_score < best_val - self.min_delta: 
-                best_val   = val_score 
-                best_state = copy.deepcopy(self.model_.state_dict())
-                patience   = 0 
-            else: 
-                patience  += 1 
-                if self.early_stopping_rounds and patience >= self.early_stopping_rounds:
-                    break 
-
-            avg_dt   = (time.perf_counter() - t0) / (ep + 1)
-            msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg | ") 
-
-            if ep % 50 == 0: 
-                if val_score is not None: 
-                    msg += (f" | val_loss={val_score:.4f} | val_corn={val_corn:.4f} | "
-                            f"val_rps={val_rps:.4f}")
-                    print(msg, file=sys.stderr, flush=True)
-
-        if best_state is not None: 
-            self.model_.load_state_dict(best_state)
         return self 
 
     def predict_proba(self, X): 
@@ -1595,36 +1559,112 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
             batch_size=self.batch_size, shuffle=False
         )
 
-        self.model_.eval() 
-        val_rps  = 0.0 
-        val_corn = 0.0
-        count    = 0 
-        
-        with torch.no_grad(): 
-            for xb, yb in loader: 
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
-
-                feats = self.forward_feats(xb) 
-                _, logits, proj = self.forward_logits(feats, with_supcon=False)
-
-                _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
-
-                # values are per-sample because of mixed loss 
-                corn = corn.mean() 
-                rps  = rps.mean() 
-
-                val_rps  += rps.item() * yb.size(0) 
-                val_corn += corn.item() * yb.size(0)
-                count    += yb.size(0)
-
-        val_corn = (val_corn / max(count, 1))
-        val_rps  = (val_rps / max(count, 1)) / max(self.alpha_rps, 1e-9)
-        return val_corn + val_rps 
+        loss, _, _ = self.validate(loader)
+        return loss 
 
     # -----------------------------------------------------
     # Internal Helpers 
     # -----------------------------------------------------
+
+    def run_phase(
+        self,
+        name, 
+        *,
+        train_loader,
+        val_loader,
+        epochs: int, 
+        mixing: bool,
+        start_state=None,
+        lr_scale: float = 1.0
+    ): 
+
+        print(f"[{name}] starting...")
+
+        phase_lr = lr_scale * self.lr 
+
+        if start_state is not None: 
+            self.model_.load_state_dict(start_state)
+
+        self.opt_ = torch.optim.AdamW(
+            self.model_.parameters(), lr=phase_lr, weight_decay=self.weight_decay
+        )
+        self.scheduler_ = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt_, T_max=epochs)
+
+        best_val   = float("inf")
+        best_state = None 
+        patience   = 0
+        start      = time.perf_counter()
+
+        for ep in range(epochs): 
+            _         = self.train_epoch(train_loader, mixing=mixing)
+            val_score, val_corn, val_rps = self.validate(val_loader)
+
+            if val_score < best_val - self.min_delta: 
+                best_val   = val_score 
+                best_state = copy.deepcopy(self.model_.state_dict())
+                patience   = 0
+            else: 
+                patience  += 1 
+                if self.early_stopping_rounds and patience >= self.early_stopping_rounds: 
+                    break 
+
+            avg_dt   = (time.perf_counter() - start) / (ep + 1)
+            msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg") 
+
+            if ep % 20 == 0: 
+                if val_score is not None: 
+                    msg += (f" | val_loss={val_score:.4f} | val_corn={val_corn:.4f} | "
+                            f"val_rps={val_rps:.4f}")
+                    print(msg, file=sys.stderr, flush=True)
+
+        return best_state
+
+    def validate(self, val_loader): 
+        self.model_.eval() 
+        val_rps  = 0.0 
+        val_corn = 0.0 
+        count    = 0 
+
+        with torch.no_grad(): 
+            for xb, yb in val_loader: 
+                xb, yb = xb.to(self.device), yb.to(self.device)
+
+                feats  = self.forward_feats(xb)
+                _, logits, proj = self.forward_logits(feats, with_supcon=False)
+                _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
+
+                corn = corn.mean() 
+                rps  = rps.mean() 
+
+                val_corn += corn.item() * yb.size(0) 
+                val_rps  += rps.item() * yb.size(0)
+                count    += yb.size(0)
+
+        val_corn = val_corn / max(count, 1)
+        val_rps  = val_rps / max(count, 1)
+        return val_corn + val_rps, val_corn, val_rps  
+
+    def train_epoch(self, train_loader, *, mixing: bool): 
+        self.model_.train() 
+        total_loss  = 0.0 
+        total_count = 0 
+
+        for xb, yb in train_loader: 
+            xb, yb = xb.to(self.device), yb.to(self.device)
+
+            loss, _, _, _, bsz = self.process_batch(xb, yb, with_mixing=mixing)
+
+            self.opt_.zero_grad(set_to_none=True)
+            loss.backward()
+            self.opt_.step() 
+
+            total_loss  += loss.item() * bsz 
+            total_count += bsz 
+
+        if self.scheduler_ is not None: 
+            self.scheduler_.step() 
+
+        return total_loss / max(total_count, 1)
 
     def resolve_device(self, device: str | None): 
         if device is not None: 
@@ -1632,8 +1672,20 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
         return torch.device(str(device) if torch.cuda.is_available() else "cpu") 
 
     def build_model(self, class_weights): 
-        self.backbone_ = ResidualMLP(
+        self.tokenizer_ = TransformerProjector(
             in_dim=self.in_dim, 
+            out_dim=self.transformer_dim,
+            d_model=self.transformer_dim,
+            num_tokens=self.transformer_tokens,
+            n_heads=self.transformer_heads,
+            n_layers=self.transformer_layers,
+            dropout=self.transformer_dropout,
+            attn_dropout=self.transformer_attn_dropout,
+            pre_norm=True
+        )
+
+        self.backbone_ = ResidualMLP(
+            in_dim=self.transformer_dim, 
             hidden_dim=self.hidden_dim,
             depth=self.depth,
             dropout=self.dropout,
@@ -1649,9 +1701,10 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
             use_logit_scaler=True
         )
 
-        self.model_          = nn.Module() 
-        self.model_.backbone = self.backbone_
-        self.model_.head     = self.head_ 
+        self.model_           = nn.Module() 
+        self.model_.tokenizer = self.tokenizer_  
+        self.model_.backbone  = self.backbone_
+        self.model_.head      = self.head_ 
         self.model_.to(self.device)
 
         self.loss_fn_ = HybridOrdinalLoss(
@@ -1677,12 +1730,14 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
             self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
 
     def process_batch(self, xb, yb, with_mixing: bool = True): 
-        if with_mixing:
-            x, y_a, y_b, mix_lam = self.mixer_(xb, yb)
-        else: 
-            x = xb 
+        x_embed = self.model_.tokenizer(xb)
 
-        feats = self.forward_feats(x)
+        if with_mixing:
+            x, y_a, y_b, mix_lam = self.mixer_(x_embed, yb)
+        else: 
+            x = x_embed 
+
+        feats = self.model_.backbone(x) 
         _, logits, proj = self.forward_logits(feats, with_supcon=True)
 
         if with_mixing:
@@ -1697,6 +1752,7 @@ class ResidualTabular(BaseEstimator, ClassifierMixin):
         return loss, corn, rps, sup, x.size(0)
 
     def forward_feats(self, x): 
+        x = self.model_.tokenizer(x)
         return self.model_.backbone(x)
 
     def forward_logits(self, feats, with_supcon=True):

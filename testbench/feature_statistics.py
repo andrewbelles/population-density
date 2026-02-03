@@ -6,13 +6,15 @@
 # 
 # 
 
-import argparse, io 
+import argparse, io, itertools  
 
 import numpy as np 
 
 from sklearn.linear_model      import LinearRegression 
 
 from sklearn.decomposition     import PCA 
+
+from sklearn.preprocessing     import StandardScaler
 
 from sklearn.neighbors         import NearestNeighbors
 
@@ -23,7 +25,8 @@ from analysis.vif              import (
     coerce_feature_mat 
 )
 
-from preprocessing.loaders import load_coords_from_mobility
+from preprocessing.loaders     import load_coords_from_mobility
+
 from testbench.utils.config    import (
     eval_config,
     load_model_params,
@@ -44,7 +47,14 @@ from testbench.utils.paths     import (
     MOBILITY_PATH
 )
 
-from testbench.utils.metrics   import moran_i
+from testbench.utils.metrics   import (
+    block_mi, 
+    cca_score, 
+    linear_cka, 
+    moran_i
+)
+
+from scipy.stats               import spearmanr
 
 from models.graph.construction import (
     build_knn_graph_from_coords
@@ -88,6 +98,20 @@ def _resolve_datasets(datasets: list[str] | None = None) -> list[str]:
 def build_matrix(datasets: list[str]): 
     mats = [load_raw(k) for k in datasets]
     return align_and_merge_features(mats, feature_groups=datasets)
+
+def _align_pairwise(Xa, fa, Xb, fb): 
+    set_b = set(fb)
+    idx_a = [i for i, f in enumerate(fa) if f in set_b]
+    if not idx_a: 
+        raise ValueError("no overlapping fips between datasets")
+
+    fa_keep = np.asarray(fa)[idx_a]
+    Xa      = np.asarray(Xa)[idx_a]
+
+    idx_b   = align_on_fips(fa_keep, fb)
+    Xb      = np.asarray(Xb)[idx_b]
+
+    return Xa, Xb, fa_keep
 
 def _model_feature_mats(
     datasets: list[str], 
@@ -293,8 +317,6 @@ def test_manifold_stats(
         pc1       = PCA(n_components=1, random_state=RANDOM_STATE).fit_transform(X).reshape(-1)
         moran_pc1 = moran_i(pc1, W)
 
-        moran_y   = moran_i(y, W) 
-
         nn = NearestNeighbors(n_neighbors=2, n_jobs=strategy.n_jobs)
         nn.fit(X)
         dists = nn.kneighbors(X, return_distance=True)[0][:, 1]
@@ -307,20 +329,72 @@ def test_manifold_stats(
             "EffDim": f"{eff_dim:.2f}",
             "NN_Dist": f"{nn_dist:.4f}",
             "Moran_PC1": f"{moran_pc1:.4f}",
-            "Moran_Label": f"{moran_y:.4f}"
         })
 
     return {
         "header": ["Name", "N", "Dim", "EffDim", 
-                   "NN_Dist", "Moran_PC1", "Moran_Label"],
+                   "NN_Dist", "Moran_PC1"],
         "rows": rows 
     }
 
+def test_manifold_pairwise(
+    _buf,
+    *,
+    datasets: list[str] | None = None, 
+    n_components: int = 8,
+    **_
+):
+    '''
+    Pairwise Statistics computed
+    '''
+
+
+    datasets = _resolve_datasets(datasets)
+
+    rows = []
+    for a, b in itertools.combinations(datasets, 2): 
+        da = load_dataset(a)
+        db = load_dataset(b)
+
+        Xa = np.asarray(da["features"], dtype=np.float64)
+        fa = np.asarray(da.get("sample_ids"))
+        Xb = np.asarray(db["features"], dtype=np.float64)
+        fb = np.asarray(db.get("sample_ids"))
+
+        Xa, Xb, _ = _align_pairwise(Xa, fa, Xb, fb)
+
+        X = StandardScaler().fit_transform(Xa)
+        Y = StandardScaler().fit_transform(Xb)
+
+        cca = cca_score(X, Y, n_components=n_components)
+        cka = linear_cka(X, Y)
+        mi  = block_mi(Xa, Xb, n_components=1, random_state=RANDOM_STATE)
+
+        pca1_a   = PCA(n_components=1, random_state=RANDOM_STATE).fit_transform(Xa).reshape(-1)
+        pca1_b   = PCA(n_components=1, random_state=RANDOM_STATE).fit_transform(Xb).reshape(-1)
+        pearson  = float(np.corrcoef(pca1_a, pca1_b)[0, 1])
+        spearman = float(spearmanr(pca1_a, pca1_b).correlation) 
+
+        rows.append({
+            "Pair": f"{a} vs. {b}",
+            "N": Xa.shape[0],
+            "CCA": f"{cca:.4f}",
+            "CKA": f"{cka:.4f}",
+            "MI":  f"{mi:.4f}",
+            "Pearson_PC1": f"{pearson:.4f}",
+            "Spearman_PC1": f"{spearman:.4f}"
+        })
+
+    return {
+        "header": ["Pair", "N", "CCA", "CKA", "MI", "Pearson_PC1", "Spearman_PC1"],
+        "rows": rows 
+    }
 
 TESTS = {
     "pairwise-vif": test_pairwise_vif,
     "full-vif": test_full_vif,
-    "manifold-stats": test_manifold_stats
+    "manifold-stats": test_manifold_stats,
+    "manifold-pairwise": test_manifold_pairwise
 }
 
 # ---------------------------------------------------------

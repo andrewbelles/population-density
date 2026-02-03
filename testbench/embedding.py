@@ -154,6 +154,13 @@ def _spatial_opt(
         config=cv_config(folds, random_state)
     )
 
+    prior_params = None 
+    try: 
+        prior_params = load_model_params(config_path, model_key)
+    except Exception: 
+        prior_params = None 
+
+
     devices = strategy.visible_devices()
     config  = EngineConfig(
         n_trials=trials,
@@ -164,6 +171,7 @@ def _spatial_opt(
         devices=devices,
         pruner_type=None,
         pruner_warmup_steps=5,
+        enqueue_trials=[prior_params] if prior_params else None,
     )
 
     best_params, best_value, _ = run_optimization(

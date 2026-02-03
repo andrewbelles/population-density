@@ -94,7 +94,7 @@ class GatedAttentionPooling(nn.Module):
 
         pooled = torch.zeros(batch_size, x.shape[1], device=x.device, dtype=torch.float32)
         pooled.index_add_(0, batch_indices, w)
-        return pooled.to() 
+        return pooled 
 
 
 class ResNetMIL(nn.Module): 
@@ -228,6 +228,11 @@ class LightweightBackbone(nn.Module):
         self.patch_size = patch_size 
         self.embed_dim  = embed_dim
 
+        self.grayscale  = nn.Conv2d(1, 3, kernel_size=1, bias=False)
+
+        with torch.no_grad(): 
+            self.grayscale.weight.fill_(1.0 / 3.0)
+
         mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
         encoder   = mobilenet.features 
 
@@ -258,7 +263,8 @@ class LightweightBackbone(nn.Module):
         patches = self.unfold(tiles)
         p95     = self.p95_patch(patches)
 
-        feats = self.encoder(patches)
+        x     = self.grayscale(patches)
+        feats = self.encoder(x)
         embs  = self.projector(feats)
 
         p95 = p95.unsqueeze(1)
@@ -482,6 +488,7 @@ class HypergraphBackbone(nn.Module):
     ): 
         super().__init__()
         self.encoder = LightweightBackbone(embed_dim=embed_dim, patch_size=patch_size)
+
         self.builder = HypergraphBuilder(
             tile_size=tile_size,
             patch_size=patch_size,
@@ -495,10 +502,19 @@ class HypergraphBackbone(nn.Module):
             n_layers=gnn_layers,
             n_heads=gnn_heads,
             attn_dropout=attn_dropout,
-            dropout=dropout
+            dropout=dropout,
+            n_node_types=4   # type 0,1,2 & global 
         )
+
         self.out_dim      = self.gnn.out_dim 
         self.max_bag_frac = max_bag_frac
+
+        # position embeddings 
+        self.num_patches  = (tile_size // patch_size)**2 
+        self.pos_embed    = nn.Parameter(torch.randn(1, self.num_patches, embed_dim))
+        self.global_token = nn.Parameter(torch.randn(1, 1, embed_dim + 1)) # +1 for p95
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.global_token, std=0.02)
 
     def forward(self, tiles): 
         B = tiles.shape[0]
@@ -524,33 +540,110 @@ class HypergraphBackbone(nn.Module):
             K = patches.shape[1]
             patches = patches.view(B * K, 1, P, P)
         else: 
-            K = None 
+            K = L  
             patches = patches.view(B * L, 1, P, P)
 
         feats = self.encoder.encoder(patches)
-        embs  = self.encoder.projector(feats)
-        p95   = self.encoder.p95_patch(patches)
-
-        node_feats = torch.cat([embs, p95.unsqueeze(1)], dim=1)
-
-        node_type, _, edge_type, _, H = self.builder.build(p95, batch_size=B, idx=idx)
-
-        node_out = self.gnn(node_feats, node_type, H, edge_type)
+        embs  = self.encoder.projector(feats).view(B, K, -1)
+        p95   = self.encoder.p95_patch(patches).view(B, K, 1)
 
         if idx is None: 
-            node_out = node_out.view(B, L, -1)
+            pos = self.pos_embed
         else: 
-            node_out = node_out.view(B, K, -1)
-        pooled = node_out.mean(dim=1)
-        return pooled 
+            pos = self.pos_embed.squeeze(0)[idx]
+
+        embs = embs + pos 
+
+        patch_feats = torch.cat([embs, p95], dim=2)
+        patch_feats = patch_feats.view(B * K, -1)
+
+        readout_tokens = self.global_token.expand(B, -1, -1).reshape(B, -1)
+
+        all_feats = torch.cat([patch_feats, readout_tokens], dim=0)
+
+        node_type, _, edge_type, _, H = self.builder.build(p95.view(-1), batch_size=B, idx=idx)
+
+        node_out = self.gnn(all_feats, node_type, H, edge_type)
+
+        readout_out = node_out[-B:]
+        return readout_out 
 
 # ---------------------------------------------------------
 # Tabular MLP Modules 
 # ---------------------------------------------------------
 
+class TransformerProjector(nn.Module): 
+
+    '''
+    Transformer Architecture meant to project inputs onto latent space before mixing & passing 
+    through Deep Residual MLP 
+    '''
+    def __init__(
+        self, 
+        in_dim: int, 
+        out_dim: int, 
+        d_model: int = 64, 
+        num_tokens: int = 8, 
+        n_heads: int = 4, 
+        n_layers: int = 2, 
+        dropout: float = 0.1, 
+        attn_dropout: float = 0.1,
+        pre_norm: bool = True       # if used with ResidualMLP must stay True for gradients  
+    ):
+        super().__init__()
+
+        self.in_dim     = in_dim 
+        self.out_dim    = out_dim 
+        self.d_model    = d_model 
+        self.num_tokens = num_tokens
+
+        self.tokenizer  = nn.Linear(in_dim, num_tokens * d_model, bias=True)
+        self.token_proj = nn.Linear(in_dim, d_model, bias=True)
+
+        self.cls_token  = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_embed  = nn.Parameter(torch.zeros(1, num_tokens + 1, d_model))
+
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=4 * d_model,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=pre_norm 
+        )
+
+        layer.self_attn.dropout = attn_dropout 
+        
+        self.encoder  = nn.TransformerEncoder(
+            layer, 
+            num_layers=n_layers,
+            enable_nested_tensor=False
+        )
+        self.out_proj = nn.Linear(d_model, out_dim, bias=True)
+
+        nn.init.trunc_normal_(self.tokenizer.weight, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, x): 
+        if x.dim() == 3: 
+            tokens = self.token_proj(x)
+        else: 
+            B = x.size(0)
+            tokens = self.tokenizer(x).view(B, self.num_tokens, self.d_model)
+
+        B      = tokens.size(0)
+        cls    = self.cls_token.expand(B, -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)
+        enc    = self.encoder(tokens)
+        pooled = enc[:, 0]
+        return self.out_proj(pooled)
+
+
 class Mixer(nn.Module): 
     '''
-
+    Mixes Hard Labels using beta distributed ratios for TF-Residual MLP 
     '''
 
     def __init__(

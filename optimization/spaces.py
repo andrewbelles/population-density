@@ -174,27 +174,33 @@ def define_hgnn_space(trial: optuna.Trial):
 
 def define_tabular_space(trial: optuna.Trial): 
     return {
-        "hidden_dim": trial.suggest_int("hidden_dim", 128, 1024, step=128), 
-        "depth": trial.suggest_int("depth", 12, 18), 
+        "hidden_dim": trial.suggest_int("hidden_dim", 768, 1024, step=64), 
+        "depth": trial.suggest_int("depth", 12, 16), 
         "dropout": trial.suggest_float("dropout", 0.0, 0.3), 
 
         "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.6),
-        "mix_mult": trial.suggest_categorical("mix_mult", [8, 12, 16]), 
+        "mix_mult": trial.suggest_categorical("mix_mult", [4, 8]), 
 
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5), 
         "alpha_rps": trial.suggest_float("alpha_rps", 1.0, 10.0, log=True),
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.25), 
-        "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]),
+        "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128]),
 
-        "lr": trial.suggest_float("lr", 1e-4, 5e-3, log=True),
+        "transformer_dim": trial.suggest_categorical("transformer_dim", [64, 128]),
+        "transformer_tokens": trial.suggest_categorical("transformer_tokens", [4, 8]),
+        "transformer_heads": trial.suggest_categorical("transformer_heads", [4, 8]),
+        "transformer_layers": trial.suggest_int("transformer_layers", 3, 4),
+        "transformer_dropout": trial.suggest_float("transformer_dropout", 0.0, 0.2),
+        "transformer_attn_dropout": trial.suggest_float("transformer_attn_dropout", 0.0, 0.2),
+
+        "lr": trial.suggest_float("lr", 1e-4, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
         "eval_fraction": 0.2,
         "min_delta": 1e-4, 
-        "early_stopping_rounds": 20, 
-        "with_mix_epochs": 1800, 
+        "early_stopping_rounds": 30, 
         "batch_size": 1024,
-        "epochs": 2000, 
+        "epochs": 1200, 
         "max_mix": None, 
         "anchor_power": 1.0 
 

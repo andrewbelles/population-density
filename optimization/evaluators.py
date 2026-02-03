@@ -41,7 +41,7 @@ from analysis.cross_validation import (
     ranked_probability_score
 )
 
-from models.estimators         import ResidualTabular 
+from models.estimators         import TFTabular 
 
 from models.graph.processing   import CorrectAndSmooth 
 
