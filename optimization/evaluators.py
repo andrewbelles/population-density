@@ -41,7 +41,7 @@ from analysis.cross_validation import (
     ranked_probability_score
 )
 
-from models.estimators         import EmbeddingProjector 
+from models.estimators         import ResidualTabular 
 
 from models.graph.processing   import CorrectAndSmooth 
 
@@ -405,7 +405,7 @@ def _make_spatial_loader(
         num_workers=num_workers,
         pin_memory=pin,
         collate_fn=collate_fn,
-        persistent_workers=(num_workers > 0), 
+        persistent_workers=False, 
         prefetch_factor=prefetch_factor  
     )
 
@@ -910,22 +910,31 @@ class MetricCASEvaluator(OptunaEvaluator):
         return best_value
 
 # ---------------------------------------------------------
-# Projector evaluator
+# Evaluator for Tabular based MLP models using hybrid ordinal loss 
+# or derivatives of hybrid ordinal loss (such as mixed loss)
 # ---------------------------------------------------------
 
-class ProjectorEvaluator(OptunaEvaluator):
+class TabularEvaluator(OptunaEvaluator):
+
+    '''
+    Primary evaluator for MLP models specific for tabular data 
+    '''
+
+
     def __init__(
         self,
         X,
         y,
         param_space,
+        model_factory: Callable, 
         random_state: int = 0,
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
     ):
         self.X = np.asarray(X, dtype=np.float32)
         self.y = np.asarray(y, dtype=np.int64)
-        self.param_space_fn = param_space
-        self.random_state = random_state
+        self.param_space_fn   = param_space
+        self.model_factory    = model_factory 
+        self.random_state     = random_state
         self.compute_strategy = compute_strategy
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
@@ -938,15 +947,17 @@ class ProjectorEvaluator(OptunaEvaluator):
             random_state=self.random_state
         )
         train_idx, val_idx = next(splitter.split(self.X, self.y))
-        scaler  = StandardScaler() 
-        X_train = scaler.fit_transform(self.X[train_idx])
-        X_val   = scaler.transform(self.X[val_idx])
 
-        proj = EmbeddingProjector(
+        scaler = StandardScaler() 
+        X_tr   = scaler.fit_transform(self.X[train_idx])
+        X_val  = scaler.transform(self.X[val_idx])
+
+        model  = self.model_factory(
             in_dim=self.X.shape[1],
             **params,
             random_state=self.random_state,
-            device=self.compute_strategy.device
+            compute_strategy=self.compute_strategy
         )
-        proj.fit(X_train, self.y[train_idx])
-        return proj.loss(X_val, self.y[val_idx])
+
+        model.fit(X_tr, self.y[train_idx])
+        return model.loss(X_val, self.y[val_idx])

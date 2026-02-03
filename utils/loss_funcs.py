@@ -6,6 +6,7 @@
 # 
 # 
 
+from typing import Optional, Required
 import torch 
 
 import torch.nn as nn 
@@ -70,7 +71,7 @@ class CornLoss(nn.Module):
         else: 
             self.class_weights = None 
 
-    def forward(self, logits, y): 
+    def forward(self, logits, y, reduction="mean"): 
         if logits.ndim != 2: 
             raise ValueError(f"logits must be 2d, got shape {logits.shape}")
         if logits.size(1) != self.n_classes - 1: 
@@ -88,7 +89,14 @@ class CornLoss(nn.Module):
             w    = self.class_weights.to(device=logits.device, dtype=logits.dtype)
             loss = loss * w.gather(0, yb).unsqueeze(1)
 
-        return loss.mean()
+        per_sample = loss.mean(dim=1)
+
+        if reduction == "mean": 
+            return per_sample.mean() 
+        elif reduction == "none": 
+            return per_sample
+        else: 
+            raise ValueError(f"unknown reduction: {reduction}")
 
     @staticmethod 
     def _ordinal_targets(y: torch.Tensor, n_classes: int) -> torch.Tensor: 
@@ -113,7 +121,7 @@ class SupConLoss(nn.Module):
         else: 
             self.class_weights = None 
 
-    def forward(self, features, labels): 
+    def forward(self, features, labels, reduction="mean"): 
 
         device     = features.device 
         batch_size = features.shape[0]
@@ -147,20 +155,31 @@ class SupConLoss(nn.Module):
 
         exp_logits   = torch.exp(logits) * logits_mask 
         denom_weight = mask + (1.0 - mask) * ordinal_weight 
+
         log_prob     = logits - torch.log(
             (exp_logits * denom_weight).sum(1, keepdims=True) + 1e-9
         )
         mean_log_prob = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-6)
+        per_sample    = -mean_log_prob
 
         if self.class_weights is not None: 
             anchor_weights = self.class_weights.to(device).gather(0, labels.view(-1))
-            loss = - (mean_log_prob * anchor_weights).sum() / anchor_weights.sum() 
-        else:
-            loss = -mean_log_prob.mean() 
-        return loss
+            per_sample = per_sample * anchor_weights
+
+        if reduction == "none":
+            return per_sample 
+        elif reduction == "mean": 
+            if self.class_weights is not None: 
+                w = self.class_weights.to(device).gather(0, labels.view(-1))
+                return per_sample.sum() / (w.sum() + 1e-9)
+            else: 
+                return per_sample.mean() 
+        else: 
+            raise ValueError(f"unknown reduction: {reduction}")
 
 
-class LearnableLogitScaling(nn.Module): 
+
+class LogitScaler(nn.Module): 
 
     def __init__(self, initial_value: float = 1.0): 
         super().__init__() 
@@ -177,7 +196,8 @@ class HybridOrdinalLoss(nn.Module):
         class_weights: torch.Tensor | None = None, 
         alpha_rps: float = 1.0, 
         beta_supcon: float = 0.5, 
-        temperature: float = 0.1 
+        temperature: float = 0.1, 
+        reduction="mean"            # if none then returns per sample loss values 
     ): 
 
         super().__init__()
@@ -193,34 +213,94 @@ class HybridOrdinalLoss(nn.Module):
         else: 
             self.class_weights = None 
 
-    def forward(self, logits, embeddings, labels): 
-        corn_loss = self.corn_fn_(logits, labels)
+        self.reduction  = reduction
+
+    def forward(self, logits, embeddings, labels, sample_weight: Optional[torch.Tensor] = None): 
+
+        class_w = None 
+        if self.class_weights is not None: 
+            class_w = self.class_weights.to(logits.device).gather(0, labels)
+
+        sw = sample_weight.view(-1) if sample_weight is not None else None 
 
         probs_exceed = torch.sigmoid(logits)
-
-        targets  = self.corn_fn_._ordinal_targets(labels, self.n_classes_)
-        per_sample_rps = torch.sum((probs_exceed - targets)**2, dim=1)
-
-        K = max(self.n_classes_ - 1, 1)
-        per_sample_rps /= float(K) 
-
-        if self.class_weights is not None: 
-            sample_weights = self.class_weights.to(logits.device).gather(0, labels)
-            loss_rps = (per_sample_rps * sample_weights).sum() / (sample_weights.sum() + 1e-9)
-        else: 
-            loss_rps = per_sample_rps.mean() 
+        targets      = self.corn_fn_._ordinal_targets(labels, self.n_classes_)
+        rps_per      = torch.sum((probs_exceed - targets)**2, dim=1)
+        K            = max(self.n_classes_ - 1, 1)
+        rps_per     /= float(K) 
+ 
+        corn_per     = self.corn_fn_(logits, labels, reduction="none")
 
         if self.beta > 0 and embeddings is not None: 
-            norm_emb = F.normalize(embeddings, dim=1)
-            loss_supcon = self.supcon_fn_(norm_emb, labels)
+            norm_emb = F.normalize(embeddings, dim=1) 
+            sup_per  = self.supcon_fn_(norm_emb, labels, reduction="none") 
         else: 
-            loss_supcon = torch.tensor(0.0, device=logits.device)
+            sup_per  = torch.zeros_like(rps_per)
 
-        weighted_rps    = self.alpha * loss_rps 
-        weighted_supcon = self.beta * loss_supcon 
+        weights = None 
+        if class_w is not None and sw is not None: 
+            weights = class_w * sw 
+        elif class_w is not None: 
+            weights = class_w 
+        elif sw is not None: 
+            weights = sw 
 
-        total_loss = corn_loss + weighted_rps + weighted_supcon
-        return total_loss, corn_loss, weighted_rps, weighted_supcon 
+        corn = self.reduce(corn_per, weight=weights, normalize=False)
+        rps  = self.reduce(rps_per, weight=weights, normalize=True)
+        sup  = self.reduce(sup_per, weight=weights, normalize=True)
+
+        weighted_rps = self.alpha * rps 
+        weighted_sup = self.beta * sup
+
+        loss = corn + weighted_rps + weighted_sup
+        return loss, corn, weighted_rps, weighted_sup 
+
+    def reduce(self, per_sample, weight=None, normalize=False): 
+        if weight is not None: 
+            x = per_sample * weight 
+        else: 
+            x = per_sample
+
+        if self.reduction == "none": 
+            return x 
+
+        if normalize and weight is not None: 
+            return x.sum() / (weight.sum() + 1e-9)
+        else: 
+            return x.mean() 
+
+class MixedLoss(nn.Module):
+
+    '''
+    Computes loss using both hard labels on mixed tabular data. Returns soft loss as linear 
+    ratio of the two hard loss values. 
+    '''
+
+    def __init__(
+        self, 
+        base_loss: HybridOrdinalLoss
+    ): 
+        super().__init__() 
+        base_loss.reduction = "none"    # ensure we don't take mean across samples 
+        self.loss_fn_       = base_loss  
+
+    def forward(self, logits, proj, y_a, y_b, mix_lambda): 
+        mix_lambda = mix_lambda.view(-1)
+
+        loss_a, corn_a, rps_a, sup_a = self.loss_fn_(
+            logits, proj, y_a, sample_weight=mix_lambda
+        )
+        loss_b, corn_b, rps_b, sup_b = self.loss_fn_(
+            logits, proj, y_b, sample_weight=(1 - mix_lambda)
+        )
+
+        # values returned are already weighted. 
+        loss = loss_a * loss_b
+        corn = corn_a * corn_b
+        rps  = rps_a  * rps_b
+        sup  = sup_a  * sup_b
+
+        return loss.mean(), corn.mean(), rps.mean(), sup.mean() 
 
 
 def compute_ens_weights(class_counts, beta=0.999):
@@ -229,14 +309,10 @@ def compute_ens_weights(class_counts, beta=0.999):
     '''
     class_counts = np.asarray(class_counts)
     
-    # avoiding divide by zero for empty classes
     class_counts = np.clip(class_counts, 1, None) 
     
     effective_num = 1.0 - np.power(beta, class_counts)
     weights = (1.0 - beta) / effective_num
-    
-    # Normalize so that the weights sum to the number of classes
-    # This keeps the gradient magnitude roughly consistent
     weights = weights / np.sum(weights) * len(class_counts)
     
     return torch.tensor(weights, dtype=torch.float32)

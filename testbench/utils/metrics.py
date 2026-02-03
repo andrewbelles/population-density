@@ -28,7 +28,7 @@ from sklearn.cross_decomposition import CCA
 
 from sklearn.feature_selection   import mutual_info_regression
 
-OPT_TASK = TaskSpec("classification", ("rps",))
+OPT_TASK = TaskSpec("classification", ("qwk",))
 
 def _softmax_rows(probs: NDArray) -> NDArray: 
     probs   = np.asarray(probs, dtype=np.float64)

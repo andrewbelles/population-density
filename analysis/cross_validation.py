@@ -38,6 +38,8 @@ from utils.helpers import (
     ModelFactory,
 ) 
 
+from utils.loss_funcs import compute_ens_weights
+
 from preprocessing.loaders import DatasetLoader
 
 from scipy.io import savemat
@@ -677,7 +679,7 @@ class CrossValidator:
         labels = np.sort(np.unique(np.concatenate([y_train, y_test])))
         y_idx_train = np.searchsorted(labels, y_train)
         counts = np.bincount(y_idx_train, minlength=labels.size)
-        class_weights = counts.max() / np.clip(counts, 1, None)
+        class_weights = compute_ens_weights(counts, beta=0.999).cpu().numpy()
 
         metrics  = self.task.compute_metrics(
             y_test, y_pred_eval, y_prob, 

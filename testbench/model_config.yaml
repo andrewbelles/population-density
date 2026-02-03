@@ -1,6 +1,6 @@
 models:
   VIIRS/Logistic:
-    C: 99.52085994573153
+    C: 59.48786941555163
     class_weight: null
   VIIRS/RandomForest:
     n_estimators: 848
@@ -211,37 +211,30 @@ models:
     sampling_ratio: 1
     aligned: false
   VIIRS_MANIFOLD/XGBoost:
-    n_estimators: 897
-    learning_rate: 0.05682554421064301
-    max_depth: 4
-    subsample: 0.7752624534627621
-    colsample_bytree: 0.9915421370075845
-    min_child_weight: 5
-    reg_alpha: 0.012846014932339521
-    reg_lambda: 23.44106439991198
-    max_delta_step: 6
-    gamma: 1.249746487114039
-  VIIRS_MANIFOLD_LOGITS/XGBoost:
-    n_estimators: 898
-    learning_rate: 0.05325144974146587
-    max_depth: 5
-    subsample: 0.667881129177643
-    colsample_bytree: 0.7858705203748798
-    min_child_weight: 5
-    reg_alpha: 0.0358397284293953
-    reg_lambda: 24.50503408637575
-    max_delta_step: 8
-    gamma: 0.3182900207390742
+    n_estimators: 829
+    learning_rate: 0.03580703296663601
+    max_depth: 3
+    subsample: 0.570790770154549
+    colsample_bytree: 0.6394969410212462
+    min_child_weight: 16
+    reg_alpha: 0.15169376117132113
+    reg_lambda: 45.623853218041454
+    max_delta_step: 2
+    gamma: 6.1612411028932375
   SAIPE/Manifold:
-    base_width: 704
-    dropout: 0.015771917683472067
-    weight_decay: 0.00024784994857864225
-    lr: 0.0007627611295369431
+    hidden_dim: 384
+    depth: 14
+    dropout: 0.03953935872131765
+    mix_alpha: 0.45816360205928275
+    mix_mult: 8
+    weight_decay: 5.209016311370386e-05
+    lr: 0.004312503660051927
     batch_size: 512
     epochs: 500
-    beta_supcon: 0.10553920070380012
-    alpha_rps: 3.611129103911005
-    temperature: 0.15050256327032188
+    beta_supcon: 0.12815056466249097
+    alpha_rps: 6.744348900169637,
+    supcon_temperature: 0.05093909523850942
+    supcon_dim: 256
     eval_fraction: 0.2
     early_stopping_rounds: 20
     out_dim: 12
@@ -257,10 +250,10 @@ models:
     max_delta_step: 6
     gamma: 0.37750873402513435
   SAIPE_MANIFOLD/Logistic:
-    C: 1.0426206702139886
-    class_weight: balanced
+    C: 0.24412529725447324
+    class_weight: null
   SAIPE_2023/Logistic:
-    C: 0.9275965648123793
+    C: 1.0755558201149193
     class_weight: balanced
   SAIPE_2023/XGBoost:
     n_estimators: 750
@@ -286,5 +279,37 @@ models:
     gamma: 0.0006573220471004352
     class_weight: null
   VIIRS_MANIFOLD/Logistic:
-    C: 0.08878089778234538
+    C: 0.07063668192019835
     class_weight: balanced
+  Manifold/VIIRS:
+    patch_size: 32
+    embed_dim: 128
+    gnn_dim: 256
+    gnn_layers: 3
+    gnn_heads: 8
+    fc_dim: 256
+    dropout: 0.18415302442953638
+    attn_dropout: 0.05157051906194132
+    max_bag_frac: 0.6577141754620919
+    alpha_rps: 1.486512710723492
+    beta_supcon: 1.1833738637939712
+    supcon_temperature: 0.1596503783655801
+    ens: 0.9978490099678634
+    supcon_dim: 128
+    lr: 0.0002024028628133283
+    weight_decay: 5.752740814116683e-06
+    threshold_scale: 0.9865243091425225
+    batch_size: 256
+  Manifold/SAIPE:
+    hidden_dim: 384
+    depth: 14
+    dropout: 0.03953935872131765
+    mix_alpha: 0.45816360205928275
+    mix_mult: 8
+    beta_supcon: 0.12815056466249097
+    alpha_rps: 6.744348900169637
+    supcon_temperature: 0.05093909523850942
+    supcon_dim: 256
+    lr: 0.004312503660051927
+    batch_size: 512
+    weight_decay: 5.209016311370386e-05

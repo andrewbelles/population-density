@@ -95,10 +95,19 @@ class TileLoader(Dataset):
 
         self.fips, self.labels, self.offset_elements, self.num_tiles = self.load_index() 
 
-        self.mmap = np.memmap(self.bin_path, mode="r", dtype=self.dtype)
+        self.mmap = None 
 
         if self.should_validate_index:
             self.validate_offsets() 
+
+    def ensure_mmap(self): 
+        if self.mmap is None: 
+            self.mmap = np.memmap(self.bin_path, mode="r", dtype=self.dtype)
+
+    def __getstate__(self): 
+        state = self.__dict__.copy() 
+        state["mmap"] = None 
+        return state 
 
     def __len__(self) -> int: 
         return len(self.labels)
@@ -106,6 +115,10 @@ class TileLoader(Dataset):
     def __getitem__(self, idx: int): 
         n_tiles = int(self.num_tiles[idx])
         label   = int(self.labels[idx])
+
+        self.ensure_mmap()
+        if self.mmap is None: 
+            raise ValueError("mmap binary is not open")
 
         if n_tiles <= 0: 
             bag  = np.zeros((self.max_bag_size, *self.tile_shape), dtype=self.dtype)

@@ -41,12 +41,12 @@ from testbench.utils.data      import (
 )
 
 from optimization.evaluators   import (
-    ProjectorEvaluator,
+    TabularEvaluator,
     SpatialEvaluator
 )
 
 from optimization.spaces       import (
-    define_projector_space,
+    define_tabular_space,
     define_manifold_projector_space,
     define_spatial_space,
     define_hgnn_space
@@ -63,6 +63,7 @@ from testbench.utils.config    import (
     eval_config,
     make_spatial_gat,
     normalize_spatial_params,
+    make_residual_tabular,
     with_spatial_channels
 )
 
@@ -75,8 +76,7 @@ from testbench.utils.etc       import (
     format_metric 
 )
 
-from models.estimators         import (
-    EmbeddingProjector,
+from models.estimators         import ( 
     SpatialClassifier, 
     make_spatial_sfe,
 )
@@ -94,9 +94,10 @@ VIIRS_ROOT = project_path("data", "tensors", "viirs_2013")
 NLCD_ROOT  = project_path("data", "tensors", "nlcd") 
 USPS_ROOT  = project_path("data", "tensors", "usps")
 
-VIIRS_KEY  = "Spatial/VIIRS_ROI"
-NLCD_KEY   = "Spatial/NLCD_ROI"
-USPS_KEY   = "Spatial/USPS_TRACTS"
+VIIRS_KEY  = "Manifold/VIIRS"
+NLCD_KEY   = "Manifold/NLCD"
+USPS_KEY   = "Manifold/USPS"
+SAIPE_KEY  = "Manifold/SAIPE"
 
 # Out Paths 
 VIIRS_OUT             = project_path("data", "datasets", "viirs_pooled.mat")
@@ -108,101 +109,7 @@ NLCD_OUT              = project_path("data", "datasets", "nlcd_pooled.mat")
 # ---------------------------------------------------------
 
 def _row_score(name: str, score: float): 
-    return {"Name": name, "RPS": format_metric(score)}
-
-def _projector_fold_factory(name: str, proj_trials: int, random_state: int): 
-    cached_params = None 
-
-    def _projector_fold(train_emb, train_y, val_emb, val_y, *, random_state, fold): 
-        nonlocal cached_params
-
-        if cached_params is None: 
-            config = EngineConfig(
-                n_trials=proj_trials, 
-                direction="minimize", 
-                random_state=random_state
-            )
-
-            proj_eval = ProjectorEvaluator(
-                train_emb, 
-                train_y, 
-                define_projector_space, 
-                random_state=random_state + fold,
-                compute_strategy=strategy
-            )
-
-            cached_params, _, _ = run_optimization(
-                name="Spatial/VIIRS_ROI_Projector",
-                evaluator=proj_eval,
-                config=config
-            )
-            cached_params = dict(cached_params)
-
-        proj = EmbeddingProjector(
-            in_dim=train_emb.shape[1],
-            **cached_params,
-            random_state=random_state + fold,
-            device=strategy.device
-        )
-        proj.fit(train_emb, train_y)
-        return proj.transform(val_emb)
-
-    return _projector_fold
-
-def _holdout_embeddings(
-    ds,
-    labels,
-    splitter,
-    model_factory,
-    extract_fn, 
-    postprocess=None, 
-    random_state: int = 0, 
-    subset_fn=None 
-): 
-    n   = len(labels)
-    out = None 
-
-    if subset_fn is None: 
-        subset_fn = lambda data, idx: Subset(data, idx)
-
-    for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(np.arange(n), labels)): 
-        train_data = subset_fn(ds, train_idx)
-        val_data   = subset_fn(ds, val_idx)
-
-        model = model_factory() 
-        if callable(model) and not hasattr(model, "fit"): 
-            model = model() 
-        if isinstance(train_data, np.ndarray): 
-            scaler     = StandardScaler() 
-            train_data = scaler.fit_transform(train_data)
-            val_data   = scaler.transform(val_data)
-
-        model.fit(train_data, labels[train_idx]) 
-
-        train_emb = extract_fn(model, train_data) if postprocess else None 
-        val_emb   = extract_fn(model, val_data)
-
-        if postprocess:
-            val_emb = postprocess(
-                train_emb, labels[train_idx],
-                val_emb, labels[val_idx],
-                random_state=random_state,
-                fold=fold_idx 
-            )
-
-        if out is None: 
-            out = np.zeros((n, val_emb.shape[1]), dtype=val_emb.dtype)
-        out[val_idx] = val_emb 
-
-        del model, train_emb, val_emb  
-        if torch.cuda.is_available(): 
-            torch.cuda.empty_cache()
-        gc.collect() 
-
-    if out is None: 
-        raise ValueError("no embeddings returned")
-
-    return out 
+    return {"Name": name, "Corn + RPS": format_metric(score)}
 
 def _spatial_opt(
     *,
@@ -268,68 +175,9 @@ def _spatial_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "RPS"],
+        "header": ["Name", "Corn + RPS"],
         "row": _row_score(model_key, best_value),
         "params": best_params
-    }
-
-def _spatial_extract(
-    *,
-    root_dir: str, 
-    out_path: str,
-    model_key: str,
-    canvas_hw: tuple[int, int] = (512, 512), 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH,
-    proj_trials: int = 50,
-    **_
-): 
-    ds, labels, fips, collate_fn, in_channels = load_spatial_dataset(root_dir, canvas_hw)
-
-    params = load_model_params(config_path, model_key)
-    params = normalize_spatial_params(params, random_state=random_state, collate_fn=collate_fn)
-
-    splitter      = eval_config(random_state).get_splitter(OPT_TASK) 
-    model_factory = lambda: SpatialClassifier(
-        in_channels=in_channels, 
-        compute_strategy=strategy, 
-        **params
-    )
-
-    projector     = _projector_fold_factory(
-        f"{model_key}_Projector",
-        proj_trials,
-        random_state 
-    )
-
-    embs = _holdout_embeddings(
-        ds, labels, splitter, 
-        model_factory=model_factory, 
-        extract_fn=lambda m, subset: m.extract(subset), 
-        postprocess=projector, 
-        random_state=random_state 
-    )
-
-    feature_names = np.array(
-        [f"{model_key.split('/')[-1].lower()}_emb_{i}" for i in range(embs.shape[1])], 
-        dtype="U32"
-    )
-
-    savemat(out_path, {
-        "features": embs, 
-        "labels": labels.reshape(-1, 1), 
-        "fips_codes": fips, 
-        "feature_names": feature_names, 
-        "n_counties": np.array([len(labels)], dtype=np.int64)
-    }) 
-
-    return {
-        "header": ["Name", "Path", "Dim"],
-        "row": {
-            "Name": model_key, 
-            "Path": out_path, 
-            "Dim": embs.shape[1], 
-        }
     }
 
 # ---------------------------------------------------------
@@ -339,9 +187,9 @@ def _spatial_extract(
 def test_saipe_opt(
     *,
     data_path: str = project_path("data", "datasets"),
-    dataset_key: str = "SAIPE",
+    dataset_key: str = "SAIPE_2013",
     proba_path: str = PROBA_PATH,
-    model_key: str = "SAIPE/Manifold",
+    model_key: str = SAIPE_KEY,
     trials: int = 50, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
@@ -352,9 +200,10 @@ def test_saipe_opt(
     X      = np.asarray(data["features"], dtype=np.float32)
     y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1) 
 
-    evaluator = ProjectorEvaluator(
+    evaluator = TabularEvaluator(
         X, y,
-        define_manifold_projector_space,
+        define_tabular_space,
+        model_factory=make_residual_tabular(),
         random_state=random_state,
         compute_strategy=strategy
     )
@@ -383,71 +232,10 @@ def test_saipe_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "QWK"],
+        "header": ["Name", "Corn + RPS"],
         "row": _row_score(model_key, best_value),
         "params": best_params 
     }
-
-
-def test_saipe_extract(
-    *,
-    data_path: str = project_path("data", "datasets"), 
-    dataset_key: str = "SAIPE",
-    model_key: str = "SAIPE/Manifold",
-    out_path: str = project_path("data", "datasets", "saipe_pooled.mat"),
-    proba_path: str = PROBA_PATH,
-    folds: int = 5,
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH, 
-    **_ 
-): 
-    loader = make_dataset_loader(dataset_key, proba_path)[dataset_key] 
-    data   = loader(data_path) if callable(loader) else loader 
-    X      = np.asarray(data["features"], dtype=np.float32)
-    y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1) 
-    fips   = np.asarray(data["sample_ids"])
-
-    params = load_model_params(config_path, model_key)
-    params = dict(params)
-
-    params["hidden_dims"] = int(params.pop("base_width")),
-    params["mode"] = "manifold"
-
-    splitter      = cv_config(folds, random_state).get_splitter(OPT_TASK)
-    model_factory = lambda: EmbeddingProjector(
-        in_dim=X.shape[1],
-        random_state=random_state,
-        device=strategy.device,
-        **params
-    )
-
-    embs = _holdout_embeddings(
-        X, y, splitter, 
-        model_factory=model_factory,
-        extract_fn=lambda m, subset: m.transform(subset),
-        subset_fn=lambda data, idx: data[idx]
-    )
-
-    feature_names = np.array([f"saipe_manifold_{i}" for i in range(embs.shape[1])],
-                             dtype="U32")
-
-    savemat(out_path, {
-        "features": embs,
-        "labels": y.reshape(-1, 1),
-        "fips_codes": fips,
-        "feature_names": feature_names,
-        "n_counties": np.array([len(y)], dtype=np.int64)
-    })
-
-    return {
-        "header": ["Name", "Path", "Dim"],
-        "row": {
-            "Name": model_key,
-            "Path": out_path,
-            "Dim": embs.shape[1]
-        }
-    }
-
 
 def test_reduce_all( 
     *,
@@ -541,27 +329,6 @@ def test_viirs_opt(
         config_path=config_path
     )
 
-def test_viirs_extract(
-    *,
-    data_path: str = VIIRS_ROOT, 
-    model_key: str = VIIRS_KEY,
-    out_path: str = VIIRS_OUT,
-    canvas_hw: tuple[int, int] = (512, 512), 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH,
-    proj_trials: int = 50,
-    **_
-):
-    return _spatial_extract(
-        root_dir=data_path,
-        model_key=model_key,
-        out_path=out_path,
-        canvas_hw=canvas_hw,
-        random_state=random_state,
-        config_path=config_path,
-        proj_trials=proj_trials,
-    )
-
 def test_nlcd_opt(
     *,
     data_path: str = NLCD_ROOT, 
@@ -581,27 +348,6 @@ def test_nlcd_opt(
         folds=folds,
         random_state=random_state,
         config_path=config_path
-    )
-
-def test_nlcd_extract(
-    *,
-    data_path: str = NLCD_ROOT, 
-    model_key: str = NLCD_KEY,
-    out_path: str = NLCD_OUT,
-    canvas_hw: tuple[int, int] = (512, 512), 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH,
-    proj_trials: int = 50,
-    **_
-):
-    return _spatial_extract(
-        root_dir=data_path,
-        model_key=model_key,
-        out_path=out_path,
-        canvas_hw=canvas_hw,
-        random_state=random_state,
-        config_path=config_path,
-        proj_trials=proj_trials,
     )
 
 def test_usps_opt(
@@ -632,11 +378,8 @@ def test_usps_opt(
 
 TESTS = {
     "viirs-opt": test_viirs_opt, 
-    "viirs-extract": test_viirs_extract,
     "nlcd-opt": test_nlcd_opt,
-    "nlcd-extract": test_nlcd_extract,
     "saipe-opt": test_saipe_opt,
-    "saipe-extract": test_saipe_extract,
     "usps-opt": test_usps_opt,
     "reduce-all": test_reduce_all,
 }

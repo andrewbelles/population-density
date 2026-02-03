@@ -7,12 +7,11 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
-from joblib import memory
 import numpy as np 
 
-import multiprocessing as mp
 
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing   import StandardScaler
+
 import time, copy, time, sys, torch   
 
 from abc                     import abstractmethod
@@ -44,9 +43,9 @@ from xgboost                 import (
 )
 
 from utils.loss_funcs        import (
-    CornLoss,
     HybridOrdinalLoss,
-    LearnableLogitScaling,
+    LogitScaler,
+    MixedLoss,
     compute_ens_weights
 )
 
@@ -63,9 +62,12 @@ from torch.utils.data        import (
 )
 
 from models.networks         import (
+    GatedAttentionPooling,
     ResNetMIL,
     MILOrdinalHead,
-    HypergraphBackbone
+    HypergraphBackbone,
+    ResidualMLP,
+    Mixer
 ) 
 
 from models.graph.construction import (
@@ -1258,6 +1260,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
         gnn_dim: int = 128, 
         gnn_layers: int = 1, 
         gnn_heads: int = 1, 
+        gap_attn_dim: int = 64, 
         attn_dropout: float = 0.0, 
         thresh_low: float = LOGRADIANCE_GATE_LOW, 
         thresh_high: float = LOGRADIANCE_GATE_HIGH,
@@ -1317,6 +1320,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
         self.tile_size    = tile_size 
         self.patch_size   = patch_size 
         self.embed_dim    = embed_dim 
+        self.gap_attn_dim = gap_attn_dim
         self.gnn_dim      = gnn_dim 
         self.thresh_low   = thresh_low 
         self.thresh_high  = thresh_high
@@ -1350,6 +1354,27 @@ class SpatialGATClassifier(BaseSpatialEstimator):
             use_logit_scaler=True 
         )
 
+    def build_model(self):
+        self.backbone_ = self.build_backbone()
+        self.head_     = self.build_head(self.backbone_.out_dim, self.n_classes_)
+        
+        # pool across tiles per bag via attention 
+        self.pool_     = GatedAttentionPooling(
+            in_dim=self.backbone_.out_dim,
+            attn_dim=self.gap_attn_dim,
+            attn_dropout=self.attn_dropout
+        )
+
+        self.model_          = nn.Module() 
+        self.model_.backbone = self.backbone_ 
+        self.model_.head     = self.head_
+        self.model_.pool     = self.pool_ 
+
+        self.model_.to(self.device)
+        
+        if self.device.type == "cuda" and self.compile_model:
+            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
+
     def forward_feats(self, tiles, batch_indices):
         xb, bidx   = self.prepare_inputs(tiles, batch_indices)
         tile_feats = self.model_.backbone(xb)
@@ -1358,14 +1383,339 @@ class SpatialGATClassifier(BaseSpatialEstimator):
             return tile_feats 
 
         batch_size = int(bidx.max().item()) + 1 
-        pooled     = torch.zeros(batch_size, tile_feats.size(1), device=tile_feats.device)
-        pooled.index_add_(0, bidx, tile_feats)
-
-        counts     = torch.zeros(batch_size, device=tile_feats.device)
-        counts.index_add_(0, bidx, torch.ones_like(bidx, dtype=counts.dtype))
-        pooled = pooled / (counts.unsqueeze(1) + 1e-9)
-
+        pooled     = self.model_.pool(tile_feats, bidx, batch_size)
         return pooled 
+
+# ---------------------------------------------------------
+# Mixing Tabular, Residual MLP Model 
+# ---------------------------------------------------------
+
+class ResidualTabular(BaseEstimator, ClassifierMixin): 
+    
+    def __init__(
+        self, 
+        *,
+        in_dim: int, 
+        hidden_dim: int = 256, 
+        depth: int = 6, 
+        dropout: float = 0.1, 
+
+        mix_alpha: float = 0.2, 
+        mix_mult: int = 2, 
+        max_mix: int | None = None,
+        with_mix_epochs: int = 1800, 
+        anchor_power: float = 1.0, 
+
+        alpha_rps: float = 0.5, 
+        beta_supcon: float = 0.5, 
+        supcon_temperature: float = 0.07, 
+        supcon_dim: int = 128,
+        ens: float = 0.999, 
+
+        epochs: int = 2000, 
+        lr: float = 1e-3, 
+        weight_decay: float = 0.0, 
+        random_state: int = 0, 
+        early_stopping_rounds: int = 15, 
+        eval_fraction: float = 0.15, 
+        min_delta: float = 1e-3, 
+        batch_size: int = 1024, 
+
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+        compile_model: bool = True 
+    ):
+        self.in_dim                = in_dim
+        self.hidden_dim            = hidden_dim
+        self.depth                 = depth
+        self.dropout               = dropout
+
+        self.mix_alpha             = mix_alpha
+        self.mix_mult              = mix_mult
+        self.max_mix               = max_mix
+        self.with_mix_epochs       = with_mix_epochs
+        self.anchor_power          = anchor_power
+
+        self.alpha_rps             = alpha_rps
+        self.beta_supcon           = beta_supcon
+        self.supcon_temperature    = supcon_temperature
+        self.supcon_dim            = supcon_dim
+        self.ens                   = ens
+
+        self.epochs                = epochs
+        self.lr                    = lr
+        self.weight_decay          = weight_decay
+        self.batch_size            = batch_size
+        self.early_stopping_rounds = early_stopping_rounds
+        self.eval_fraction         = eval_fraction
+        self.min_delta             = min_delta
+        self.random_state          = random_state
+        self.device                = self.resolve_device(compute_strategy.device)
+        self.compile_model         = bool(compile_model)
+
+        self.classes_   = None
+        self.n_classes_ = None
+        self.model_     = nn.Module()
+
+    def fit(self, X, y): 
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.int64).reshape(-1)
+
+        self.classes_   = np.unique(y)
+        self.n_classes_ = len(self.classes_)
+
+        y_idx         = np.searchsorted(self.classes_, y)
+        class_counts  = np.bincount(y_idx, minlength=self.n_classes_)
+        class_weights = compute_ens_weights(class_counts, self.ens)
+
+        self.build_model(class_weights)
+
+        opt       = torch.optim.AdamW(
+            self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
+
+        if self.eval_fraction and self.eval_fraction > 0: 
+            splitter = StratifiedShuffleSplit(
+                n_splits=1, test_size=self.eval_fraction, random_state=self.random_state
+            )
+            train_idx, val_idx = next(splitter.split(X, y))
+            X_tr, y_tr   = X[train_idx], y[train_idx]
+            X_val, y_val = X[val_idx], y[val_idx]
+        else: 
+            X_tr, y_tr   = X, y 
+            X_val, y_val = X, y 
+
+        train_ds = TensorDataset(torch.from_numpy(X_tr), torch.from_numpy(y_tr))
+        val_ds   = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
+
+        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
+        val_loader   = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
+
+        best_state  = None 
+        best_val    = float("inf") 
+        patience    = 0 
+        t0          = time.perf_counter()
+        total_count = 0
+        total_rps   = 0.0 
+        total_corn  = 0.0 
+
+        for ep in range(self.epochs): 
+            with_mixing = self.with_mix_epochs <= ep 
+
+            self.model_.train() 
+            for xb, yb in train_loader: 
+                xb = xb.to(self.device)
+                yb = yb.to(self.device)
+
+                loss, _, _, _, _ = self.process_batch(xb, yb, with_mixing=with_mixing)
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step() 
+
+            scheduler.step() 
+
+            self.model_.eval() 
+            val_rps  = 0.0 
+            val_corn = 0.0
+            count    = 0 
+            with torch.no_grad(): 
+                for xb, yb in val_loader: 
+                    xb = xb.to(self.device)
+                    yb = yb.to(self.device)
+
+                    feats = self.forward_feats(xb) 
+                    _, logits, proj = self.forward_logits(feats, with_supcon=False)
+
+                    _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
+
+                    corn = corn.mean() 
+                    rps  = rps.mean() 
+
+                    val_rps  += rps.item() * yb.size(0) 
+                    val_corn += corn.item() * yb.size(0)
+                    count    += yb.size(0)
+
+            val_corn  = (val_corn / max(count, 1))
+            val_rps   = (val_rps / max(count, 1)) / max(self.alpha_rps, 1e-9)
+            val_score = val_corn + val_rps 
+
+            if val_score < best_val - self.min_delta: 
+                best_val   = val_score 
+                best_state = copy.deepcopy(self.model_.state_dict())
+                patience   = 0 
+            else: 
+                patience  += 1 
+                if self.early_stopping_rounds and patience >= self.early_stopping_rounds:
+                    break 
+
+            avg_dt   = (time.perf_counter() - t0) / (ep + 1)
+            msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg | ") 
+
+            if ep % 50 == 0: 
+                if val_score is not None: 
+                    msg += (f" | val_loss={val_score:.4f} | val_corn={val_corn:.4f} | "
+                            f"val_rps={val_rps:.4f}")
+                    print(msg, file=sys.stderr, flush=True)
+
+        if best_state is not None: 
+            self.model_.load_state_dict(best_state)
+        return self 
+
+    def predict_proba(self, X): 
+        X = np.asarray(X, dtype=np.float32)
+        self.model_.eval()
+        with torch.no_grad(): 
+            xb    = torch.from_numpy(X).to(self.device)
+            feats = self.forward_feats(xb)
+            _, logits, _ = self.forward_logits(feats, with_supcon=False)
+            probs = self.logits_to_probs(logits)
+        return probs.cpu().numpy() 
+
+    def predict(self, X): 
+        probs = self.predict_proba(X)
+        idx   = probs.argmax(axis=1)
+        return self.classes_[idx]
+
+    def extract(self, X): 
+        X = np.asarray(X, dtype=np.float32)
+        self.model_.eval()
+        with torch.no_grad(): 
+            xb    = torch.from_numpy(X).to(self.device)
+            feats = self.forward_feats(xb)
+            emb, _, _ = self.forward_logits(feats, with_supcon=False)
+        return emb.cpu().numpy() 
+
+    def loss(self, X, y): 
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.int64)
+
+        loader = DataLoader(
+            TensorDataset(torch.from_numpy(X), torch.from_numpy(y)),
+            batch_size=self.batch_size, shuffle=False
+        )
+
+        self.model_.eval() 
+        val_rps  = 0.0 
+        val_corn = 0.0
+        count    = 0 
+        
+        with torch.no_grad(): 
+            for xb, yb in loader: 
+                xb = xb.to(self.device)
+                yb = yb.to(self.device)
+
+                feats = self.forward_feats(xb) 
+                _, logits, proj = self.forward_logits(feats, with_supcon=False)
+
+                _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
+
+                # values are per-sample because of mixed loss 
+                corn = corn.mean() 
+                rps  = rps.mean() 
+
+                val_rps  += rps.item() * yb.size(0) 
+                val_corn += corn.item() * yb.size(0)
+                count    += yb.size(0)
+
+        val_corn = (val_corn / max(count, 1))
+        val_rps  = (val_rps / max(count, 1)) / max(self.alpha_rps, 1e-9)
+        return val_corn + val_rps 
+
+    # -----------------------------------------------------
+    # Internal Helpers 
+    # -----------------------------------------------------
+
+    def resolve_device(self, device: str | None): 
+        if device is not None: 
+            return torch.device(device)
+        return torch.device(str(device) if torch.cuda.is_available() else "cpu") 
+
+    def build_model(self, class_weights): 
+        self.backbone_ = ResidualMLP(
+            in_dim=self.in_dim, 
+            hidden_dim=self.hidden_dim,
+            depth=self.depth,
+            dropout=self.dropout,
+            out_dim=self.hidden_dim 
+        )
+
+        self.head_     = MILOrdinalHead(
+            in_dim=self.hidden_dim,
+            fc_dim=self.hidden_dim,
+            n_classes=self.n_classes_,
+            dropout=self.dropout,
+            supcon_dim=self.supcon_dim,
+            use_logit_scaler=True
+        )
+
+        self.model_          = nn.Module() 
+        self.model_.backbone = self.backbone_
+        self.model_.head     = self.head_ 
+        self.model_.to(self.device)
+
+        self.loss_fn_ = HybridOrdinalLoss(
+            n_classes=self.n_classes_,
+            class_weights=class_weights,
+            alpha_rps=self.alpha_rps,
+            beta_supcon=self.beta_supcon,
+            temperature=self.supcon_temperature,
+            reduction="none"
+        ).to(self.device)
+
+        self.mix_loss_ = MixedLoss(self.loss_fn_)
+
+        self.mixer_    = Mixer(
+            class_weights=class_weights,
+            alpha=self.mix_alpha,
+            mix_mult=self.mix_mult,
+            max_mix=self.max_mix,
+            anchor_power=self.anchor_power
+        )
+
+        if self.device.type == "cuda" and self.compile_model:
+            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
+
+    def process_batch(self, xb, yb, with_mixing: bool = True): 
+        if with_mixing:
+            x, y_a, y_b, mix_lam = self.mixer_(xb, yb)
+        else: 
+            x = xb 
+
+        feats = self.forward_feats(x)
+        _, logits, proj = self.forward_logits(feats, with_supcon=True)
+
+        if with_mixing:
+            loss, corn, rps, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
+        else: 
+            loss, corn, rps, sup = self.loss_fn_(logits, proj, yb)
+            loss = loss.mean() 
+            corn = corn.mean() 
+            rps  = rps.mean() 
+            sup  = sup.mean() 
+
+        return loss, corn, rps, sup, x.size(0)
+
+    def forward_feats(self, x): 
+        return self.model_.backbone(x)
+
+    def forward_logits(self, feats, with_supcon=True):
+        emb, logits, proj = self.model_.head(feats)
+        if not with_supcon:
+            proj = None 
+        return emb, logits, proj 
+
+    def logits_to_probs(self, logits):
+        prob_gt = torch.sigmoid(logits)
+        n, k    = prob_gt.shape
+        probs   = torch.empty((n, k + 1), device=logits.device, dtype=logits.dtype)
+        probs[:, 0] = 1.0 - prob_gt[:, 0]
+        for i in range(1, k): 
+            probs[:, i] = prob_gt[:, i - 1] - prob_gt[:, i]
+        probs[:, -1] = prob_gt[:, -1]
+        probs = torch.clamp(probs, min=1e-9)
+        probs = probs / probs.sum(dim=1, keepdim=True)
+        return probs 
 
 # ---------------------------------------------------------
 # Scalar Embedding Learner 
@@ -1673,7 +2023,7 @@ class EmbeddingProjector(BaseEstimator):
             nn.Linear(self.supcon_dim, self.supcon_dim)
         )
 
-        self.scaler_ = LearnableLogitScaling(initial_value=1.0)
+        self.scaler_ = LogitScaler(initial_value=1.0)
 
         self.model_        = nn.Module() 
         self.model_.supcon = self.supcon_head_

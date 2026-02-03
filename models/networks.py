@@ -36,7 +36,7 @@ from models.graph.construction import (
     LOGRADIANCE_GATE_HIGH
 )
 
-from utils.loss_funcs import LearnableLogitScaling
+from utils.loss_funcs import LogitScaler
 
 class GatedAttentionPooling(nn.Module): 
 
@@ -192,7 +192,7 @@ class MILOrdinalHead(nn.Module):
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
         self.out  = nn.Linear(fc_dim, n_classes - 1)
 
-        self.scaler = LearnableLogitScaling(1.0) if use_logit_scaler else nn.Identity() 
+        self.scaler = LogitScaler(1.0) if use_logit_scaler else nn.Identity() 
 
         self.proj = None 
         if supcon_dim is not None: 
@@ -543,3 +543,133 @@ class HypergraphBackbone(nn.Module):
             node_out = node_out.view(B, K, -1)
         pooled = node_out.mean(dim=1)
         return pooled 
+
+# ---------------------------------------------------------
+# Tabular MLP Modules 
+# ---------------------------------------------------------
+
+class Mixer(nn.Module): 
+    '''
+
+    '''
+
+    def __init__(
+        self, 
+        class_weights: torch.Tensor, 
+        *,
+        alpha: float = 0.2, 
+        mix_mult: int = 2, 
+        max_mix: int | None = None, 
+        anchor_power: float = 1.0, 
+        with_replacement: bool = True 
+    ): 
+        super().__init__()
+        self.register_buffer("class_weights", class_weights.float())
+        self.alpha            = alpha 
+        self.mix_mult         = mix_mult
+        self.max_mix          = max_mix 
+        self.anchor_power     = anchor_power 
+        self.with_replacement = with_replacement
+        
+    def forward(self, x, y, generator=None): 
+
+        B      = y.numel() 
+        device = y.device 
+
+        n_mix  = B * self.mix_mult 
+        if self.max_mix is not None: 
+            n_mix = min(n_mix, self.max_mix)
+
+        w = self.class_weights.to(device)
+        anchor_w  = w.gather(0, y).float().pow(self.anchor_power)
+        anchor_w  = anchor_w / anchor_w.sum()  
+
+        partner_w = torch.ones_like(anchor_w) / anchor_w.numel()  
+
+        idx_a = torch.multinomial(
+            anchor_w, n_mix, replacement=self.with_replacement, generator=generator
+        )
+        idx_b = torch.multinomial(
+            partner_w, n_mix, replacement=self.with_replacement, generator=generator
+        )
+
+        mix_lambda = mix_lambda = torch.distributions.Beta(
+            self.alpha, self.alpha).sample((n_mix,)).to(device)
+        lam = mix_lambda.view(-1, 1)
+
+        x_mix = lam * x[idx_a] + (1 - lam) * x[idx_b]
+        y_a   = y[idx_a]
+        y_b   = y[idx_b]
+
+        return x_mix, y_a, y_b, mix_lambda
+
+
+class PreNormResBlock(nn.Module):
+    '''
+    X -> LayerNorm -> GELU -> Drop -> Linear(zero-initialized) -> Drop -> x + ...
+    Preserves identity path for Gradients, mitigating vanishing gradients for deep networks 
+    '''
+
+    def __init__(
+        self, 
+        dim: int, 
+        dropout: float = 0.0
+    ): 
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fc1  = nn.Linear(dim, dim)
+        self.fc2  = nn.Linear(dim, dim)
+        self.act  = nn.GELU() 
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
+
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x): 
+        h = self.norm(x)
+        h = self.fc1(h)
+        h = self.act(h)
+        h = self.drop(h)
+        h = self.fc2(h)
+        h = self.drop(h)
+        return x + h 
+
+
+class ResidualMLP(nn.Module): 
+    '''
+    Residual Backbone for Tabular data 
+
+    Uses PreNorm Residual Blocks 
+    '''
+
+    def __init__(
+        self,
+        in_dim: int, 
+        hidden_dim: int = 256, 
+        depth: int = 6, 
+        dropout: float = 0.1, 
+        out_dim: int | None = None 
+    ):
+        super().__init__()
+        self.in_dim     = in_dim 
+        self.hidden_dim = hidden_dim
+        self.depth      = depth 
+        self.out_dim    = hidden_dim if out_dim is None else out_dim
+
+
+        self.proj   = nn.Linear(in_dim, hidden_dim)
+        self.blocks = nn.Sequential(*[
+            PreNormResBlock(hidden_dim, dropout=dropout) for _ in range(depth)
+        ]) 
+
+        self.norm   = nn.LayerNorm(hidden_dim)
+        self.head   = nn.Linear(hidden_dim, self.out_dim)
+
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, x): 
+        x = self.proj(x)
+        x = self.blocks(x)
+        x = self.norm(x)
+        return self.head(x)

@@ -113,7 +113,7 @@ STACKED_PASSTHROUGH_PROBS = project_path("data", "results", "final_stacked_passt
 STACKING_BASE_KEY        = "Stacking"
 STACKING_PASSTHROUGH_KEY = "StackingPassthrough"
 
-MODELS = ("SVM", "Logistic")
+MODELS = ("Logistic",) 
 
 EXPERT_TRIALS   = 250 
 STACKING_TRIALS = 250 
@@ -225,7 +225,7 @@ def _optimize_dataset(
             task=OPT_TASK,
             config=inner_config,
             outer_config=outer_config,
-            metric="rps"
+            metric="qwk"
         )
 
         config = EngineConfig(
@@ -415,7 +415,7 @@ def test_expert_optimize(
             name, 
             base["path"],
             loader, 
-            direction="minimize",
+            direction="maximize",
             n_trials=EXPERT_TRIALS,
             config_path=config_path,
             parallel_outer=False, 

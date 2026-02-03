@@ -140,8 +140,8 @@ def define_hgnn_space(trial: optuna.Trial):
         "patch_size": trial.suggest_categorical("patch_size", [16, 32, 64]), 
         "embed_dim": trial.suggest_categorical("embed_dim", [32, 64, 128]), 
         "gnn_dim": trial.suggest_categorical("gnn_dim", [64, 128, 256]),
-        "gnn_layers": trial.suggest_int("gnn_layers", 3, 3), 
-        "gnn_heads": trial.suggest_categorical("gnn_heads", [1, 2, 4]), 
+        "gnn_layers": trial.suggest_int("gnn_layers", 1, 3), 
+        "gnn_heads": trial.suggest_categorical("gnn_heads", [2, 4, 8]), 
         "fc_dim": trial.suggest_categorical("fc_dim", [64, 128, 256]),
         
         "dropout": trial.suggest_float("dropout", 0.1, 0.5),
@@ -171,6 +171,34 @@ def define_hgnn_space(trial: optuna.Trial):
 # ---------------------------------------------------------
 # MLP Projector  
 # ---------------------------------------------------------
+
+def define_tabular_space(trial: optuna.Trial): 
+    return {
+        "hidden_dim": trial.suggest_int("hidden_dim", 128, 1024, step=128), 
+        "depth": trial.suggest_int("depth", 12, 18), 
+        "dropout": trial.suggest_float("dropout", 0.0, 0.3), 
+
+        "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.6),
+        "mix_mult": trial.suggest_categorical("mix_mult", [8, 12, 16]), 
+
+        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5), 
+        "alpha_rps": trial.suggest_float("alpha_rps", 1.0, 10.0, log=True),
+        "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.25), 
+        "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]),
+
+        "lr": trial.suggest_float("lr", 1e-4, 5e-3, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+
+        "eval_fraction": 0.2,
+        "min_delta": 1e-4, 
+        "early_stopping_rounds": 20, 
+        "with_mix_epochs": 1800, 
+        "batch_size": 1024,
+        "epochs": 2000, 
+        "max_mix": None, 
+        "anchor_power": 1.0 
+
+    }
 
 def define_projector_space(trial): 
     return {
