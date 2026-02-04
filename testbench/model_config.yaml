@@ -279,8 +279,8 @@ models:
     gamma: 0.0006573220471004352
     class_weight: null
   VIIRS_MANIFOLD/Logistic:
-    C: 0.07063668192019835
-    class_weight: balanced
+    C: 0.008657542391191366
+    class_weight: null
   Manifold/VIIRS:
     patch_size: 32
     embed_dim: 128

@@ -678,7 +678,7 @@ class UspsTensorDataset(SpatialTensorDataset):
     @property
     def tile_shape(self) -> tuple[int, int, int]: 
         ht, wt = self.tile_hw 
-        return (4, ht, wt)
+        return (1, ht, wt)
 
     @property 
     def dtype(self) -> np.dtype: 
@@ -724,9 +724,10 @@ class UspsTensorDataset(SpatialTensorDataset):
                     continue 
 
                 H, W     = arr.shape 
-                channels = np.zeros((4, H, W), dtype=np.float32) 
+                channels = np.zeros((1, H, W), dtype=np.float32) 
 
                 nlcd_dst = np.zeros((H, W), dtype=nlcd.dtypes[0])
+
                 reproject(
                     source=rasterio.band(nlcd, 1), 
                     destination=nlcd_dst,
@@ -738,10 +739,7 @@ class UspsTensorDataset(SpatialTensorDataset):
                     dst_nodata=nlcd.nodata 
                 )
 
-                nlcd_valid = np.ones_like(nlcd_dst, dtype=bool) 
-                if nlcd.nodata is not None: 
-                    nlcd_valid = nlcd_dst != nlcd.nodata 
-
+                nlcd_valid     = nlcd_dst != nlcd.nodata if nlcd.nodata is not None else np.ones_like(nlcd_dst, bool)
                 water_mask     = np.isin(nlcd_dst, self.water_codes) & nlcd_valid 
                 developed_mask = np.isin(nlcd_dst, self.developed_codes) & nlcd_valid 
                 land_mask      = (~water_mask) & nlcd_valid 
@@ -750,13 +748,10 @@ class UspsTensorDataset(SpatialTensorDataset):
                 bbox           = county_shape.bounds 
                 
                 for feat in tracts.filter(bbox=bbox): 
-                    props = feat.get("properties") or {}
-                    c1    = self._as_float(props, "active_residential")
-                    c2    = self._as_float(props, "active_commercial")
-                    c3    = self._as_float(props, "institutional")
-                    c4    = self._as_float(props, "hollow_rate")
+                    props    = feat.get("properties") or {}
+                    capacity = self._as_float(props, "housing_capacity") 
 
-                    if c1 is None and c2 is None and c3 is None and c4 is None: 
+                    if capacity is None or capacity <= 0: 
                         continue 
 
                     tgeom = feat.get("geometry")
@@ -786,22 +781,13 @@ class UspsTensorDataset(SpatialTensorDataset):
                     if not tract_mask.any(): 
                         continue 
 
-                    def _alloc(idx, value): 
-                        if value is None or value <= 0: 
-                            return
-                        target = tract_mask & developed_mask 
-                        if not target.any(): 
-                            target = tract_mask & land_mask 
-                        if target.any(): 
-                            channels[idx, target] += value / float(target.sum())
-                    
-                    _alloc(0, c1)
-                    _alloc(1, c2)
-                    _alloc(2, c3)
+                    target = tract_mask & developed_mask 
+                    if not target.any(): 
+                        target = tract_mask & land_mask 
 
-                    # No dasymetric like channels 0-2
-                    if c4 is not None: 
-                        channels[3, tract_mask] = c4
+                    if target.any(): 
+                        pixel_val = capacity / float(target.sum())
+                        channels[0, target] += pixel_val 
 
                 mask = (valid_mask & nlcd_valid).astype(np.uint8)
                 if not np.any(mask):

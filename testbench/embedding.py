@@ -92,7 +92,7 @@ strategy = ComputeStrategy.from_env()
 
 VIIRS_ROOT = project_path("data", "tensors", "viirs_2013")
 NLCD_ROOT  = project_path("data", "tensors", "nlcd") 
-USPS_ROOT  = project_path("data", "tensors", "usps")
+USPS_ROOT  = project_path("data", "tensors", "usps_2013")
 
 VIIRS_KEY  = "Manifold/VIIRS"
 NLCD_KEY   = "Manifold/NLCD"
@@ -100,6 +100,7 @@ USPS_KEY   = "Manifold/USPS"
 SAIPE_KEY  = "Manifold/SAIPE"
 
 # Out Paths 
+USPS_OUT              = project_path("data", "datasets", "usps_pooled.mat")
 VIIRS_OUT             = project_path("data", "datasets", "viirs_pooled.mat")
 VIIRS_OUT_WITH_LOGITS = project_path("data", "datasets", "viirs_pooled_with_logits.mat")
 NLCD_OUT              = project_path("data", "datasets", "nlcd_pooled.mat")
@@ -363,6 +364,8 @@ def test_usps_opt(
     data_path: str = USPS_ROOT,
     model_key: str = USPS_KEY, 
     canvas_hw: tuple[int, int] = (512, 512), 
+    tile_hw: tuple[int, int] = (256, 256), 
+    bag_tiles: bool = False,
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
@@ -371,10 +374,12 @@ def test_usps_opt(
 ): 
     
     return _spatial_opt(
-        root_dir=data_path, 
+        root_dir=data_path,
         model_key=model_key,
         canvas_hw=canvas_hw,
-        trials=trials, 
+        tile_hw=tile_hw, 
+        bag_tiles=bag_tiles,
+        trials=trials,
         folds=folds,
         random_state=random_state,
         config_path=config_path
