@@ -28,8 +28,6 @@ from torchvision.models.mobilenet import MobileNet_V3_Small_Weights
 
 from torch_scatter import scatter_add, scatter_softmax 
 
-from torch_sparse  import SparseTensor 
-
 from models.graph.construction import (
     HypergraphBuilder,
     LOGRADIANCE_GATE_LOW,
@@ -222,7 +220,13 @@ class LightweightBackbone(nn.Module):
     Imports MobileNet_V3 weights adapted for grayscale as weight initialization 
     '''
 
-    def __init__(self, embed_dim=64, patch_size=32): 
+    def __init__(
+        self, 
+        embed_dim=64, 
+        patch_size=32,
+        stat="p95",
+        patch_quantile=0.95
+    ): 
         super().__init__()
         
         self.patch_size = patch_size 
@@ -259,17 +263,30 @@ class LightweightBackbone(nn.Module):
             nn.GELU() 
         ) 
 
+        self.stat           = stat 
+        self.patch_quantile = patch_quantile
+
     def forward(self, tiles): 
         patches = self.unfold(tiles)
-        p95     = self.p95_patch(patches)
+        score   = self.patch_stat(patches, stat=self.stat, q=self.patch_quantile)
 
-        x     = self.grayscale(patches)
-        feats = self.encoder(x)
-        embs  = self.projector(feats)
+        x      = self.grayscale(patches)
+        feats  = self.encoder(x)
+        embs   = self.projector(feats)
 
-        p95 = p95.unsqueeze(1)
-        out = torch.cat([embs, p95], dim=1)
+        score  = score.unsqueeze(1)
+        out    = torch.cat([embs, score], dim=1)
         return out 
+
+    @staticmethod 
+    def patch_stat(patches: torch.Tensor, *, stat: str = "p95", q: float = 0.95): 
+        flat = patches.flatten(start_dim=1)
+        if stat == "p95": 
+            return torch.quantile(flat, q, dim=1)
+        if stat == "max": 
+            return flat.max(dim=1).values
+        else:
+            raise ValueError(f"unknown patch stat: {stat}")
 
     @staticmethod 
     def p95_patch(patches): 
@@ -483,6 +500,8 @@ class HypergraphBackbone(nn.Module):
         max_bag_frac=0.75, 
         attn_dropout=0.0,
         dropout=0.0,
+        patch_stat="p95",
+        patch_quantile=0.95,
         thresh_low=LOGRADIANCE_GATE_LOW,
         thresh_high=LOGRADIANCE_GATE_HIGH
     ): 
@@ -506,8 +525,10 @@ class HypergraphBackbone(nn.Module):
             n_node_types=4   # type 0,1,2 & global 
         )
 
-        self.out_dim      = self.gnn.out_dim 
-        self.max_bag_frac = max_bag_frac
+        self.out_dim        = self.gnn.out_dim 
+        self.max_bag_frac   = max_bag_frac
+        self.patch_stat     = patch_stat
+        self.patch_quantile = patch_quantile
 
         # position embeddings 
         self.num_patches  = (tile_size // patch_size)**2 
@@ -545,7 +566,8 @@ class HypergraphBackbone(nn.Module):
 
         feats = self.encoder.encoder(patches)
         embs  = self.encoder.projector(feats).view(B, K, -1)
-        p95   = self.encoder.p95_patch(patches).view(B, K, 1)
+        score = self.encoder.patch_stat(patches, stat=self.patch_stat, q=self.patch_quantile)
+        score = score.view(B, K, 1)
 
         if idx is None: 
             pos = self.pos_embed
@@ -554,14 +576,14 @@ class HypergraphBackbone(nn.Module):
 
         embs = embs + pos 
 
-        patch_feats = torch.cat([embs, p95], dim=2)
+        patch_feats = torch.cat([embs, score], dim=2)
         patch_feats = patch_feats.view(B * K, -1)
 
         readout_tokens = self.global_token.expand(B, -1, -1).reshape(B, -1)
 
         all_feats = torch.cat([patch_feats, readout_tokens], dim=0)
 
-        node_type, _, edge_type, _, H = self.builder.build(p95.view(-1), batch_size=B, idx=idx)
+        node_type, _, edge_type, _, H = self.builder.build(score.view(-1), batch_size=B, idx=idx)
 
         node_out = self.gnn(all_feats, node_type, H, edge_type)
 

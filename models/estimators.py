@@ -1267,6 +1267,8 @@ class SpatialGATClassifier(BaseSpatialEstimator):
         gnn_heads: int = 1, 
         gap_attn_dim: int = 64, 
         attn_dropout: float = 0.0, 
+        patch_stat: str = "p95", 
+        patch_quantile: float = 0.95, 
         thresh_low: float = LOGRADIANCE_GATE_LOW, 
         thresh_high: float = LOGRADIANCE_GATE_HIGH,
         max_bag_frac: float = 1.0, 
@@ -1322,17 +1324,19 @@ class SpatialGATClassifier(BaseSpatialEstimator):
             compile_model=compile_model,
         )
 
-        self.tile_size    = tile_size 
-        self.patch_size   = patch_size 
-        self.embed_dim    = embed_dim 
-        self.gap_attn_dim = gap_attn_dim
-        self.gnn_dim      = gnn_dim 
-        self.thresh_low   = thresh_low 
-        self.thresh_high  = thresh_high
-        self.max_bag_frac = max_bag_frac
-        self.gnn_layers   = gnn_layers 
-        self.gnn_heads    = gnn_heads 
-        self.attn_dropout = attn_dropout
+        self.tile_size      = tile_size 
+        self.patch_size     = patch_size 
+        self.embed_dim      = embed_dim 
+        self.gap_attn_dim   = gap_attn_dim
+        self.gnn_dim        = gnn_dim 
+        self.thresh_low     = thresh_low 
+        self.thresh_high    = thresh_high
+        self.max_bag_frac   = max_bag_frac
+        self.gnn_layers     = gnn_layers 
+        self.gnn_heads      = gnn_heads 
+        self.attn_dropout   = attn_dropout
+        self.patch_stat     = patch_stat 
+        self.patch_quantile = patch_quantile
     
     def build_backbone(self):
         return HypergraphBackbone(
@@ -1345,6 +1349,8 @@ class SpatialGATClassifier(BaseSpatialEstimator):
             attn_dropout=self.attn_dropout,
             dropout=self.dropout,
             max_bag_frac=self.max_bag_frac,
+            patch_stat=self.patch_stat,
+            patch_quantile=self.patch_quantile,
             thresh_low=self.thresh_low,
             thresh_high=self.thresh_high
         )

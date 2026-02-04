@@ -754,8 +754,6 @@ class UspsTensorDataset(SpatialTensorDataset):
                     if capacity is None or capacity <= 0: 
                         continue 
 
-                    capacity = np.log1p(capacity)
-
                     tgeom = feat.get("geometry")
                     if tgeom is None: 
                         continue 
@@ -788,7 +786,8 @@ class UspsTensorDataset(SpatialTensorDataset):
                         target = tract_mask & land_mask 
 
                     if target.any(): 
-                        pixel_val = capacity / float(target.sum())
+                        density   = capacity / float(target.sum())
+                        pixel_val = np.log1p(density) 
                         channels[0, target] += pixel_val 
 
                 mask = (valid_mask & nlcd_valid).astype(np.uint8)

@@ -19,7 +19,7 @@ from analysis.cross_validation import CVConfig
 from models.graph.construction import (
     LOGRADIANCE_GATE_LOW,
     LOGRADIANCE_GATE_HIGH,
-    LOGCAPACITY_GATE_HIHH,
+    LOGCAPACITY_GATE_HIGH,
     LOGCAPACITY_GATE_LOW
 )
 
@@ -95,8 +95,8 @@ def spatial_gat_factory(
     merged.pop("in_channels", None)
 
     scale = merged.pop("threshold_scale", 1.0)
-    merged.setdefault("thresh_low", LOGCAPACITY_GATE_LOW)
-    merged.setdefault("thresh_high", LOGCAPACITY_GATE_HIHH)
+    merged.setdefault("thresh_low", LOGRADIANCE_GATE_LOW * scale)
+    merged.setdefault("thresh_high", LOGRADIANCE_GATE_HIGH * scale)
 
     collate = merged.pop("collate_fn", collate_fn)
     return SpatialGATClassifier(

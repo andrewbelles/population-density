@@ -8,6 +8,11 @@
 
 import itertools, optuna 
 
+from models.graph.construction import (
+    LOGCAPACITY_GATE_HIGH,
+    LOGCAPACITY_GATE_LOW
+)
+
 # ---------------------------------------------------------
 # Standard model spaces 
 # ---------------------------------------------------------
@@ -152,7 +157,6 @@ def define_hgnn_space(trial: optuna.Trial):
         "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 10.0, log=True),
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 2.0), 
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.3),
-        "ens": trial.suggest_float("ens", 0.9, 0.999),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
 
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
@@ -161,12 +165,23 @@ def define_hgnn_space(trial: optuna.Trial):
         "threshold_scale": trial.suggest_float("threshold_scale", 0.8, 1.2), 
 
         "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
+        "ens": 0.999,
         "epochs": 400, 
         "early_stopping_rounds": 15, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,
         "target_global_batch": 2048
     }
+
+def define_usps_space(trial: optuna.Trial): 
+    params = define_hgnn_space(trial)
+    params.pop("threshold_scale", None)
+
+    params["thresh_low"]     = LOGCAPACITY_GATE_LOW 
+    params["thresh_high"]    = LOGCAPACITY_GATE_HIGH 
+    params["patch_stat"]     = "max"
+    params["patch_quantile"] = 1.0
+    return params 
 
 # ---------------------------------------------------------
 # MLP Projector  

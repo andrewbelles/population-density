@@ -318,3 +318,22 @@ models:
     transformer_attn_dropout: 0.01159088757867487
     lr: 0.0005581834370234934
     weight_decay: 9.565741316864593e-06
+  Manifold/USPS:
+    patch_size: 32
+    embed_dim: 128
+    gnn_dim: 256
+    gnn_layers: 3
+    gnn_heads: 8
+    fc_dim: 256
+    dropout: 0.18415302442953638
+    attn_dropout: 0.05157051906194132
+    max_bag_frac: 0.6577141754620919
+    alpha_rps: 1.486512710723492
+    beta_supcon: 1.1833738637939712
+    supcon_temperature: 0.1596503783655801
+    ens: 0.999
+    supcon_dim: 128
+    lr: 0.0002024028628133283
+    weight_decay: 5.752740814116683e-06
+    threshold_scale: 0.9865243091425225
+    batch_size: 256

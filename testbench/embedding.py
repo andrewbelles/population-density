@@ -26,6 +26,7 @@ from sklearn.model_selection   import StratifiedGroupKFold
 
 from sklearn.decomposition     import PCA 
 
+from models.graph.construction import LOGCAPACITY_GATE_HIGH, LOGCAPACITY_GATE_LOW
 from preprocessing.loaders     import load_spatial_mmap_manifest
 
 from testbench.utils.paths     import (
@@ -49,7 +50,8 @@ from optimization.spaces       import (
     define_tabular_space,
     define_manifold_projector_space,
     define_spatial_space,
-    define_hgnn_space
+    define_hgnn_space,
+    define_usps_space
 )
 
 from optimization.engine       import (
@@ -116,7 +118,9 @@ def _spatial_opt(
     *,
     root_dir: str, 
     model_key: str, 
-    tile_shape: tuple[int, int, int] = (1, 256, 256), 
+    tile_shape: tuple[int, int, int] = (1, 256, 256),
+    param_space=None, 
+    factory_overrides=None, 
     max_bag_size: int = 64, 
     sample_frac: float | None = None, 
     trials: int = 50, 
@@ -142,14 +146,16 @@ def _spatial_opt(
         random_state=random_state
     )
 
-    factory = make_spatial_gat(compute_strategy=strategy)
-    factory = with_spatial_channels(factory, spatial)
+    factory = make_spatial_gat(
+        compute_strategy=strategy,
+        **(factory_overrides or {})
+    )
 
     evaluator = SpatialEvaluator(
         filepath=root_dir,
         loader_func=loader,
         model_factory=factory,
-        param_space=define_hgnn_space,
+        param_space=param_space or define_hgnn_space,
         compute_strategy=strategy,
         task=OPT_TASK,
         config=cv_config(folds, random_state)
@@ -318,7 +324,7 @@ def test_viirs_opt(
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
     canvas_hw: tuple[int, int] = (512, 512), 
-    tile_hw: tuple[int, int] = (512, 512), 
+    tile_shape: tuple[int, int] = (512, 512), 
     bag_tiles: bool = False, 
     trials: int = 50, 
     folds: int = 2, 
@@ -330,7 +336,7 @@ def test_viirs_opt(
         root_dir=data_path,
         model_key=model_key,
         canvas_hw=canvas_hw,
-        tile_hw=tile_hw, 
+        tile_shape=tile_shape, 
         bag_tiles=bag_tiles,
         trials=trials,
         folds=folds,
@@ -364,7 +370,7 @@ def test_usps_opt(
     data_path: str = USPS_ROOT,
     model_key: str = USPS_KEY, 
     canvas_hw: tuple[int, int] = (512, 512), 
-    tile_hw: tuple[int, int] = (256, 256), 
+    tile_shape: tuple[int, int] = (256, 256), 
     bag_tiles: bool = False,
     trials: int = 50, 
     folds: int = 2, 
@@ -377,10 +383,17 @@ def test_usps_opt(
         root_dir=data_path,
         model_key=model_key,
         canvas_hw=canvas_hw,
-        tile_hw=tile_hw, 
+        tile_shape=tile_shape, 
         bag_tiles=bag_tiles,
         trials=trials,
         folds=folds,
+        param_space=define_usps_space,
+        factory_overrides={
+            "thresh_low": LOGCAPACITY_GATE_LOW,
+            "thresh_high": LOGCAPACITY_GATE_HIGH,
+            "patch_stat": "max",
+            "patch_quantile": 1.0 
+        },
         random_state=random_state,
         config_path=config_path
     )
@@ -414,7 +427,7 @@ def main():
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--folds", type=int, default=2)
     parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
-    parser.add_argument("--tile-hw", nargs=2, type=int, default=(256, 256))
+    parser.add_argument("--tile-shape", nargs=3, type=int, default=(1, 256, 256))
     parser.add_argument("--bag-tiles", action="store_true")
     parser.add_argument("--random-state", default=0)
     parser.add_argument("--embedding-paths", default=None)
@@ -437,7 +450,7 @@ def main():
         random_state=args.random_state,
         ablation_groups=ablation_groups,
         canvas_hw=tuple(args.canvas_hw),
-        tile_hw=tuple(args.tile_hw),
+        tile_shape=tuple(args.tile_shape),
         bag_tiles=bool(args.bag_tiles)
     )
 
