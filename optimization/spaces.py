@@ -140,8 +140,8 @@ def define_hgnn_space(trial: optuna.Trial):
         "patch_size": trial.suggest_categorical("patch_size", [16, 32, 64]), 
         "embed_dim": trial.suggest_categorical("embed_dim", [32, 64, 128]), 
         "gnn_dim": trial.suggest_categorical("gnn_dim", [64, 128, 256]),
-        #"gnn_layers": trial.suggest_int("gnn_layers", 1, 3), 
-        #"gnn_heads": trial.suggest_categorical("gnn_heads", [2, 4, 8]), 
+        "gnn_layers": trial.suggest_int("gnn_layers", 2, 3), 
+        "gnn_heads": trial.suggest_categorical("gnn_heads", [2, 4, 8]), 
         "fc_dim": trial.suggest_categorical("fc_dim", [64, 128, 256]),
         
         "dropout": trial.suggest_float("dropout", 0.1, 0.5),
@@ -161,9 +161,7 @@ def define_hgnn_space(trial: optuna.Trial):
         "threshold_scale": trial.suggest_float("threshold_scale", 0.8, 1.2), 
 
         "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
-        "gnn_layers": 3, 
-        "gnn_heads": 8, 
-        "epochs": 350, 
+        "epochs": 400, 
         "early_stopping_rounds": 15, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,

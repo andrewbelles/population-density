@@ -754,6 +754,8 @@ class UspsTensorDataset(SpatialTensorDataset):
                     if capacity is None or capacity <= 0: 
                         continue 
 
+                    capacity = np.log1p(capacity)
+
                     tgeom = feat.get("geometry")
                     if tgeom is None: 
                         continue 

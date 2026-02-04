@@ -40,6 +40,9 @@ EARTH_RADIUS_KM = 6371.0
 LOGRADIANCE_GATE_LOW   = 0.4654 # Lower partition on log radiance for type 0 nodes 
 LOGRADIANCE_GATE_HIGH  = 1.8548 # Upper partition on log radiance for type 2 nodes  
 
+LOGCAPACITY_GATE_LOW   = 0.3612
+LOGCAPACITY_GATE_HIHH  = 2.6248
+
 def build_knn_graph_from_coords(
     coords: NDArray[np.float64], 
     *, 
