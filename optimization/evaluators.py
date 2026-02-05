@@ -450,20 +450,10 @@ def _spatial_eval_fold(
 ):
     train_ds    = Subset(dataset, train_idx)
     test_ds     = Subset(dataset, test_idx)
-    '''
-    def pruning_callback(epoch, metrics): 
-        if trial is None: 
-            return 
-        current_score = metrics.get("val_loss")
-        if current_score is not None: 
-            step = fold_idx * 1_000_000 + epoch 
-            trial.report(-1.0 * current_score, step=step)
-            if trial.should_prune(): 
-                raise optuna.TrialPruned()
-    '''
+
     model = model_factory(collate_fn=collate_fn, **params)
 
-    val_loader   = _make_spatial_loader(
+    val_loader = _make_spatial_loader(
         test_ds, collate_fn, batch_size, compute_strategy, shuffle=False)
 
     model.fit(train_ds, labels[train_idx])
@@ -471,34 +461,11 @@ def _spatial_eval_fold(
     if hasattr(model, "best_val_score_"): 
         return float(model.best_val_score_)
 
-    y_true_list = []
-    prob_list = [] 
-
-    model.eval() 
-    with torch.no_grad(): 
-        for batch in val_loader: 
-            if isinstance(batch, (tuple, list)): 
-                yb = batch[1]
-            else: 
-                yb = batch["labels"]
-
-            probs = model.predict_proba(batch) 
-
-            if hasattr(yb, "cpu"): 
-                y_true = yb.cpu().numpy() 
-            else: 
-                y_true = np.asarray(yb) 
-
-            if hasattr(probs, "cpu"): 
-                probs = probs.cpu().numpy() 
-            else: 
-                probs = np.asarray(probs) 
-
-            y_true_list.append(y_true.flatten()) 
-            prob_list.append(probs)
-
-    y_true = np.concatenate(y_true_list) 
-    probs = np.concatenate(prob_list) 
+    probs  = model.predict_proba(val_loader)
+    y_true = []
+    for batch in val_loader: 
+        yb = batch[1]
+        y_true.append(yb.cpu().numpy() if hasattr(yb, "cpu") else np.asarray(yb))
 
     class_weights = None 
     if hasattr(model, "class_counts_") and model.class_counts_ is not None: 
