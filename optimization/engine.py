@@ -359,13 +359,15 @@ def run_optimization(
             return float("-inf") if config.direction == "maximize" else float("inf")
 
         return score 
+
+    n_jobs = 1 if config.mp_enabled else (len(config.devices) if config.devices else 1)
         
     print(f"OPTIMIZATION: Starting {name} ({config.n_trials} trials)")
     study.optimize(
         objective, 
         n_trials=config.n_trials, 
         callbacks=callbacks,
-        n_jobs=len(config.devices) if config.devices else 1 
+        n_jobs=n_jobs 
     )
 
     print("> Optimization Results:")
