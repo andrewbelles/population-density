@@ -142,7 +142,7 @@ def define_spatial_space(trial):
 
 def define_hgnn_space(trial: optuna.Trial): 
     return {
-        "patch_size": trial.suggest_categorical("patch_size", [16, 32, 64]), 
+        "patch_size": trial.suggest_categorical("patch_size", [32, 64]), 
         "embed_dim": trial.suggest_categorical("embed_dim", [32, 64, 128]), 
         "gnn_dim": trial.suggest_categorical("gnn_dim", [64, 128, 256]),
         "gnn_layers": trial.suggest_int("gnn_layers", 2, 3), 
@@ -152,10 +152,10 @@ def define_hgnn_space(trial: optuna.Trial):
         "dropout": trial.suggest_float("dropout", 0.1, 0.5),
         "attn_dropout": trial.suggest_float("attn_dropout", 0.0, 0.4), 
 
-        "max_bag_frac": trial.suggest_float("max_bag_frac", 0.5, 1.0), 
+        "max_bag_frac": trial.suggest_float("max_bag_frac", 0.6, 0.95), 
 
-        "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 10.0, log=True),
-        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 2.0), 
+        "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 4.0),
+        "beta_supcon": trial.suggest_float("beta_supcon", 0.25, 2.0), 
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.3),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
 
@@ -165,9 +165,9 @@ def define_hgnn_space(trial: optuna.Trial):
         "reduce_depth": trial.suggest_int("reduce_depth", 1, 4), 
         "reduce_dropout": trial.suggest_float("reduce_dropout", 0.0, 0.2), 
 
-        "threshold_scale": trial.suggest_float("threshold_scale", 0.8, 1.2), 
+        "batch_size": trial.suggest_int("batch_size", 512, 1024, step=512), 
 
-        "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
+        "threshold_scale": 1.0,
         "ens": 0.999,
         "soft_epochs": 200, 
         "hard_epochs": 200, 
