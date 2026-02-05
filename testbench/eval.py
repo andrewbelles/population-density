@@ -60,6 +60,7 @@ from testbench.utils.config    import (
     make_spatial_gat,
     normalize_params,
     normalize_spatial_params,
+    load_node_anchors
 )
 
 from testbench.utils.paths     import (
@@ -77,6 +78,9 @@ strategy = ComputeStrategy.from_env()
 VIIRS_KEY = "Manifold/VIIRS" 
 SAIPE_KEY = "Manifold/SAIPE"
 USPS_KEY  = "Manifold/USPS"
+
+VIIRS_ANCHORS = project_path("data", "anchors", "viirs.npy")
+USPS_ANCHORS  = project_path("data", "anchors", "usps.npy")
 
 def _resolve_dataset(spec: str): 
     if spec in BASE: 
@@ -159,6 +163,8 @@ def _spatial_fit_extract(
     out_path: str,
     model_key: str, 
     tile_shape: tuple[int, int, int] = (1, 256, 256), 
+    node_anchors: list[list[float]] | None = None, 
+    anchor_stats: list[float] | None = None, 
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
@@ -187,6 +193,10 @@ def _spatial_fit_extract(
         random_state=random_state, 
         collate_fn=train_collate
     )
+
+    if node_anchors is not None and anchor_stats is not None: 
+        params["node_anchors"] = node_anchors 
+        params["anchor_stats"] = anchor_stats 
 
     model = make_spatial_gat(
         compute_strategy=strategy, 
@@ -337,12 +347,15 @@ def test_viirs_manifold(
     test: str, 
     out: str,
     model_key: str = VIIRS_KEY, 
-    tile_shape: tuple[int, int, int] = (1, 256, 256), 
+    tile_shape: tuple[int, int, int] = (2, 256, 256), 
+    viirs_anchors: str = VIIRS_ANCHORS, 
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
     **_
 ): 
+    node_anchors, anchor_stats = load_node_anchors(viirs_anchors)
+
     return _spatial_fit_extract(
         train_root=train, 
         test_root=test, 
@@ -352,6 +365,8 @@ def test_viirs_manifold(
         sample_frac=sample_frac,
         random_state=random_state,
         config_path=config_path,
+        node_anchors=node_anchors,
+        anchor_stats=anchor_stats
     )
 
 def test_usps_manifold(
@@ -361,12 +376,15 @@ def test_usps_manifold(
     test: str, 
     out: str, 
     model_key: str = USPS_KEY, 
-    tile_shape: tuple[int, int, int] = (1, 256, 256), 
+    tile_shape: tuple[int, int, int] = (3, 256, 256), 
+    usps_anchors: str = USPS_ANCHORS, 
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
 ):
+    node_anchors, anchor_stats = load_node_anchors(usps_anchors)
+
     return _spatial_fit_extract(
         train_root=train,
         test_root=test,
@@ -375,7 +393,9 @@ def test_usps_manifold(
         tile_shape=tile_shape,
         sample_frac=sample_frac,
         random_state=random_state,
-        config_path=config_path
+        config_path=config_path,
+        node_anchors=node_anchors,
+        anchor_stats=anchor_stats
     )
 
 
