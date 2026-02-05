@@ -162,6 +162,39 @@ class ResNetMIL(nn.Module):
         return pooled 
 
 
+class NonlinearProjector(nn.Module): 
+    '''
+    Nonlinear residual projector w/ optional bottleneck. Uses pre-norm residual blocks 
+    '''
+
+    def __init__(
+        self,
+        in_dim, 
+        out_dim,
+        depth=2,
+        dropout=0.0 
+    ): 
+
+        super().__init__()
+
+        self.in_dim  = in_dim 
+        self.out_dim = out_dim 
+
+        if in_dim == out_dim: 
+            self.in_proj = nn.Identity() 
+        else: 
+            self.in_proj = nn.Linear(in_dim, out_dim)
+
+        self.blocks = nn.Sequential(*[
+            PreNormResBlock(out_dim, dropout=dropout)
+            for _ in range(depth)
+        ])
+
+    def forward(self, x): 
+        x = self.in_proj(x)
+        return self.blocks(x)
+
+
 class MILOrdinalHead(nn.Module):
     '''
     Hybrid Ordinal classifier head for MIL embeddings  
@@ -179,33 +212,50 @@ class MILOrdinalHead(nn.Module):
         n_classes: int, 
         dropout: float = 0.15, 
         supcon_dim: int | None = None, # optional for detaching at inference 
-        use_logit_scaler: bool = True  # platt/temperature scaling 
+        use_logit_scaler: bool = True, # platt/temperature scaling 
+        reduce_dim: int | None = None, 
+        reduce_depth: int = 2, 
+        reduce_dropout: float = 0.0
     ):
         super().__init__()
         if n_classes < 2: 
             raise ValueError("ordinal head requires n_classes >= 2")
 
-        self.fc   = nn.Linear(in_dim, fc_dim)
-        self.act  = nn.GELU() 
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
-        self.out  = nn.Linear(fc_dim, n_classes - 1)
+        self.reducer = None 
+        feat_dim     = in_dim 
+        if reduce_dim is not None and reduce_dim != in_dim: 
+            self.reducer = NonlinearProjector(
+                in_dim=in_dim,
+                out_dim=reduce_dim,
+                depth=reduce_depth,
+                dropout=reduce_dropout
+            )
+            feat_dim = reduce_dim 
 
+        self.fc     = nn.Linear(feat_dim, fc_dim)
+        self.act    = nn.GELU() 
+        self.drop   = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
+        self.out    = nn.Linear(fc_dim, n_classes - 1)
         self.scaler = LogitScaler(1.0) if use_logit_scaler else nn.Identity() 
 
         self.proj = None 
         if supcon_dim is not None: 
             self.proj = nn.Sequential(
-                nn.Linear(in_dim, in_dim),
+                nn.Linear(feat_dim, feat_dim),
                 nn.GELU(),
-                nn.Linear(in_dim, supcon_dim)
+                nn.Linear(feat_dim, supcon_dim)
             )
 
         self.out_dim = fc_dim 
 
     def forward(self, feats: torch.Tensor): 
-        emb    = self.act(self.fc(feats))
-        logits = self.out(self.drop(emb))
+        if self.reducer is not None: 
+            feats = self.reducer(feats)
+
+        emb    = feats  
+        logits = self.out(self.drop(self.act(self.fc(emb))))
         logits = self.scaler(logits)
+
         proj   = self.proj(feats) if self.proj is not None else None 
         return emb, logits, proj 
 

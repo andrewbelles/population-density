@@ -35,7 +35,9 @@ from optimization.evaluators   import (
     StandardEvaluator
 )
 
-from optimization.spaces       import define_manifold_projector_space, define_tabular_space
+from optimization.spaces       import (
+    define_tabular_space
+)
 
 from testbench.utils.data      import (
     BASE, 
@@ -76,6 +78,7 @@ strategy = ComputeStrategy.from_env()
 
 VIIRS_KEY = "Manifold/VIIRS" 
 SAIPE_KEY = "Manifold/SAIPE"
+USPS_KEY  = "Manifold/USPS"
 
 def _resolve_dataset(spec: str): 
     if spec in BASE: 
@@ -346,9 +349,34 @@ def test_viirs_manifold(
         config_path=config_path,
     )
 
+def test_usps_manifold(
+    _buf,
+    *,
+    train: str, 
+    test: str, 
+    out: str, 
+    model_key: str = USPS_KEY, 
+    tile_shape: tuple[int, int, int] = (1, 256, 256), 
+    sample_frac: float | None = None, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH,
+    **_
+):
+    return _spatial_fit_extract(
+        train_root=train,
+        test_root=test,
+        out_path=out,
+        model_key=model_key,
+        tile_shape=tile_shape,
+        sample_frac=sample_frac,
+        random_state=random_state,
+        config_path=config_path
+    )
+
 
 TESTS = {
-    "fit_eval": test_fit_eval,
+    "fit-eval": test_fit_eval,
+    "usps-manifold": test_usps_manifold,
     "saipe-manifold": test_saipe_manifold,
     "viirs-manifold": test_viirs_manifold
 }

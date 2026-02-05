@@ -1429,6 +1429,10 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         transformer_dropout: float = 0.1, 
         transformer_attn_dropout: float = 0.1, 
         
+        reduce_dim: int = 256, 
+        reduce_depth: int = 1, 
+        reduce_dropout: float = 0.0, 
+
         epochs: int = 2000, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
@@ -1463,6 +1467,10 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.transformer_layers       = transformer_layers
         self.transformer_dropout      = transformer_dropout
         self.transformer_attn_dropout = transformer_attn_dropout
+
+        self.reduce_dim               = reduce_dim 
+        self.reduce_depth             = reduce_depth
+        self.reduce_dropout           = reduce_dropout
 
         self.epochs                   = epochs
         self.lr                       = lr
@@ -1640,7 +1648,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
                 _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
 
                 corn = corn.mean() 
-                rps  = rps.mean() 
+                rps  = (rps.mean() / self.alpha_rps)  
 
                 val_corn += corn.item() * yb.size(0) 
                 val_rps  += rps.item() * yb.size(0)
@@ -1704,6 +1712,9 @@ class TFTabular(BaseEstimator, ClassifierMixin):
             n_classes=self.n_classes_,
             dropout=self.dropout,
             supcon_dim=self.supcon_dim,
+            reduce_dim=self.reduce_dim,
+            reduce_depth=self.reduce_depth,
+            reduce_dropout=self.reduce_dropout,
             use_logit_scaler=True
         )
 

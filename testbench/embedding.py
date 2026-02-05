@@ -48,7 +48,6 @@ from optimization.evaluators   import (
 
 from optimization.spaces       import (
     define_tabular_space,
-    define_manifold_projector_space,
     define_spatial_space,
     define_hgnn_space,
     define_usps_space

@@ -250,7 +250,7 @@ models:
     max_delta_step: 6
     gamma: 0.37750873402513435
   SAIPE_MANIFOLD/Logistic:
-    C: 0.9275965648123793
+    C: 96.98581118991103
     class_weight: balanced
   SAIPE_2023/Logistic:
     C: 1.0755558201149193
@@ -279,8 +279,8 @@ models:
     gamma: 0.0006573220471004352
     class_weight: null
   VIIRS_MANIFOLD/Logistic:
-    C: 0.008657542391191366
-    class_weight: null
+    C: 0.003925294789889173
+    class_weight: balanced
   Manifold/VIIRS:
     patch_size: 32
     embed_dim: 128
@@ -297,27 +297,30 @@ models:
     supcon_dim: 128
     lr: 3.965761586675901e-05
     weight_decay: 8.781769994076174e-05
-    batch_size: 1536
+    batch_size: 512
   Manifold/SAIPE:
-    hidden_dim: 896
-    depth: 15
-    dropout: 0.0804847503746647
-    mix_alpha: 0.23634848577084588
-    mix_mult: 8
-    beta_supcon: 0.12835422759569226
-    alpha_rps: 1.0464998501206144
-    supcon_temperature: 0.08912135687335326
+    hidden_dim: 832
+    depth: 16
+    dropout: 0.21132432057705983
+    mix_alpha: 0.11591946476565393
+    mix_mult: 16
+    beta_supcon: 0.33057181909707783
+    alpha_rps: 4.1829088553098
+    supcon_temperature: 0.16544571772083352
     supcon_dim: 128
     transformer_dim: 64
-    transformer_tokens: 4
+    transformer_tokens: 8
     transformer_heads: 8
     transformer_layers: 3
-    transformer_dropout: 0.15345839192941846
-    transformer_attn_dropout: 0.01159088757867487
-    lr: 0.0005581834370234934
-    weight_decay: 9.565741316864593e-06
+    transformer_dropout: 0.03723860117606723
+    transformer_attn_dropout: 0.18887447799678672
+    reduce_depth: 3
+    reduce_dropout: 0.09809176172351342
+    lr: 0.00016881639737451154
+    weight_decay: 5.79521356649678e-06
+    batch_size: 256
   Manifold/USPS:
-    patch_size: 64 
+    patch_size: 64
     embed_dim: 128
     gnn_dim: 256
     gnn_layers: 3
@@ -335,3 +338,6 @@ models:
     weight_decay: 2.71723e-05
     threshold_scale: 0.9865243091425225
     batch_size: 1024
+  USPS_MANIFOLD/Logistic:
+    C: 0.003382286306527411
+    class_weight: balanced

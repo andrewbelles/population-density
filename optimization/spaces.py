@@ -194,7 +194,7 @@ def define_tabular_space(trial: optuna.Trial):
         "dropout": trial.suggest_float("dropout", 0.0, 0.3), 
 
         "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.6),
-        "mix_mult": trial.suggest_categorical("mix_mult", [4, 8]), 
+        "mix_mult": trial.suggest_categorical("mix_mult", [16]), 
 
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5), 
         "alpha_rps": trial.suggest_float("alpha_rps", 1.0, 10.0, log=True),
@@ -208,72 +208,18 @@ def define_tabular_space(trial: optuna.Trial):
         "transformer_dropout": trial.suggest_float("transformer_dropout", 0.0, 0.2),
         "transformer_attn_dropout": trial.suggest_float("transformer_attn_dropout", 0.0, 0.2),
 
+        "reduce_depth": trial.suggest_int("reduce_depth", 1, 4), 
+        "reduce_dropout": trial.suggest_float("reduce_dropout", 0.0, 0.2), 
+
         "lr": trial.suggest_float("lr", 1e-4, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
+        "reduce_dim": 256, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4, 
         "early_stopping_rounds": 30, 
-        "batch_size": 1024,
+        "batch_size": 256,
         "epochs": 1200, 
         "max_mix": None, 
         "anchor_power": 1.0 
-
-    }
-
-def define_projector_space(trial): 
-    return {
-        "mode": "single",     
-        "dropout": trial.suggest_float("dropout", 0.0, 0.2),
-        "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
-        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
-        "eval_fraction": trial.suggest_categorical("eval_fraction", [0.15]),
-        "batch_size": trial.suggest_categorical("batch_size", [128, 256]),
-        "epochs": trial.suggest_categorical("epochs", [300]),
-        "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [15]),
-        "out_dim": trial.suggest_categorical("out_dim", [5]),
-    }
-
-def define_manifold_projector_space(trial):
-
-    width = trial.suggest_int("base_width", 128, 1024, step=64)
-
-    return {
-        "mode": "manifold",     
-        "use_residual": True, 
-
-        "hidden_dims": (width,),
-        
-        "dropout": trial.suggest_float("dropout", 0.0, 0.3),
-        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
-
-        "lr": trial.suggest_float("lr", 1e-4, 5e-3, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", [128, 256, 512]),
-        "epochs": trial.suggest_categorical("epochs", [500]),
-
-        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5),
-        "alpha_rps": trial.suggest_float("alpha_rps", 1.0, 10.0, log=True),
-        "temperature": trial.suggest_float("temperature", 0.05, 0.2),
-
-        "eval_fraction": trial.suggest_categorical("eval_fraction", [0.2]),
-        "early_stopping_rounds": trial.suggest_categorical("early_stopping_rounds", [20]),
-        "out_dim": trial.suggest_int("out_dim", 8, 32, step=4),
-    }
-
-# ---------------------------------------------------------
-# XGBoost Ordinal Space 
-# (same params as xgb but tuned for regularization) 
-# ---------------------------------------------------------
-
-def define_xgb_ordinal_space(trial): 
-    return {
-        "n_estimators": trial.suggest_int("n_estimators", 150, 900),
-        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 1e-1, log=True),
-        "max_depth": trial.suggest_int("max_depth", 3, 8),
-        "subsample": trial.suggest_float("subsample", 0.6, 0.95),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 1e1, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 1e1, log=True),
-        "gamma": trial.suggest_float("gamma", 1e-3, 5.0, log=True)
     }
