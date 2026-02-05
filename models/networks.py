@@ -31,7 +31,8 @@ from torch_scatter import scatter_add, scatter_softmax
 from models.graph.construction import (
     HypergraphBuilder,
     LOGRADIANCE_GATE_LOW,
-    LOGRADIANCE_GATE_HIGH
+    LOGRADIANCE_GATE_HIGH,
+    MultichannelHypergraphBuilder
 )
 
 from utils.loss_funcs import LogitScaler
@@ -272,17 +273,19 @@ class LightweightBackbone(nn.Module):
 
     def __init__(
         self, 
+        in_channels=1,
         embed_dim=64, 
         patch_size=32,
-        stat="p95",
-        patch_quantile=0.95
+        stat="viirs",
+        patch_quantile=0.95,
+        anchor_stats: list[float] | None = None 
     ): 
         super().__init__()
         
         self.patch_size = patch_size 
         self.embed_dim  = embed_dim
 
-        self.grayscale  = nn.Conv2d(1, 3, kernel_size=1, bias=False)
+        self.grayscale  = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
 
         with torch.no_grad(): 
             self.grayscale.weight.fill_(1.0 / 3.0)
@@ -292,7 +295,7 @@ class LightweightBackbone(nn.Module):
 
         orig_conv = encoder[0][0]
         new_conv  = nn.Conv2d(
-            in_channels=1,
+            in_channels=in_channels,
             out_channels=orig_conv.out_channels,
             kernel_size=orig_conv.kernel_size,
             stride=orig_conv.stride, 
@@ -316,6 +319,14 @@ class LightweightBackbone(nn.Module):
         self.stat           = stat 
         self.patch_quantile = patch_quantile
 
+        if anchor_stats is not None: 
+            mean, std = (torch.as_tensor(x, dtype=torch.float32) for x in anchor_stats) 
+        else: 
+            mean, std = (torch.empty(0), torch.empty(0)) 
+
+        self.register_buffer("patch_mean", mean)
+        self.register_buffer("patch_std", std)
+
     def forward(self, tiles): 
         patches = self.unfold(tiles)
         score   = self.patch_stat(patches, stat=self.stat, q=self.patch_quantile)
@@ -324,19 +335,34 @@ class LightweightBackbone(nn.Module):
         feats  = self.encoder(x)
         embs   = self.projector(feats)
 
-        score  = score.unsqueeze(1)
         out    = torch.cat([embs, score], dim=1)
         return out 
 
-    @staticmethod 
-    def patch_stat(patches: torch.Tensor, *, stat: str = "p95", q: float = 0.95): 
-        flat = patches.flatten(start_dim=1)
-        if stat == "p95": 
-            return torch.quantile(flat, q, dim=1)
-        if stat == "max": 
-            return flat.max(dim=1).values
+    def patch_stat(self, patches: torch.Tensor, *, stat: str = "viirs", q: float = 0.95): 
+
+        N, C, _, _ = patches.shape 
+        flat       = patches.view(N, C, -1)
+
+        if stat == "viirs": 
+            feats = torch.quantile(flat, q, dim=2) 
+        elif stat == "usps": 
+            max0  = flat[:, :1, :].max(dim=2).values 
+            med12 = flat[:, 1:, :].median(dim=2).values
+            feats = torch.cat([max0, med12], dim=1)
+        elif stat == "p95": 
+            feats = torch.quantile(flat, q, dim=1)
+        elif stat == "max": 
+            feats = flat.max(dim=1).values
         else:
             raise ValueError(f"unknown patch stat: {stat}")
+
+        # z-score using precomputed anchor_stats
+        if self.patch_mean.numel() > 0: 
+            mean = self.patch_mean.to(feats.device)
+            std  = self.patch_std.to(feats.device).clamp_min(1e-6)
+            feats = (feats - mean) / std 
+
+        return feats 
 
     @staticmethod 
     def p95_patch(patches): 
@@ -541,6 +567,7 @@ class HypergraphBackbone(nn.Module):
 
     def __init__(
         self, 
+        in_channels=1, 
         tile_size=256,
         patch_size=32,
         embed_dim=64,
@@ -553,17 +580,41 @@ class HypergraphBackbone(nn.Module):
         patch_stat="p95",
         patch_quantile=0.95,
         thresh_low=LOGRADIANCE_GATE_LOW,
-        thresh_high=LOGRADIANCE_GATE_HIGH
+        thresh_high=LOGRADIANCE_GATE_HIGH,             # ignored for > 1 channels 
+        node_anchors: list[list[float]] | None = None, # 1 channel -> None, 1 > must pass 
+        anchor_stats: list[float] | None = None        # [mean, std] used to z-score anchor values 
     ): 
         super().__init__()
-        self.encoder = LightweightBackbone(embed_dim=embed_dim, patch_size=patch_size)
-
-        self.builder = HypergraphBuilder(
-            tile_size=tile_size,
+        self.encoder = LightweightBackbone(
+            in_channels=in_channels,
+            embed_dim=embed_dim, 
             patch_size=patch_size,
-            thresh_low=thresh_low,
-            thresh_high=thresh_high
+            stat=patch_stat,
+            patch_quantile=patch_quantile, 
+            anchor_stats=anchor_stats
         )
+
+        if node_anchors is not None: 
+            anchors = torch.tensor(node_anchors, dtype=torch.float32)
+            if anchors.shape[0] != 3: 
+                raise ValueError("Must provide exactly three anchors per channel")
+            if anchors.shape[1] != in_channels: 
+                raise ValueError(f"Anchors dim {anchors.shape[1]} != in_channels {in_channels}")
+
+            self.builder = MultichannelHypergraphBuilder(
+                anchors=anchors,
+                tile_size=tile_size,
+                patch_size=patch_size
+            )
+        else: 
+            self.builder = HypergraphBuilder(
+                tile_size=tile_size,
+                patch_size=patch_size,
+                thresh_low=thresh_low,
+                thresh_high=thresh_high
+            )
+
+        readout_dim = embed_dim + in_channels # token per channel 
 
         self.gnn     = HyperGATStack(
             in_dim=embed_dim + 1, 
@@ -583,7 +634,7 @@ class HypergraphBackbone(nn.Module):
         # position embeddings 
         self.num_patches  = (tile_size // patch_size)**2 
         self.pos_embed    = nn.Parameter(torch.randn(1, self.num_patches, embed_dim))
-        self.global_token = nn.Parameter(torch.randn(1, 1, embed_dim + 1)) # +1 for p95
+        self.global_token = nn.Parameter(torch.randn(1, 1, readout_dim)) 
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.global_token, std=0.02)
 
@@ -616,8 +667,9 @@ class HypergraphBackbone(nn.Module):
 
         feats = self.encoder.encoder(patches)
         embs  = self.encoder.projector(feats).view(B, K, -1)
+
         score = self.encoder.patch_stat(patches, stat=self.patch_stat, q=self.patch_quantile)
-        score = score.view(B, K, 1)
+        score = score.view(B, K, -1)
 
         if idx is None: 
             pos = self.pos_embed
@@ -633,7 +685,11 @@ class HypergraphBackbone(nn.Module):
 
         all_feats = torch.cat([patch_feats, readout_tokens], dim=0)
 
-        node_type, _, edge_type, _, H = self.builder.build(score.view(-1), batch_size=B, idx=idx)
+        node_type, _, edge_type, _, H = self.builder.build(
+            score.view(-1, score.shape[-1]), 
+            batch_size=B, 
+            idx=idx
+        )
 
         node_out = self.gnn(all_feats, node_type, H, edge_type)
 

@@ -6,6 +6,7 @@
 # 
 # 
 
+from numpy.typing import NDArray
 import argparse, io, torch, gc
 
 import numpy as np
@@ -65,7 +66,8 @@ from testbench.utils.config    import (
     make_spatial_gat,
     normalize_spatial_params,
     make_residual_tabular,
-    with_spatial_channels
+    with_spatial_channels,
+    load_node_anchors
 )
 
 from testbench.utils.metrics   import (
@@ -106,6 +108,9 @@ VIIRS_OUT             = project_path("data", "datasets", "viirs_pooled.mat")
 VIIRS_OUT_WITH_LOGITS = project_path("data", "datasets", "viirs_pooled_with_logits.mat")
 NLCD_OUT              = project_path("data", "datasets", "nlcd_pooled.mat")
 
+VIIRS_ANCHORS = project_path("data", "anchors", "viirs.npy")
+USPS_ANCHORS  = project_path("data", "anchors", "usps.npy")
+
 # ---------------------------------------------------------
 # Test Helpers 
 # ---------------------------------------------------------
@@ -118,6 +123,8 @@ def _spatial_opt(
     root_dir: str, 
     model_key: str, 
     tile_shape: tuple[int, int, int] = (1, 256, 256),
+    node_anchors: list[list[float]] | None = None, 
+    anchor_stats: NDArray | None = None,  
     param_space=None, 
     factory_overrides=None, 
     max_bag_size: int = 64, 
@@ -145,9 +152,13 @@ def _spatial_opt(
         random_state=random_state
     )
 
+    overrides = dict(factory_overrides or {})
+    if node_anchors is not None: 
+        overrides["node_anchors"] = node_anchors
+
     factory = make_spatial_gat(
         compute_strategy=strategy,
-        **(factory_overrides or {})
+        **overrides 
     )
 
     evaluator = SpatialEvaluator(
@@ -323,22 +334,27 @@ def test_viirs_opt(
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
     canvas_hw: tuple[int, int] = (512, 512), 
-    tile_shape: tuple[int, int] = (512, 512), 
-    bag_tiles: bool = False, 
+    tile_shape: tuple[int, int, int] = (2, 256, 256), 
+    viirs_anchors: str = VIIRS_ANCHORS,
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
 ):
+
+    node_anchors, anchor_stats = load_node_anchors(viirs_anchors)
+
     return _spatial_opt(
         root_dir=data_path,
         model_key=model_key,
         canvas_hw=canvas_hw,
         tile_shape=tile_shape, 
-        bag_tiles=bag_tiles,
         trials=trials,
         folds=folds,
+        param_space=define_hgnn_space,
+        node_anchors=node_anchors,
+        anchor_stats=anchor_stats,
         random_state=random_state,
         config_path=config_path
     )
@@ -369,30 +385,29 @@ def test_usps_opt(
     data_path: str = USPS_ROOT,
     model_key: str = USPS_KEY, 
     canvas_hw: tuple[int, int] = (512, 512), 
-    tile_shape: tuple[int, int] = (256, 256), 
-    bag_tiles: bool = False,
+    tile_shape: tuple[int, int, int] = (3, 256, 256), 
+    usps_anchors: str = USPS_ANCHORS,  
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
     **_ 
 ): 
+    node_anchors, anchor_stats = load_node_anchors(usps_anchors)
     
     return _spatial_opt(
         root_dir=data_path,
         model_key=model_key,
         canvas_hw=canvas_hw,
         tile_shape=tile_shape, 
-        bag_tiles=bag_tiles,
+        node_anchors=node_anchors,
+        anchor_stats=anchor_stats,
+        factory_overrides={
+            "patch_stat": "usps"
+        },
         trials=trials,
         folds=folds,
         param_space=define_usps_space,
-        factory_overrides={
-            "thresh_low": LOGCAPACITY_GATE_LOW,
-            "thresh_high": LOGCAPACITY_GATE_HIGH,
-            "patch_stat": "max",
-            "patch_quantile": 1.0 
-        },
         random_state=random_state,
         config_path=config_path
     )

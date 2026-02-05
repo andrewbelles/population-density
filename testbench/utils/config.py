@@ -10,8 +10,10 @@ from functools import partial
 
 from pathlib import Path
 
+import numpy as np 
 
 from models.estimators import TFTabular, SpatialGATClassifier
+
 from utils.helpers import load_yaml_config 
 
 from analysis.cross_validation import CVConfig
@@ -145,3 +147,24 @@ def make_residual_tabular(**fixed):
         return TFTabular(**merged)
 
     return _factory
+
+def load_node_anchors(anchor_path: str | None): 
+    if not anchor_path: 
+        return None 
+
+    path = Path(anchor_path)
+    if not path.exists(): 
+        raise FileNotFoundError(f"anchors file not found: {path}")
+
+    anchors = np.load(path)
+    arr     = np.asarray(anchors, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] != 3: 
+        raise ValueError(f"anchors must have shape (3, C), got {arr.shape}")
+
+    stats_path = path.root + "_stats.npy"
+    if not Path(stats_path).exists(): 
+        raise FileNotFoundError(f"anchor stats file not found: {stats_path}")
+
+    stats = np.load(stats_path, allow_pickle=True).item() 
+
+    return arr.tolist(), stats.tolist() 

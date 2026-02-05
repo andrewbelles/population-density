@@ -28,9 +28,9 @@ def load_usps_attrs(path: Path) -> pd.DataFrame:
 
     cols = [
         "GEOID",
-        "ams_res", "ams_bus", "ams_oth",
-        "res_vac", "bus_vac", "oth_vac", 
-        "nostat_res"
+        "ams_res", 
+        "ams_bus",
+        "res_vac", 
     ]
 
     missing = [c for c in cols if c not in df.columns]
@@ -46,11 +46,14 @@ def load_usps_attrs(path: Path) -> pd.DataFrame:
 
 def compute_channels(df: pd.DataFrame) -> pd.DataFrame: 
 
-    df["active_residential"] = (df["ams_res"] - df["res_vac"]).clip(lower=0)
+    total = df["ams_res"] + df["ams_bus"] + df["res_vac"]
 
-    df["housing_capacity"]   = df["active_residential"] + df["nostat_res"]
+    df = df[total > 0].copy() 
+    
+    df["capacity"]   = df["ams_res"] + df["res_vac"] 
+    df["comm_ratio"] = df["ams_bus"] / total 
+    df["vac_rate"]   = df["res_vac"] / total 
 
-    df = df[df["housing_capacity"] > 0].copy() 
     return df 
 
 
@@ -76,7 +79,7 @@ def main():
     usps = compute_channels(usps)
 
     merged = tracts.merge(
-        usps[["GEOID", "housing_capacity"]],
+        usps[["GEOID", "capacity", "comm_ratio", "vac_rate"]],
         on="GEOID",
         how="inner"
     )

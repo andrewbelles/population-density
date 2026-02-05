@@ -1258,6 +1258,10 @@ class SpatialGATClassifier(BaseSpatialEstimator):
     def __init__(
         self,
         *,
+        in_channels: int = 1, 
+        node_anchors: list[list[float]] | None = None, 
+        anchor_stats: list[float] | None = None, 
+
         # backbone 
         tile_size: int = 256, 
         patch_size: int = 32, 
@@ -1267,7 +1271,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
         gnn_heads: int = 1, 
         gap_attn_dim: int = 64, 
         attn_dropout: float = 0.0, 
-        patch_stat: str = "p95", 
+        patch_stat: str = "viirs", 
         patch_quantile: float = 0.95, 
         thresh_low: float = LOGRADIANCE_GATE_LOW, 
         thresh_high: float = LOGRADIANCE_GATE_HIGH,
@@ -1300,7 +1304,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
         compile_model: bool = True 
     ): 
         super().__init__( 
-            in_channels=1,
+            in_channels=in_channels,
             fc_dim=fc_dim,
             dropout=dropout,
             supcon_dim=supcon_dim,
@@ -1324,6 +1328,8 @@ class SpatialGATClassifier(BaseSpatialEstimator):
             compile_model=compile_model,
         )
 
+        self.node_anchors   = node_anchors
+        self.anchor_stats   = anchor_stats
         self.tile_size      = tile_size 
         self.patch_size     = patch_size 
         self.embed_dim      = embed_dim 
@@ -1340,6 +1346,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
     
     def build_backbone(self):
         return HypergraphBackbone(
+            in_channels=self.in_channels,
             tile_size=self.tile_size,
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
@@ -1352,7 +1359,9 @@ class SpatialGATClassifier(BaseSpatialEstimator):
             patch_stat=self.patch_stat,
             patch_quantile=self.patch_quantile,
             thresh_low=self.thresh_low,
-            thresh_high=self.thresh_high
+            thresh_high=self.thresh_high,
+            node_anchors=self.node_anchors,
+            anchor_stats=self.anchor_stats
         )
 
     def build_head(self, in_dim, n_classes):

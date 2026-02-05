@@ -22,6 +22,8 @@ from dataclasses import dataclass
 
 from torch.utils.data import Dataset, get_worker_info
 
+from scipy.ndimage import uniform_filter
+
 from rasterio.warp import (
     transform_geom,
     reproject,
@@ -574,7 +576,7 @@ class ViirsTensorDataset(SpatialTensorDataset):
     @property
     def tile_shape(self) -> tuple[int, int, int]:
         ht, wt = self.tile_hw 
-        return (1, ht, wt)
+        return (2, ht, wt)
 
     @property 
     def dtype(self) -> np.dtype: 
@@ -610,16 +612,26 @@ class ViirsTensorDataset(SpatialTensorDataset):
                     continue 
 
                 data = np.asarray(arr, dtype=np.float32)
+
                 if self.log_scale: 
                     data = np.log1p(np.maximum(data, 0.0))
 
-                data[~valid_mask] = 0.0 
+                # get local standard deviation across data 
+                win_size = 3 
+                mean     = uniform_filter(data, size=win_size, mode="reflect")
+                sq_mean  = uniform_filter(data**2, size=win_size, mode="reflect")
+                var      = sq_mean - mean**2 
+                var      = np.maximum(var, 0.0)
+                texture  = np.sqrt(var) # stdev 
+                tile     = np.stack([data, texture], axis=0)
+
+                tile[:, ~valid_mask] = 0.0 
 
                 if self.force_tight_crop:
-                    data = self.tight_crop(data, valid_mask)
+                    tile = self.tight_crop(tile, valid_mask)
 
                 label      = self.label_map[fips]
-                tiles_iter = (tile[None, ...] for tile in self.iter_tiles(data)) 
+                tiles_iter = (t for t in self.iter_tiles(tile)) 
 
                 yield CountyTileStream(
                     fips=fips,
@@ -678,7 +690,7 @@ class UspsTensorDataset(SpatialTensorDataset):
     @property
     def tile_shape(self) -> tuple[int, int, int]: 
         ht, wt = self.tile_hw 
-        return (1, ht, wt)
+        return (3, ht, wt)
 
     @property 
     def dtype(self) -> np.dtype: 
@@ -697,6 +709,7 @@ class UspsTensorDataset(SpatialTensorDataset):
             raise ValueError("labels_path is required")
 
         count = 0 
+        skipped = 0
         with (rasterio.open(self.reference_path) as ref, 
               rasterio.open(self.nlcd_path) as nlcd, 
               fiona.open(self.usps_vector_path, layer=self.usps_layer) as tracts,
@@ -724,7 +737,7 @@ class UspsTensorDataset(SpatialTensorDataset):
                     continue 
 
                 H, W     = arr.shape 
-                channels = np.zeros((1, H, W), dtype=np.float32) 
+                channels = np.zeros((3, H, W), dtype=np.float32) 
 
                 nlcd_dst = np.zeros((H, W), dtype=nlcd.dtypes[0])
 
@@ -739,7 +752,8 @@ class UspsTensorDataset(SpatialTensorDataset):
                     dst_nodata=nlcd.nodata 
                 )
 
-                nlcd_valid     = nlcd_dst != nlcd.nodata if nlcd.nodata is not None else np.ones_like(nlcd_dst, bool)
+                nlcd_valid     = (nlcd_dst != nlcd.nodata if nlcd.nodata is not None 
+                                  else np.ones_like(nlcd_dst, bool))
                 water_mask     = np.isin(nlcd_dst, self.water_codes) & nlcd_valid 
                 developed_mask = np.isin(nlcd_dst, self.developed_codes) & nlcd_valid 
                 land_mask      = (~water_mask) & nlcd_valid 
@@ -748,10 +762,21 @@ class UspsTensorDataset(SpatialTensorDataset):
                 bbox           = county_shape.bounds 
                 
                 for feat in tracts.filter(bbox=bbox): 
-                    props    = feat.get("properties") or {}
-                    capacity = self._as_float(props, "housing_capacity") 
+
+                    if skipped > 0 and skipped % 100 == 0: 
+                        print(f"[usps] skipped {skipped} samples...")
+
+                    props      = feat.get("properties") or {}
+                    capacity   = self._as_float(props, "capacity")
+                    comm_ratio = self._as_float(props, "comm_ratio")
+                    vac_rate   = self._as_float(props, "vac_rate")
 
                     if capacity is None or capacity <= 0: 
+                        skipped += 1
+                        continue 
+
+                    if comm_ratio is None or vac_rate is None: 
+                        skipped += 1
                         continue 
 
                     tgeom = feat.get("geometry")
@@ -788,7 +813,10 @@ class UspsTensorDataset(SpatialTensorDataset):
                     if target.any(): 
                         density   = capacity / float(target.sum())
                         pixel_val = np.log1p(density) 
+
                         channels[0, target] += pixel_val 
+                        channels[1, target] += comm_ratio 
+                        channels[2, target] += vac_rate 
 
                 mask = (valid_mask & nlcd_valid).astype(np.uint8)
                 if not np.any(mask):

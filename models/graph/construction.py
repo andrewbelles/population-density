@@ -375,7 +375,7 @@ class HypergraphBuilder:
 
         self._spatial_cache = {}
 
-    def build(self, p95, batch_size, idx=None): 
+    def build(self, stats, batch_size, idx=None): 
         '''
         Build hypergraph per patch per tile. 
 
@@ -387,7 +387,7 @@ class HypergraphBuilder:
         - H (SparseTensor)
         '''
 
-        device = p95.device 
+        device = stats.device 
         B = batch_size
 
         if idx is None: 
@@ -396,11 +396,18 @@ class HypergraphBuilder:
         B, K = idx.shape 
         N = B * K 
 
-        assert p95.numel() == N, "p95 size mismatch"
+        if stats.ndim == 1: 
+            if stats.numel() != N: 
+                raise ValueError("stats size mismatch")
+        elif stats.ndim == 2: 
+            if stats.shape[0] != N: 
+                raise ValueError("stats size mismatch") 
+        else: 
+            raise ValueError(f"stats must be 1d/2d, got {stats.shape}")
 
-        patch_types = self.node_types(p95)
+        patch_types = self.node_types(stats)
 
-        neighbor, _, base_nodes, base_hedges, counts = self.spatial_template(device)
+        neighbor, _, _, _, _ = self.spatial_template(device)
 
         inv = torch.full((B, self.L), -1, device=device, dtype=torch.long)
         inv.scatter_(1, idx, torch.arange(K, device=device).expand(B, K))
@@ -490,13 +497,13 @@ class HypergraphBuilder:
 
         return all_node_types, incidence_index, hyperedge_type, hyperedge_batch, H
 
-    def node_types(self, p95): 
+    def node_types(self, x): 
         '''
         Separate node types on defined thresholds 
         '''
-        t = torch.zeros_like(p95, dtype=torch.long)
-        t = torch.where(p95 > self.thresh_low, 1, t)
-        t = torch.where(p95 > self.thresh_high, 2, t) 
+        t = torch.zeros_like(x, dtype=torch.long)
+        t = torch.where(x > self.thresh_low, 1, t)
+        t = torch.where(x > self.thresh_high, 2, t) 
         return t 
 
     def spatial_template(self, device): 
@@ -518,3 +525,28 @@ class HypergraphBuilder:
 
         self._spatial_cache[device] = (neighbor, mask, base_nodes, base_hedges, counts)
         return self._spatial_cache[device] 
+
+
+# ---------------------------------------------------------
+# Multi-Channel Hypergraph Builder 
+# ---------------------------------------------------------
+
+class MultichannelHypergraphBuilder(HypergraphBuilder): 
+
+    def __init__(
+        self, 
+        anchors: torch.Tensor, # anchor refers to prototypical node of each type across 3 channels  
+        tile_size=256, 
+        patch_size=32 
+    ): 
+        super().__init__(
+            tile_size=tile_size, 
+            patch_size=patch_size, 
+        )
+
+        self.register_buffer("anchors", anchors) # (3, C), 3 node anchors per channel
+
+    def node_types(self, x):
+
+        dists = torch.cdist(x, self.anchors, p=2.0) # L2 distance 
+        return torch.argmin(dists, dim=1)           # (N,) \in {0, 1, 2}

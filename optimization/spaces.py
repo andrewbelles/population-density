@@ -177,9 +177,7 @@ def define_usps_space(trial: optuna.Trial):
     params = define_hgnn_space(trial)
     params.pop("threshold_scale", None)
 
-    params["thresh_low"]     = LOGCAPACITY_GATE_LOW 
-    params["thresh_high"]    = LOGCAPACITY_GATE_HIGH 
-    params["patch_stat"]     = "max"
+    params["patch_stat"]     = "usps"
     params["patch_quantile"] = 1.0
     return params 
 
