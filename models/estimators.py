@@ -1258,7 +1258,7 @@ class SpatialGATClassifier(BaseSpatialEstimator):
     def __init__(
         self,
         *,
-        in_channels: int = 1, 
+        in_channels, 
         node_anchors: list[list[float]] | None = None, 
         anchor_stats: list[float] | None = None, 
 

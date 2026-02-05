@@ -158,6 +158,7 @@ def _spatial_opt(
 
     factory = make_spatial_gat(
         compute_strategy=strategy,
+        in_channels=spatial["in_channels"],
         **overrides 
     )
 
@@ -441,7 +442,6 @@ def main():
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--folds", type=int, default=2)
     parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
-    parser.add_argument("--tile-shape", nargs=3, type=int, default=(1, 256, 256))
     parser.add_argument("--bag-tiles", action="store_true")
     parser.add_argument("--random-state", default=0)
     parser.add_argument("--embedding-paths", default=None)
@@ -464,7 +464,6 @@ def main():
         random_state=args.random_state,
         ablation_groups=ablation_groups,
         canvas_hw=tuple(args.canvas_hw),
-        tile_shape=tuple(args.tile_shape),
         bag_tiles=bool(args.bag_tiles)
     )
 

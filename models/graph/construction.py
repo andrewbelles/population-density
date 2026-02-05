@@ -543,10 +543,9 @@ class MultichannelHypergraphBuilder(HypergraphBuilder):
             tile_size=tile_size, 
             patch_size=patch_size, 
         )
-
-        self.register_buffer("anchors", anchors) # (3, C), 3 node anchors per channel
+        self.anchors = anchors 
 
     def node_types(self, x):
-
-        dists = torch.cdist(x, self.anchors, p=2.0) # L2 distance 
+        anchors = self.anchors.to(x.device)
+        dists = torch.cdist(x, anchors, p=2.0) # L2 distance 
         return torch.argmin(dists, dim=1)           # (N,) \in {0, 1, 2}

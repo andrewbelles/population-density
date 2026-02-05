@@ -94,7 +94,8 @@ def spatial_gat_factory(
     merged = dict(fixed)
     merged.update(params)
 
-    merged.pop("in_channels", None)
+    if in_channels is not None: 
+        merged.setdefault("in_channels", in_channels)
 
     scale = merged.pop("threshold_scale", 1.0)
     merged.setdefault("thresh_low", LOGRADIANCE_GATE_LOW * scale)
@@ -161,10 +162,11 @@ def load_node_anchors(anchor_path: str | None):
     if arr.ndim != 2 or arr.shape[0] != 3: 
         raise ValueError(f"anchors must have shape (3, C), got {arr.shape}")
 
-    stats_path = path.root + "_stats.npy"
+    stats_path = path.with_suffix("")
+    stats_path = stats_path.with_name(stats_path.name + "_stats.npy")
     if not Path(stats_path).exists(): 
         raise FileNotFoundError(f"anchor stats file not found: {stats_path}")
 
-    stats = np.load(stats_path, allow_pickle=True).item() 
+    stats = np.asarray(np.load(stats_path), dtype=np.float32) 
 
     return arr.tolist(), stats.tolist() 

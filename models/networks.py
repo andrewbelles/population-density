@@ -644,7 +644,8 @@ class HypergraphBackbone(nn.Module):
 
         patches = self.encoder.unfold(tiles)
         L = patches.shape[0] // B 
-        patches = patches.view(B, L, 1, P, P)
+        C = patches.shape[1]
+        patches = patches.view(B, L, C, P, P)
 
         if self.training and self.max_bag_frac < 1.0: 
             K = max(1, int(L * self.max_bag_frac))
@@ -657,13 +658,13 @@ class HypergraphBackbone(nn.Module):
 
         if idx is not None: 
             patches = patches.gather(
-                1, idx[:, :, None, None, None].expand(-1, -1, 1, P, P)
+                C, idx[:, :, None, None, None].expand(-1, -1, C, P, P)
             )
             K = patches.shape[1]
-            patches = patches.view(B * K, 1, P, P)
+            patches = patches.view(B * K, C, P, P)
         else: 
             K = L  
-            patches = patches.view(B * L, 1, P, P)
+            patches = patches.view(B * L, C, P, P)
 
         feats = self.encoder.encoder(patches)
         embs  = self.encoder.projector(feats).view(B, K, -1)
