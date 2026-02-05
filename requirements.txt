@@ -32,3 +32,5 @@ xgboost
 torch 
 torchvision
 torch-geometric
+torch-scatter
+torch-sparse

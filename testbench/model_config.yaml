@@ -326,17 +326,15 @@ models:
     gnn_layers: 3
     gnn_heads: 8
     fc_dim: 128
-    dropout: 0.15586
-    attn_dropout: 0.101513
-    max_bag_frac: 0.70975
-    alpha_rps: 1.9535
-    beta_supcon: 0.658689
-    supcon_temperature: 0.26224
-    ens: 0.999
+    dropout: 0.1918990802252705
+    attn_dropout: 0.20195034157334565
+    max_bag_frac: 0.8354489832450539
+    alpha_rps: 1.5771319730538558
+    beta_supcon: 0.36716220808177685
+    supcon_temperature: 0.22198975849933741
     supcon_dim: 128
-    lr: 4.3965e-05
-    weight_decay: 2.71723e-05
-    threshold_scale: 0.9865243091425225
+    lr: 2.060296433578417e-05
+    weight_decay: 3.4614284737793472e-06
     batch_size: 1024
   USPS_MANIFOLD/Logistic:
     C: 0.003382286306527411
