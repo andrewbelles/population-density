@@ -320,7 +320,8 @@ class LightweightBackbone(nn.Module):
         self.patch_quantile = patch_quantile
 
         if anchor_stats is not None: 
-            mean, std = (torch.as_tensor(x, dtype=torch.float32) for x in anchor_stats) 
+            mean = torch.as_tensor(anchor_stats[0], dtype=torch.float32) 
+            std  = torch.as_tensor(anchor_stats[1], dtype=torch.float32) 
         else: 
             mean, std = (torch.empty(0), torch.empty(0)) 
 
@@ -617,7 +618,7 @@ class HypergraphBackbone(nn.Module):
         readout_dim = embed_dim + in_channels # token per channel 
 
         self.gnn     = HyperGATStack(
-            in_dim=embed_dim + 1, 
+            in_dim=readout_dim, 
             hidden_dim=gnn_dim, 
             n_layers=gnn_layers,
             n_heads=gnn_heads,
@@ -658,7 +659,7 @@ class HypergraphBackbone(nn.Module):
 
         if idx is not None: 
             patches = patches.gather(
-                C, idx[:, :, None, None, None].expand(-1, -1, C, P, P)
+                1, idx[:, :, None, None, None].expand(-1, -1, C, P, P)
             )
             K = patches.shape[1]
             patches = patches.view(B * K, C, P, P)

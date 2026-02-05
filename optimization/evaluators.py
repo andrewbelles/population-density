@@ -506,10 +506,6 @@ def _spatial_eval_fold(
     del model 
     _cleanup_cuda()
 
-    base = getattr(dataset, "dataset", dataset) 
-    if hasattr(base, "close"): 
-        base.close() 
-
     return float(rps)
 
 # ---------------------------------------------------------
@@ -616,30 +612,35 @@ class SpatialEvaluator(OptunaEvaluator):
         splits, groups = _iter_spatial_splits(
             self.data, self.dataset, self.labels, self.task, self.config)
 
-        with DevicePool.get_instance().claim() as device_id: 
-            thread_strategy = _resolve_compute_strategy(self.compute_strategy, device_id) 
+        try: 
+            with DevicePool.get_instance().claim() as device_id: 
+                thread_strategy = _resolve_compute_strategy(self.compute_strategy, device_id) 
 
-            for fold_idx, (train_idx, test_idx) in enumerate(splits): 
-                loss = _spatial_eval_fold(
-                    dataset=self.dataset,
-                    labels=self.labels,
-                    collate_fn=self.collate_fn,
-                    train_idx=train_idx,
-                    test_idx=test_idx,
-                    params=params,
-                    model_factory=self.factory,
-                    batch_size=self.batch_size,
-                    compute_strategy=thread_strategy,
-                    groups=groups,
-                    trial=trial,
-                    fold_idx=fold_idx
-                )
-                scores.append(loss)
+                for fold_idx, (train_idx, test_idx) in enumerate(splits): 
+                    loss = _spatial_eval_fold(
+                        dataset=self.dataset,
+                        labels=self.labels,
+                        collate_fn=self.collate_fn,
+                        train_idx=train_idx,
+                        test_idx=test_idx,
+                        params=params,
+                        model_factory=self.factory,
+                        batch_size=self.batch_size,
+                        compute_strategy=thread_strategy,
+                        groups=groups,
+                        trial=trial,
+                        fold_idx=fold_idx
+                    )
+                    scores.append(loss)
 
-                if trial is not None: 
-                    trial.report(float(np.mean(scores)), step=fold_idx)
-                    if trial.should_prune():
-                        raise optuna.TrialPruned() 
+                    if trial is not None: 
+                        trial.report(float(np.mean(scores)), step=fold_idx)
+                        if trial.should_prune():
+                            raise optuna.TrialPruned()
+                pass 
+        finally: 
+            if hasattr(self.dataset, "close"): 
+                self.dataset.close() 
 
         return float(np.mean(scores))
 
