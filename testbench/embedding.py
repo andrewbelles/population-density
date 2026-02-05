@@ -169,7 +169,7 @@ def _spatial_opt(
         direction="minimize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
-        mp_enabled=False,#(True if devices else False),
+        mp_enabled=True if devices and len(devices) > 1 else False,
         devices=devices,
         pruner_type=None,
         pruner_warmup_steps=5,
