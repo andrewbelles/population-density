@@ -7,27 +7,21 @@
 # 
 
 from numpy.typing import NDArray
-import argparse, io, torch, gc
+
+import argparse, io
 
 import numpy as np
 
 from pathlib                   import Path  
 
-from torch.utils.data          import Subset
-
 from umap                      import UMAP
 
 from scipy.io                  import savemat 
 
-from functools                 import partial 
-
 from sklearn.preprocessing     import StandardScaler
-
-from sklearn.model_selection   import StratifiedGroupKFold
 
 from sklearn.decomposition     import PCA 
 
-from models.graph.construction import LOGCAPACITY_GATE_HIGH, LOGCAPACITY_GATE_LOW
 from preprocessing.loaders     import load_spatial_mmap_manifest
 
 from testbench.utils.paths     import (
@@ -36,7 +30,6 @@ from testbench.utils.paths     import (
 )
 
 from testbench.utils.data      import (
-    load_spatial_dataset,
     make_dataset_loader,
     make_mmap_loader, 
     load_embedding_mat 
@@ -49,7 +42,6 @@ from optimization.evaluators   import (
 
 from optimization.spaces       import (
     define_tabular_space,
-    define_spatial_space,
     define_hgnn_space,
     define_usps_space
 )
@@ -62,11 +54,8 @@ from optimization.engine       import (
 from testbench.utils.config    import (
     cv_config,
     load_model_params,
-    eval_config,
     make_spatial_gat,
-    normalize_spatial_params,
     make_residual_tabular,
-    with_spatial_channels,
     load_node_anchors
 )
 
@@ -77,11 +66,6 @@ from testbench.utils.metrics   import (
 from testbench.utils.etc       import (
     run_tests_table,
     format_metric 
-)
-
-from models.estimators         import ( 
-    SpatialClassifier, 
-    make_spatial_sfe,
 )
 
 from utils.helpers             import (
@@ -132,7 +116,6 @@ def _spatial_opt(
     trials: int = 50, 
     folds: int = 2, 
     random_state: int = 0, 
-    bag_tiles: bool = False,
     config_path: str = CONFIG_PATH,
     **_
 ): 
@@ -153,8 +136,9 @@ def _spatial_opt(
     )
 
     overrides = dict(factory_overrides or {})
-    if node_anchors is not None: 
+    if node_anchors is not None and anchor_stats is not None: 
         overrides["node_anchors"] = node_anchors
+        overrides["anchor_stats"] = anchor_stats 
 
     factory = make_spatial_gat(
         compute_strategy=strategy,
@@ -276,7 +260,8 @@ def test_reduce_all(
     if embedding_paths is None: 
         embedding_paths = [
             project_path("data", "datasets", "viirs_2023_pooled.mat"),
-            project_path("data", "datasets", "saipe_2023_pooled.mat")
+            project_path("data", "datasets", "saipe_2023_pooled.mat"),
+            project_path("data", "datasets", "usps_2023_pooled.mat")
         ]
 
     if out_dir is None: 
@@ -360,27 +345,6 @@ def test_viirs_opt(
         config_path=config_path
     )
 
-def test_nlcd_opt(
-    *,
-    data_path: str = NLCD_ROOT, 
-    model_key: str = NLCD_KEY,
-    canvas_hw: tuple[int, int] = (512, 512), 
-    trials: int = 50, 
-    folds: int = 2, 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH,
-    **_
-):
-    return _spatial_opt(
-        root_dir=data_path,
-        model_key=model_key,
-        canvas_hw=canvas_hw,
-        trials=trials,
-        folds=folds,
-        random_state=random_state,
-        config_path=config_path
-    )
-
 def test_usps_opt(
     *,
     data_path: str = USPS_ROOT,
@@ -419,7 +383,6 @@ def test_usps_opt(
 
 TESTS = {
     "viirs-opt": test_viirs_opt, 
-    "nlcd-opt": test_nlcd_opt,
     "saipe-opt": test_saipe_opt,
     "usps-opt": test_usps_opt,
     "reduce-all": test_reduce_all,
@@ -442,7 +405,6 @@ def main():
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--folds", type=int, default=2)
     parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
-    parser.add_argument("--bag-tiles", action="store_true")
     parser.add_argument("--random-state", default=0)
     parser.add_argument("--embedding-paths", default=None)
     args = parser.parse_args()
@@ -464,7 +426,6 @@ def main():
         random_state=args.random_state,
         ablation_groups=ablation_groups,
         canvas_hw=tuple(args.canvas_hw),
-        bag_tiles=bool(args.bag_tiles)
     )
 
     print(buf.getvalue().strip())

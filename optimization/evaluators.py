@@ -6,24 +6,40 @@
 # 
 # 
 
-from sklearn.preprocessing import StandardScaler
+
 import gc, optuna, torch 
 
 import numpy as np 
 
-from abc                       import ABC, abstractmethod 
+from abc                       import (
+    ABC, 
+    abstractmethod 
+)
 
 from dataclasses               import replace  
 
-from typing                    import Any, Callable, Dict 
+from sklearn.preprocessing     import StandardScaler
+
+from typing                    import (
+    Any, 
+    Callable, 
+    Dict 
+)
 
 from numpy.typing              import NDArray
 
-from sklearn.metrics           import accuracy_score, cohen_kappa_score  
+from sklearn.metrics           import (
+    accuracy_score, 
+)
 
-from sklearn.model_selection   import StratifiedShuffleSplit, StratifiedGroupKFold 
+from sklearn.model_selection   import (
+    StratifiedShuffleSplit, 
+)
 
-from torch.utils.data          import DataLoader, Subset 
+from torch.utils.data          import (
+    DataLoader, 
+    Subset 
+)
 
 from optimization.engine       import (
     run_optimization, 
@@ -40,8 +56,6 @@ from analysis.cross_validation import (
     ScaledEstimator,
     ranked_probability_score
 )
-
-from models.estimators         import TFTabular 
 
 from models.graph.processing   import CorrectAndSmooth 
 
@@ -433,9 +447,6 @@ def _spatial_eval_fold(
     model_factory: Callable,
     batch_size: int, 
     compute_strategy: ComputeStrategy,
-    groups=None,
-    trial=None, 
-    fold_idx=0 
 ):
     train_ds    = Subset(dataset, train_idx)
     test_ds     = Subset(dataset, test_idx)
@@ -551,8 +562,6 @@ def _spatial_eval_worker(
 
     # Clean up inputs to fold evaluation 
     compute_strategy = _resolve_compute_strategy(compute_strategy, device_id)
-    is_packed        = getattr(dataset, "is_packed", False)
-    groups           = data["sample_groups"] if is_packed else None 
 
     return _spatial_eval_fold(
         dataset=dataset,
@@ -564,8 +573,6 @@ def _spatial_eval_worker(
         model_factory=model_factory,
         batch_size=batch_size,
         compute_strategy=compute_strategy,
-        groups=groups,
-        is_packed=is_packed
     )
 
 class SpatialEvaluator(OptunaEvaluator): 
@@ -609,7 +616,7 @@ class SpatialEvaluator(OptunaEvaluator):
 
         scores = []
 
-        splits, groups = _iter_spatial_splits(
+        splits, _ = _iter_spatial_splits(
             self.data, self.dataset, self.labels, self.task, self.config)
 
         try: 
@@ -627,9 +634,6 @@ class SpatialEvaluator(OptunaEvaluator):
                         model_factory=self.factory,
                         batch_size=self.batch_size,
                         compute_strategy=thread_strategy,
-                        groups=groups,
-                        trial=trial,
-                        fold_idx=fold_idx
                     )
                     scores.append(loss)
 

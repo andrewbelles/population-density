@@ -162,11 +162,16 @@ def define_hgnn_space(trial: optuna.Trial):
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
+        "reduce_depth": trial.suggest_int("reduce_depth", 1, 4), 
+        "reduce_dropout": trial.suggest_float("reduce_dropout", 0.0, 0.2), 
+
         "threshold_scale": trial.suggest_float("threshold_scale", 0.8, 1.2), 
 
         "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
         "ens": 0.999,
-        "epochs": 400, 
+        "soft_epochs": 200, 
+        "hard_epochs": 200, 
+        "patch_stat": "viirs", 
         "early_stopping_rounds": 15, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,

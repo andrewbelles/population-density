@@ -12,7 +12,10 @@ from pathlib import Path
 
 import numpy as np 
 
-from models.estimators import TFTabular, SpatialGATClassifier
+from models.estimators import (
+    TFTabular, 
+    SpatialHyperGAT
+)
 
 from utils.helpers import load_yaml_config 
 
@@ -21,8 +24,6 @@ from analysis.cross_validation import CVConfig
 from models.graph.construction import (
     LOGRADIANCE_GATE_LOW,
     LOGRADIANCE_GATE_HIGH,
-    LOGCAPACITY_GATE_HIGH,
-    LOGCAPACITY_GATE_LOW
 )
 
 from utils.helpers   import bind 
@@ -76,11 +77,11 @@ def cv_config(folds: int, random_state: int) -> CVConfig:
 def normalize_spatial_params(params, *, random_state: int, collate_fn): 
     params.setdefault("random_state", random_state)
     params.setdefault("collate_fn", collate_fn)
-    params.setdefault("epochs", 350)
+    params.setdefault("soft_epochs", 200)
+    params.setdefault("hard_epochs", 200)
     params.setdefault("early_stopping_rounds", 15)
     params.setdefault("eval_fraction", 0.2)
     params.setdefault("min_delta", 1e-4)
-    params.setdefault("target_global_batch", 2048)
     return params 
 
 def spatial_gat_factory(
@@ -102,7 +103,7 @@ def spatial_gat_factory(
     merged.setdefault("thresh_high", LOGRADIANCE_GATE_HIGH * scale)
 
     collate = merged.pop("collate_fn", collate_fn)
-    return SpatialGATClassifier(
+    return SpatialHyperGAT(
         collate_fn=collate,
         compute_strategy=compute_strategy,
         **merged

@@ -16,6 +16,8 @@ import time, copy, time, sys, torch
 
 from abc                     import abstractmethod
 
+from torch.cuda import temperature
+
 from utils.resources         import ComputeStrategy
 
 from numpy.typing            import NDArray
@@ -677,107 +679,133 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         return self.calibrator_.predict_proba(scores_scaled)
 
 # ---------------------------------------------------------
-# Spatial Estimator contract 
+# Hypergraph Attention based Classifier  
 # ---------------------------------------------------------
 
-class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
-
-    '''
-    Contract Spatial based models must fulfill. 
-    '''
+class SpatialHyperGAT(BaseEstimator, ClassifierMixin): 
 
     def __init__(
-        self, 
-        *, 
-        in_channels: int,
-        fc_dim: int, 
-        dropout: float, 
-        supcon_dim: int,
-        epochs: int,
-        lr: float,
-        weight_decay: float,
-        alpha_rps: float, 
-        beta_supcon: float,
-        ens: float = 0.999, 
-        supcon_temperature: float,
-        random_state: int,
-        early_stopping_rounds: int | None = 15,
-        eval_fraction: float = 0.2,
-        min_delta: float, 
-        batch_size: int,
-        target_global_batch: int,
-        shuffle: bool,
-        collate_fn,
-        class_values,
-        compute_strategy,
-        compile_model 
-    ):
-        self.in_channels = in_channels
+        self,
+        *,
+        in_channels, 
+        node_anchors: list[list[float]] | None = None, 
+        anchor_stats: list[float] | None = None, 
 
-        self.fc_dim = fc_dim
-        self.dropout = dropout
-        self.supcon_dim = supcon_dim
+        # backbone 
+        tile_size: int = 256, 
+        patch_size: int = 32, 
+        embed_dim: int = 64, 
+        gnn_dim: int = 128, 
+        gnn_layers: int = 1, 
+        gnn_heads: int = 1, 
+        gap_attn_dim: int = 64, 
+        attn_dropout: float = 0.0, 
+        patch_stat: str = "viirs", 
+        patch_quantile: float = 0.95, 
+        thresh_low: float = LOGRADIANCE_GATE_LOW, 
+        thresh_high: float = LOGRADIANCE_GATE_HIGH,
+        max_bag_frac: float = 1.0, 
 
-        self.epochs = epochs
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.alpha_rps = alpha_rps
-        self.beta_supcon = beta_supcon
-        self.ens = ens 
-        self.supcon_temperature = supcon_temperature
+        # head 
+        fc_dim: int = 128, 
+        dropout: float = 0.2, 
+        supcon_dim: int = 128, 
 
-        self.random_state = random_state
+        # mixer 
+        mix_mult: int = 8, 
+        mix_alpha: float = 1.0, 
+
+        # dimensionality bottleneck 
+        reduce_dim: int | None = 256, 
+        reduce_depth: int = 1, 
+        reduce_dropout: float = 0.0, 
+
+        # training 
+        soft_epochs: int = 200, 
+        hard_epochs: int = 200,
+        lr: float = 1e-3, 
+        weight_decay: float = 0.0, 
+        alpha_rps: float = 0.5, 
+        beta_supcon: float = 0.5, 
+        supcon_temperature: float = 0.07, 
+        ens: float = 0.999,
+        random_state: int = 0, 
+        early_stopping_rounds: int = 15, 
+        eval_fraction: float = 0.15, 
+        min_delta: float = 1e-3, 
+        batch_size: int = 8, 
+        target_global_batch: int = 8, 
+        shuffle: bool = True, 
+        collate_fn=None, 
+
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+        compile_model: bool = True 
+    ): 
+        self.in_channels           = in_channels
+
+        self.fc_dim                = fc_dim
+        self.dropout               = dropout
+        self.supcon_dim            = supcon_dim
+
+        self.soft_epochs           = soft_epochs
+        self.hard_epochs           = hard_epochs
+        self.lr                    = lr
+        self.weight_decay          = weight_decay
+        self.alpha_rps             = alpha_rps
+        self.beta_supcon           = beta_supcon
+        self.ens                   = ens 
+        self.supcon_temperature    = supcon_temperature
+
+        self.mix_mult              = mix_mult
+        self.mix_alpha             = mix_alpha 
+
+        self.reduce_dim            = reduce_dim
+        self.reduce_depth          = reduce_depth
+        self.reduce_dropout        = reduce_dropout
+
+        self.random_state          = random_state
         self.early_stopping_rounds = early_stopping_rounds
-        self.eval_fraction = eval_fraction
-        self.min_delta = min_delta
-        self.batch_size = batch_size
-        self.target_global_batch = target_global_batch
-        self.shuffle = shuffle
-        self.collate_fn = collate_fn
-        self.class_values = class_values
-        self.compute_strategy = compute_strategy
-        self.compile_model = compile_model
+        self.eval_fraction         = eval_fraction
+        self.min_delta             = min_delta
+        self.batch_size            = batch_size
+        self.target_global_batch   = target_global_batch
+        self.shuffle               = shuffle
+        self.collate_fn            = collate_fn
+        self.compute_strategy      = compute_strategy
+        self.compile_model         = compile_model
 
         self.device     = self.resolve_device(compute_strategy.device)
         self.classes_   = None
         self.n_classes_ = None
         self.model_     = nn.Module()
 
-    def eval(self):
-        if hasattr(self.model_, "eval"): 
-            self.model_.eval() 
-        return self 
+        self.node_anchors   = node_anchors
+        self.anchor_stats   = anchor_stats
+        self.tile_size      = tile_size 
+        self.patch_size     = patch_size 
+        self.embed_dim      = embed_dim 
+        self.gap_attn_dim   = gap_attn_dim
+        self.gnn_dim        = gnn_dim 
+        self.thresh_low     = thresh_low 
+        self.thresh_high    = thresh_high
+        self.max_bag_frac   = max_bag_frac
+        self.gnn_layers     = gnn_layers 
+        self.gnn_heads      = gnn_heads 
+        self.attn_dropout   = attn_dropout
+        self.patch_stat     = patch_stat 
+        self.patch_quantile = patch_quantile
 
-    def train(self): 
-        if hasattr(self.model_, "train"): 
-            self.model_.train() 
-        return self 
-
-    def fit(self, X, y=None, val_loader=None, callbacks=None): 
+    def fit(self, X, y=None): 
 
         torch.manual_seed(self.random_state)
-        if self.device.type == "cuda":
-             torch.backends.cudnn.benchmark = True
-             torch.backends.cuda.matmul.allow_tf32 = True
-             torch.backends.cudnn.allow_tf32 = True
 
-        if callbacks is None: 
-            callbacks = []
-        elif callable(callbacks): 
-            callbacks = [callbacks]
-
-        loader = self.ensure_loader(X, shuffle=self.shuffle)
-        effective_batch  = loader.batch_size
-        world_size       = getattr(self, "world_size_", 1)
-        self.accum_steps = self.resolve_accum_steps(effective_batch, world_size) 
-
-        print(f"[data specs] Batch Size={self.batch_size}, "
-              f"Target Batch Size={self.target_global_batch} "
-              f"Accumulation Steps={self.accum_steps}")
+        loader          = self.ensure_loader(X, shuffle=self.shuffle)
+        effective_batch = loader.batch_size 
+        self.resolve_accum_steps(1, effective_batch)
 
         if y is None: 
             label_loader = self.as_eval_loader(X)
-            all_labels   = []
+            all_labels = []
             for batch in label_loader: 
                 labels = batch[1]
                 all_labels.append(np.asarray(labels).reshape(-1))
@@ -785,165 +813,236 @@ class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
         else: 
             y_full = np.asarray(y).reshape(-1)
 
-        if y_full.size == 0: 
-            raise ValueError("empty loader")
+        self.classes_   = np.unique(y_full)
+        self.n_classes_ = len(self.classes_)
 
-        if self.class_values is not None: 
-            classes = np.asarray(self.class_values, dtype=np.int64)
-            if classes.ndim != 1 or classes.size == 0: 
-                raise ValueError("class_values must be non-empty 1D list/array")
-            classes = np.unique(classes)
-            if not np.all(np.isin(y_full, classes)):
-                missing = np.setdiff1d(np.unique(y_full), classes)
-                raise ValueError(f"labels not in class_values: {missing}")
-            self.classes_   = classes 
-            self.n_classes_ = len(classes)
-        else: 
-            self.classes_   = np.unique(y_full)
-            self.n_classes_ = len(self.classes_)
+        y_idx              = np.searchsorted(self.classes_, y_full)
+        class_counts       = np.bincount(y_idx, minlength=self.n_classes_)
+        self.class_weights = compute_ens_weights(class_counts, self.ens)
 
-        y_idx           = np.searchsorted(self.classes_, y_full)
-        class_counts    = np.bincount(y_idx, minlength=self.n_classes_)
-        self.class_counts_ = class_counts
+        self.build_model() 
 
-        if self.n_classes_ < 2: 
-            raise ValueError("ordinal regression requires at least 2 classes")
-
-        if val_loader is None: 
-            loader, val_loader = self.split_loader(loader, y_full)
-
-        self.build_model()
-
-        class_weights = compute_ens_weights(class_counts, self.ens) 
         self.loss_fn_ = HybridOrdinalLoss(
             n_classes=self.n_classes_,
-            class_weights=class_weights, 
-            alpha_rps=self.alpha_rps, 
+            class_weights=self.class_weights,
+            alpha_rps=self.alpha_rps,
             beta_supcon=self.beta_supcon,
-            temperature=self.supcon_temperature
+            temperature=self.supcon_temperature,
+            reduction="none"
         ).to(self.device)
 
-        scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
+        self.mix_loss_ = MixedLoss(self.loss_fn_)
 
-        opt     = torch.optim.AdamW(
-            self.model_.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay
+        loader, val_loader = self.split_loader(loader, y_full)
+
+        best_soft = self.run_phase(
+            name="Manifold-Mixing",
+            train_loader=loader,
+            val_loader=val_loader,
+            epochs=self.soft_epochs,
+            mixing=True 
         )
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt,
-            T_max=self.epochs,
-            eta_min=1e-6
-        )
+        if best_soft is not None: 
+            best_hard = self.run_phase(
+                name="Hard-Labels",
+                train_loader=loader,
+                val_loader=val_loader,
+                epochs=max(1, self.hard_epochs), 
+                mixing=False, 
+                start_state=best_soft,
+                lr_scale=0.25
+            )
+            if best_hard is not None: 
+                self.model_.load_state_dict(best_hard)
 
-        best_state = None 
+        return self 
+        
+
+    def run_phase(
+        self,
+        name, 
+        *,
+        train_loader,
+        val_loader,
+        epochs: int, 
+        mixing: bool,
+        start_state=None,
+        lr_scale: float = 1.0
+    ): 
+
+        print(f"[{name}] starting...")
+
+        phase_lr = lr_scale * self.lr 
+
+        early_stop = None 
+        if start_state is not None: 
+            self.model_.load_state_dict(start_state)
+            if self.early_stopping_rounds: 
+                early_stop = self.early_stopping_rounds * 2 
+        elif self.early_stopping_rounds: 
+            early_stop = self.early_stopping_rounds
+
+        self.opt_ = torch.optim.AdamW(
+            self.model_.parameters(), lr=phase_lr, weight_decay=self.weight_decay
+        )
+        self.scheduler_ = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt_, T_max=epochs)
+
         best_val   = float("inf")
-        patience   = 0 
-        run_es     = self.early_stopping_rounds is not None and val_loader is not None 
-
+        best_state = None 
+        patience   = 0
         start      = time.perf_counter()
-        for ep in range(self.epochs): 
-            base_ds = getattr(loader, "dataset", None)
-            if base_ds is not None and hasattr(base_ds, "set_epoch"):
-                base_ds.set_epoch(ep)
 
-            self.model_.train() 
+        for ep in range(epochs): 
+            _         = self.train_epoch(train_loader, mixing=mixing)
+            val_score, val_corn, val_rps = self.validate(val_loader)
 
-            accum = max(1, int(self.accum_steps))
-            opt.zero_grad()
-
-            step_idx    = -1 
-            total_loss  = 0.0
-            total_count = 0
-
-            total_corn  = 0.0 
-            total_rps   = 0.0 
-            total_sup   = 0.0 
-
-            for step_idx, batch in enumerate(loader): 
-                with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-                    loss, bsz, lc, lrps, ls = self.process_batch(batch)
-                    
-                    total_loss += loss.item() * bsz 
-                    total_corn += lc.item() * bsz  
-                    total_sup  += ls.item() * bsz 
-                    total_rps  += lrps.item() * bsz 
-
-                    total_count += bsz
-                    loss = loss / accum 
-
-                scaler.scale(loss).backward() 
-
-                if (step_idx + 1) % accum == 0: 
-                    scaler.step(opt)
-                    scaler.update()
-                    opt.zero_grad() 
-            
-            if step_idx >= 0 and (step_idx + 1) % accum != 0: 
-                scaler.step(opt)
-                scaler.update()
-                opt.zero_grad() 
-
-            scheduler.step() 
-
-            avg_sup  = total_sup / max(total_count, 1)
-            val_loss = None 
-            corn     = None 
-            rps      = None 
-            if run_es: 
-                if self.early_stopping_rounds is None: 
-                    raise TypeError
-                val_loss, corn, rps = self.eval_loss(val_loader)
-                if val_loss < best_val - self.min_delta: 
-                    best_val   = val_loss 
-                    self.best_val_score_ = best_val  
-                    best_state = copy.deepcopy(self.model_.state_dict())
-                    patience   = 0 
-                else:
-                    patience  += 1
-                    if patience >= self.early_stopping_rounds: 
-                        break 
-
-                if callbacks: 
-                    metrics = {"val_loss": val_loss} 
-                    for cb in callbacks: 
-                        cb(ep, metrics)
-
-            avg_loss = total_loss / max(total_count, 1)
+            if val_score < best_val - self.min_delta: 
+                best_val   = val_score 
+                best_state = copy.deepcopy(self.model_.state_dict())
+                patience   = 0
+            else: 
+                patience  += 1 
+                if early_stop and patience >= early_stop:  
+                    break 
 
             avg_dt   = (time.perf_counter() - start) / (ep + 1)
-            msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg | training_loss={avg_loss:.4f} | " 
-                        f"supcon={avg_sup:.4f}") 
+            msg      = (f"[epoch {ep:3d}] {avg_dt:.2f}s avg") 
 
             if ep % 5 == 0: 
-                if val_loss is not None: 
-                    msg += (f" | val_loss={val_loss:.4f} | val_corn={corn:.4f} | "
-                            f"val_rps={rps:.4f}")
+                if val_score is not None: 
+                    msg += (f" | val_loss={val_score:.4f} | val_corn={val_corn:.4f} | "
+                            f"val_rps={val_rps:.4f}")
                     print(msg, file=sys.stderr, flush=True)
 
-        if best_state is not None: 
-            self.model_.load_state_dict(best_state)
-        return self 
+        return best_state
 
-    def predict(self, batch) -> torch.Tensor: 
-        self.model_.eval() 
-        inputs, labels, batch_indices = self.unpack_batch(batch)
-        with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-            feats        = self.forward_feats(inputs, batch_indices)
-            _, logits, _ = self.forward_logits(feats, with_supcon=False)
-            probs        = self.logits_to_probs(logits)
-            idx          = torch.argmax(probs, dim=1)
-        return torch.as_tensor(self.classes_, device=idx.device)[idx]
+    def validate(self, val_loader): 
+        if val_loader is None: 
+            return None, None, None 
 
-    def predict_proba(self, batch) -> torch.Tensor: 
         self.model_.eval() 
-        inputs, labels, batch_indices = self.unpack_batch(batch)
-        with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
-            feats        = self.forward_feats(inputs, batch_indices)
-            _, logits, _ = self.forward_logits(feats, with_supcon=False)
-            probs        = self.logits_to_probs(logits)
-        return probs 
+        val_rps  = 0.0 
+        val_corn = 0.0 
+        count    = 0 
+
+        with torch.no_grad(): 
+            for batch in val_loader: 
+                _, bsz, corn, rps, _ = self.process_batch(batch, with_mixing=False)
+
+                corn = corn.mean() 
+                rps  = (rps.mean() / self.alpha_rps)  
+
+                val_corn += corn.item() * bsz 
+                val_rps  += rps.item() * bsz 
+                count    += bsz
+
+        val_corn = val_corn / max(count, 1)
+        val_rps  = val_rps / max(count, 1)
+        return val_corn + val_rps, val_corn, val_rps  
+
+    def train_epoch(self, train_loader, *, mixing: bool): 
+        self.model_.train() 
+        total_loss  = 0.0 
+        total_count = 0 
+
+        for batch in train_loader: 
+            loss, _, _, _, bsz = self.process_batch(batch, with_mixing=mixing)
+
+            self.opt_.zero_grad(set_to_none=True)
+            loss.backward()
+            self.opt_.step() 
+
+            total_loss  += loss.item() * bsz 
+            total_count += bsz 
+
+        if self.scheduler_ is not None: 
+            self.scheduler_.step() 
+
+        return total_loss / max(total_count, 1)
+    
+    def build_backbone(self):
+        return HypergraphBackbone(
+            in_channels=self.in_channels,
+            tile_size=self.tile_size,
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            gnn_dim=self.gnn_dim,
+            gnn_layers=self.gnn_layers,
+            gnn_heads=self.gnn_heads,
+            attn_dropout=self.attn_dropout,
+            dropout=self.dropout,
+            max_bag_frac=self.max_bag_frac,
+            patch_stat=self.patch_stat,
+            patch_quantile=self.patch_quantile,
+            thresh_low=self.thresh_low,
+            thresh_high=self.thresh_high,
+            node_anchors=self.node_anchors,
+            anchor_stats=self.anchor_stats
+        )
+
+    def build_head(self, in_dim, n_classes):
+        return MILOrdinalHead(
+            in_dim=in_dim,
+            fc_dim=self.fc_dim,
+            n_classes=n_classes,
+            dropout=self.dropout,
+            supcon_dim=self.supcon_dim,
+            reduce_dim=self.reduce_dim,
+            reduce_depth=self.reduce_depth,
+            reduce_dropout=self.reduce_dropout,
+            use_logit_scaler=True 
+        )
+
+    def build_model(self):
+        self.backbone_ = self.build_backbone()
+        self.head_     = self.build_head(self.backbone_.out_dim, self.n_classes_)
+
+        self.mixer_    = Mixer(
+            class_weights=self.class_weights,
+            alpha=self.mix_alpha, 
+            mix_mult=self.mix_mult, 
+        )
+        
+        # pool across tiles per bag via attention 
+        self.pool_     = GatedAttentionPooling(
+            in_dim=self.backbone_.out_dim,
+            attn_dim=self.gap_attn_dim,
+            attn_dropout=self.attn_dropout
+        )
+
+        self.model_          = nn.Module() 
+        self.model_.backbone = self.backbone_ 
+        self.model_.head     = self.head_
+        self.model_.pool     = self.pool_ 
+
+        self.model_.to(self.device)
+        
+        if self.device.type == "cuda" and self.compile_model:
+            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
+
+    def predict(self, X): 
+        if self.classes_ is None: 
+            raise ValueError("must fit model before predicting")
+
+        probs = self.predict_proba(X)
+        idx   = probs.argmax(axis=1)
+        return self.classes_[idx]
+
+    def predict_proba(self, X): 
+        loader = self.ensure_loader(X, shuffle=False)
+        outs   = []
+
+        self.model_.eval()
+        with torch.no_grad(): 
+            for batch in loader: 
+                inputs, _, batch_indices = self.unpack_batch(batch)
+                feats        = self.forward_feats(inputs, batch_indices)
+                _, logits, _ = self.forward_logits(feats, with_supcon=False)
+                probs        = self.logits_to_probs(logits)
+                outs.append(probs.cpu().numpy())
+        
+        return np.vstack(outs)
 
     def extract(self, X) -> NDArray: 
         loader = self.ensure_loader(X, shuffle=False)
@@ -951,13 +1050,13 @@ class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader: 
-                inputs, labels, batch_indices = self.unpack_batch(batch)
+                inputs, _, batch_indices = self.unpack_batch(batch)
                 feats     = self.forward_feats(inputs, batch_indices)
                 emb, _, _ = self.forward_logits(feats, with_supcon=False)
                 outs.append(emb.cpu().numpy())
         return np.vstack(outs)
 
-    def process_batch(self, batch, *, with_supcon=True): 
+    def process_batch(self, batch, *, with_mixing: bool = True, with_supcon: bool = True): 
         if self.n_classes_ is None or self.classes_ is None: 
             raise TypeError 
 
@@ -972,65 +1071,32 @@ class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
 
         with torch.amp.autocast("cuda", enabled=self.device.type == "cuda"): 
             feats = self.forward_feats(inputs, batch_indices)
-            _, logits, proj = self.forward_logits(feats, with_supcon=with_supcon)
-            loss, loss_corn, loss_rps, loss_sup = self.loss_fn_(logits, proj, yb)
+
+            if with_mixing: 
+                x, y_a, y_b, mix_lam = self.mixer_(feats, yb) 
+            else: 
+                y_a, y_b, mix_lam = None, None, None
+                x = feats 
+
+            _, logits, proj = self.forward_logits(x, with_supcon=with_supcon)
+
+            if with_mixing: 
+                loss, corn, rps, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
+            else: 
+                loss, corn, rps, sup = self.loss_fn_(logits, proj, yb)
+                
+                loss = loss.mean() 
+                corn = corn.mean() 
+                rps  = rps.mean() 
+                sup  = sup.mean() 
 
         bsz = yb.size(0)
-        return loss, bsz, loss_corn, loss_rps, loss_sup 
+        return loss, bsz, corn, rps, sup 
 
-    def augment_inputs(self, inputs):
-        k = np.random.randint(0, 4)
-        x = torch.rot90(inputs, k, dims=[2, 3])
-        if np.random.random() > 0.5: 
-            x = torch.flip(x, dims=[3])
-        return x 
-
-    def unpack_batch(self, batch): 
-        inputs, labels, batch_indices = batch 
-        return inputs, labels, batch_indices   
-
-    def prepare_inputs(self, tiles, batch_indices): 
-        xb   = tiles.to(self.device, non_blocking=True)
-        bidx = batch_indices.to(self.device, non_blocking=True)
-        return xb, bidx
-
-    def forward_feats(self, tiles, batch_indices):
-        xb, bidx = self.prepare_inputs(tiles, batch_indices)
-        return self.model_.backbone(xb, bidx)
-
-    def forward_logits(self, feats, with_supcon: bool): 
-        if not hasattr(self.model_, "head"): 
-            raise RuntimeError("must build and model before calling forward")
-        emb, logits, proj = self.model_.head(feats)
-        return emb, logits, (proj if with_supcon else None)
-
-    def build_model(self): 
-        self.backbone_ = self.build_backbone()
-        self.head_     = self.build_head(self.backbone_.out_dim, self.n_classes_)
-        self.model_    = nn.Module() 
-        self.model_.backbone = self.backbone_ 
-        self.model_.head     = self.head_ 
-        self.model_.to(self.device)
-        if self.device.type == "cuda" and self.compile_model:
-            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
-
-    @abstractmethod 
-    def build_backbone(self):
-        raise NotImplementedError
-
-    @abstractmethod 
-    def build_head(self, in_dim, n_classes): 
-        raise NotImplementedError
-
-    def build_loss(self, class_counts): 
-        if self.n_classes_ is None: 
-            raise ValueError("n_classes not set")
-        class_weight = (class_counts.max() / np.clip(class_counts, 1, None))
-        return HybridOrdinalLoss(self.n_classes_, class_weight)
-
-    # -----------------------------------------------------
-    # Universal Helper Functions 
-    # -----------------------------------------------------
+    def resolve_device(self, device: str | None): 
+        if device is not None: 
+            return torch.device(device)
+        return torch.device(str(device) if torch.cuda.is_available() else "cpu") 
 
     def logits_to_probs(self, logits):
         prob_gt = torch.sigmoid(logits)
@@ -1043,11 +1109,6 @@ class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
         probs = torch.clamp(probs, min=1e-9)
         probs = probs / probs.sum(dim=1, keepdim=True)
         return probs 
-
-    def resolve_device(self, device: str | None): 
-        if device is not None: 
-            return torch.device(device)
-        return torch.device(str(device) if torch.cuda.is_available() else "cpu") 
 
     def make_loader(self, dataset, shuffle: bool):
         pin = self.compute_strategy.device == "cuda"
@@ -1133,97 +1194,6 @@ class BaseSpatialEstimator(BaseEstimator, ClassifierMixin):
             return self.make_loader(ds, shuffle=False)
         return self.make_loader(X, shuffle=False)
 
-    def eval_loss(self, loader): 
-        self.model_.eval() 
-        total_metric = 0.0
-        total_corn   = 0.0 
-        total_rps    = 0.0 
-        count        = 0 
-
-        with torch.no_grad(): 
-            for batch in loader: 
-                _, bsz, lc, lrps, _ = self.process_batch(batch, with_supcon=False)
-                total_corn += lc.item() * bsz
-                total_rps  += (lrps.item() / self.alpha_rps) * bsz
-                count      += bsz 
-
-        total_metric = total_corn + total_rps
-        denom        = max(count, 1)
-        return total_metric / denom, total_corn / denom, total_rps / denom  
-
-# ---------------------------------------------------------
-# Supervised Feature Extraction based Models  
-# ---------------------------------------------------------
-
-class SpatialClassifier(BaseSpatialEstimator): 
-
-    def __init__(
-        self,
-        *,
-        # backbone 
-        in_channels: int, 
-        attn_dim: int = 256, 
-        attn_dropout: float = 0.0, 
-        resnet_weights=None, 
-
-        # head 
-        fc_dim: int = 128, 
-        dropout: float = 0.2, 
-        supcon_dim: int = 128, 
-
-        # training 
-        epochs: int = 120, 
-        lr: float = 1e-3, 
-        weight_decay: float = 0.0, 
-        alpha_rps: float = 0.5, 
-        beta_supcon: float = 0.5, 
-        ens: float = 0.999, 
-        supcon_temperature: float = 0.07, 
-        random_state: int = 0, 
-        early_stopping_rounds: int = 15, 
-        eval_fraction: float = 0.15, 
-        min_delta: float = 1e-3, 
-        batch_size: int = 8, 
-        target_global_batch: int = 8, 
-        shuffle: bool = True, 
-        collate_fn=None, 
-        class_values: list[int] | None = None, 
-
-        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
-        compile_model: bool = True 
-    ): 
-        super().__init__( 
-            in_channels=in_channels,
-            fc_dim=fc_dim,
-            dropout=dropout,
-            supcon_dim=supcon_dim,
-            epochs=epochs,
-            lr=lr,
-            weight_decay=weight_decay,
-            alpha_rps=alpha_rps,
-            beta_supcon=beta_supcon,
-            supcon_temperature=supcon_temperature,
-            ens=ens,
-            random_state=random_state,
-            early_stopping_rounds=early_stopping_rounds,
-            eval_fraction=eval_fraction,
-            min_delta=min_delta,
-            batch_size=batch_size,
-            target_global_batch=target_global_batch,
-            shuffle=shuffle,
-            collate_fn=collate_fn,
-            class_values=class_values,
-            compute_strategy=compute_strategy,
-            compile_model=compile_model,
-        )
-        self.attn_dim = attn_dim
-        self.attn_dropout = attn_dropout
-        self.resnet_weights = resnet_weights
-
-    # -----------------------------------------------------
-    # Internal Helpers 
-    # -----------------------------------------------------
-
     def augment_inputs(self, inputs):
         k = np.random.randint(0, 4)
         x = torch.rot90(inputs, k, dims=[2, 3])
@@ -1231,169 +1201,14 @@ class SpatialClassifier(BaseSpatialEstimator):
             x = torch.flip(x, dims=[3])
         return x 
 
-    def build_backbone(self): 
-        return ResNetMIL(
-            in_channels=self.in_channels,
-            attn_dim=self.attn_dim,
-            attn_dropout=self.attn_dropout,
-            weights=self.resnet_weights
-        )
+    def unpack_batch(self, batch): 
+        inputs, labels, batch_indices = batch 
+        return inputs, labels, batch_indices   
 
-    def build_head(self, in_dim, n_classes):
-        return MILOrdinalHead(
-            in_dim=in_dim,
-            fc_dim=self.fc_dim,
-            n_classes=n_classes,
-            dropout=self.dropout,
-            supcon_dim=self.supcon_dim,
-            use_logit_scaler=True
-        )
-
-# ---------------------------------------------------------
-# HyperGraph based Spatial Classifier  
-# ---------------------------------------------------------
-
-class SpatialGATClassifier(BaseSpatialEstimator): 
-
-    def __init__(
-        self,
-        *,
-        in_channels, 
-        node_anchors: list[list[float]] | None = None, 
-        anchor_stats: list[float] | None = None, 
-
-        # backbone 
-        tile_size: int = 256, 
-        patch_size: int = 32, 
-        embed_dim: int = 64, 
-        gnn_dim: int = 128, 
-        gnn_layers: int = 1, 
-        gnn_heads: int = 1, 
-        gap_attn_dim: int = 64, 
-        attn_dropout: float = 0.0, 
-        patch_stat: str = "viirs", 
-        patch_quantile: float = 0.95, 
-        thresh_low: float = LOGRADIANCE_GATE_LOW, 
-        thresh_high: float = LOGRADIANCE_GATE_HIGH,
-        max_bag_frac: float = 1.0, 
-
-        # head 
-        fc_dim: int = 128, 
-        dropout: float = 0.2, 
-        supcon_dim: int = 128, 
-
-        # training 
-        epochs: int = 120, 
-        lr: float = 1e-3, 
-        weight_decay: float = 0.0, 
-        alpha_rps: float = 0.5, 
-        beta_supcon: float = 0.5, 
-        supcon_temperature: float = 0.07, 
-        ens: float = 0.999,
-        random_state: int = 0, 
-        early_stopping_rounds: int = 15, 
-        eval_fraction: float = 0.15, 
-        min_delta: float = 1e-3, 
-        batch_size: int = 8, 
-        target_global_batch: int = 8, 
-        shuffle: bool = True, 
-        collate_fn=None, 
-        class_values: list[int] | None = None, 
-
-        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
-        compile_model: bool = True 
-    ): 
-        super().__init__( 
-            in_channels=in_channels,
-            fc_dim=fc_dim,
-            dropout=dropout,
-            supcon_dim=supcon_dim,
-            epochs=epochs,
-            lr=lr,
-            weight_decay=weight_decay,
-            alpha_rps=alpha_rps,
-            beta_supcon=beta_supcon,
-            supcon_temperature=supcon_temperature,
-            ens=ens,
-            random_state=random_state,
-            early_stopping_rounds=early_stopping_rounds,
-            eval_fraction=eval_fraction,
-            min_delta=min_delta,
-            batch_size=batch_size,
-            target_global_batch=target_global_batch,
-            shuffle=shuffle,
-            collate_fn=collate_fn,
-            class_values=class_values,
-            compute_strategy=compute_strategy,
-            compile_model=compile_model,
-        )
-
-        self.node_anchors   = node_anchors
-        self.anchor_stats   = anchor_stats
-        self.tile_size      = tile_size 
-        self.patch_size     = patch_size 
-        self.embed_dim      = embed_dim 
-        self.gap_attn_dim   = gap_attn_dim
-        self.gnn_dim        = gnn_dim 
-        self.thresh_low     = thresh_low 
-        self.thresh_high    = thresh_high
-        self.max_bag_frac   = max_bag_frac
-        self.gnn_layers     = gnn_layers 
-        self.gnn_heads      = gnn_heads 
-        self.attn_dropout   = attn_dropout
-        self.patch_stat     = patch_stat 
-        self.patch_quantile = patch_quantile
-    
-    def build_backbone(self):
-        return HypergraphBackbone(
-            in_channels=self.in_channels,
-            tile_size=self.tile_size,
-            patch_size=self.patch_size,
-            embed_dim=self.embed_dim,
-            gnn_dim=self.gnn_dim,
-            gnn_layers=self.gnn_layers,
-            gnn_heads=self.gnn_heads,
-            attn_dropout=self.attn_dropout,
-            dropout=self.dropout,
-            max_bag_frac=self.max_bag_frac,
-            patch_stat=self.patch_stat,
-            patch_quantile=self.patch_quantile,
-            thresh_low=self.thresh_low,
-            thresh_high=self.thresh_high,
-            node_anchors=self.node_anchors,
-            anchor_stats=self.anchor_stats
-        )
-
-    def build_head(self, in_dim, n_classes):
-        return MILOrdinalHead(
-            in_dim=in_dim,
-            fc_dim=self.fc_dim,
-            n_classes=n_classes,
-            dropout=self.dropout,
-            supcon_dim=self.supcon_dim,
-            use_logit_scaler=True 
-        )
-
-    def build_model(self):
-        self.backbone_ = self.build_backbone()
-        self.head_     = self.build_head(self.backbone_.out_dim, self.n_classes_)
-        
-        # pool across tiles per bag via attention 
-        self.pool_     = GatedAttentionPooling(
-            in_dim=self.backbone_.out_dim,
-            attn_dim=self.gap_attn_dim,
-            attn_dropout=self.attn_dropout
-        )
-
-        self.model_          = nn.Module() 
-        self.model_.backbone = self.backbone_ 
-        self.model_.head     = self.head_
-        self.model_.pool     = self.pool_ 
-
-        self.model_.to(self.device)
-        
-        if self.device.type == "cuda" and self.compile_model:
-            self.model_ = torch.compile(self.model_, mode="reduce-overhead", fullgraph=False)
+    def prepare_inputs(self, tiles, batch_indices): 
+        xb   = tiles.to(self.device, non_blocking=True)
+        bidx = batch_indices.to(self.device, non_blocking=True)
+        return xb, bidx
 
     def forward_feats(self, tiles, batch_indices):
         xb, bidx   = self.prepare_inputs(tiles, batch_indices)
@@ -1405,6 +1220,10 @@ class SpatialGATClassifier(BaseSpatialEstimator):
         batch_size = int(bidx.max().item()) + 1 
         pooled     = self.model_.pool(tile_feats, bidx, batch_size)
         return pooled 
+
+    def forward_logits(self, feats, with_supcon: bool): 
+        emb, logits, proj = self.model_.head(feats)
+        return emb, logits, (proj if with_supcon else None)
 
 # ---------------------------------------------------------
 # Mixing Tabular, Residual MLP Model 
@@ -1843,7 +1662,6 @@ class EmbeddingProjector(BaseEstimator):
         out_dim: int = 5, 
         hidden_dims: tuple[int, ...] | None = None, 
         supcon_dim: int = 128, 
-        mode: str = "single",
         dropout: float = 0.1, 
         epochs: int = 200, 
         lr: float = 1e-3, 
@@ -1863,7 +1681,6 @@ class EmbeddingProjector(BaseEstimator):
         self.out_dim               = out_dim
         self.hidden_dims           = hidden_dims
         self.supcon_dim            = supcon_dim
-        self.mode                  = mode 
         self.dropout               = dropout
         self.epochs                = epochs
         self.lr                    = lr
@@ -2069,33 +1886,9 @@ class EmbeddingProjector(BaseEstimator):
 
     def _build(self, n_classes: int): 
 
-        if self.mode == "single": 
-            if self.dropout > 0: 
-                self.proj_ = nn.Sequential(
-                    nn.Dropout(self.dropout),
-                    nn.Linear(self.in_dim, self.out_dim)
-                )
-            else: 
-                self.proj_ = nn.Linear(self.in_dim, self.out_dim)
-        elif self.mode == "manifold": 
+        '''
 
-            if self.hidden_dims: 
-                width = self.hidden_dims[0]
-            else: 
-                width = 256 
-
-            layers = []
-            layers.append(nn.Linear(self.in_dim, width))
-
-            for _ in range(self.n_residual_blocks): 
-                layers.append(ResBlock(width, self.dropout))
-
-            layers.append(nn.BatchNorm1d(width))
-            layers.append(nn.GELU())
-            layers.append(nn.Linear(width, self.out_dim))
-            self.proj_ = nn.Sequential(*layers)
-        else: 
-            raise ValueError(f"unknown projector mode: {self.mode}")
+        '''
 
         self.head_  = nn.Linear(self.out_dim, n_classes - 1)
         self.supcon_head_ = nn.Sequential(

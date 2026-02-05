@@ -17,8 +17,6 @@ from analysis.cross_validation import (
 
 from models.estimators         import (
     TFTabular, 
-    SpatialClassifier, 
-    SpatialGATClassifier
 )
 
 from scipy.io                  import savemat 
@@ -196,8 +194,15 @@ def _spatial_fit_extract(
     )(in_channels=in_ch_te)
 
     model.fit(train_ds, train_y)
+    
+    '''
+    Nonlinear projection 892 -> 256 is optimized here. 
+    '''
+
 
     test_emb = model.extract(test_ds)
+
+
     _, val_corn, val_rps  = model.eval_loss(model.as_eval_loader(test_ds))
 
     feature_names = np.array(

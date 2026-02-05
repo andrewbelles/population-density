@@ -763,9 +763,6 @@ class UspsTensorDataset(SpatialTensorDataset):
                 
                 for feat in tracts.filter(bbox=bbox): 
 
-                    if skipped > 0 and skipped % 100 == 0: 
-                        print(f"[usps] skipped {skipped} samples...")
-
                     props      = feat.get("properties") or {}
                     capacity   = self._as_float(props, "capacity")
                     comm_ratio = self._as_float(props, "comm_ratio")
