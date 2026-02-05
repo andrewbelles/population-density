@@ -284,22 +284,20 @@ models:
   Manifold/VIIRS:
     patch_size: 32
     embed_dim: 128
-    gnn_dim: 256
+    gnn_dim: 128
     gnn_layers: 3
     gnn_heads: 8
-    fc_dim: 256
-    dropout: 0.18415302442953638
-    attn_dropout: 0.05157051906194132
-    max_bag_frac: 0.6577141754620919
-    alpha_rps: 1.486512710723492
-    beta_supcon: 1.1833738637939712
-    supcon_temperature: 0.1596503783655801
-    ens: 0.9978490099678634
+    fc_dim: 128
+    dropout: 0.10780059829737508
+    attn_dropout: 0.19627229936357576
+    max_bag_frac: 0.7919413154054114
+    alpha_rps: 1.0613741311382698
+    beta_supcon: 1.1089716204767714
+    supcon_temperature: 0.11664395239064992
     supcon_dim: 128
-    lr: 0.0002024028628133283
-    weight_decay: 5.752740814116683e-06
-    threshold_scale: 0.9865243091425225
-    batch_size: 256
+    lr: 3.965761586675901e-05
+    weight_decay: 8.781769994076174e-05
+    batch_size: 1536
   Manifold/SAIPE:
     hidden_dim: 896
     depth: 15
@@ -319,21 +317,21 @@ models:
     lr: 0.0005581834370234934
     weight_decay: 9.565741316864593e-06
   Manifold/USPS:
-    patch_size: 32
+    patch_size: 64 
     embed_dim: 128
     gnn_dim: 256
     gnn_layers: 3
     gnn_heads: 8
-    fc_dim: 256
-    dropout: 0.18415302442953638
-    attn_dropout: 0.05157051906194132
-    max_bag_frac: 0.6577141754620919
-    alpha_rps: 1.486512710723492
-    beta_supcon: 1.1833738637939712
-    supcon_temperature: 0.1596503783655801
+    fc_dim: 128
+    dropout: 0.15586
+    attn_dropout: 0.101513
+    max_bag_frac: 0.70975
+    alpha_rps: 1.9535
+    beta_supcon: 0.658689
+    supcon_temperature: 0.26224
     ens: 0.999
     supcon_dim: 128
-    lr: 0.0002024028628133283
-    weight_decay: 5.752740814116683e-06
+    lr: 4.3965e-05
+    weight_decay: 2.71723e-05
     threshold_scale: 0.9865243091425225
-    batch_size: 256
+    batch_size: 1024
