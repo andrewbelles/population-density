@@ -900,6 +900,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             if val_score < best_val - self.min_delta: 
                 best_val   = val_score 
                 best_state = copy.deepcopy(self.model_.state_dict())
+                self.best_val_score_ = best_val 
                 patience   = 0
             else: 
                 patience  += 1 
