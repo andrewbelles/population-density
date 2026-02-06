@@ -22,7 +22,10 @@ from sklearn.preprocessing     import StandardScaler
 
 from sklearn.decomposition     import PCA 
 
-from preprocessing.loaders     import load_spatial_mmap_manifest
+from preprocessing.loaders     import (
+    load_spatial_mmap_manifest,
+    load_compact_dataset 
+) 
 
 from testbench.utils.paths     import (
     CONFIG_PATH,
@@ -76,6 +79,8 @@ from utils.helpers             import (
 from utils.resources import ComputeStrategy 
 
 strategy = ComputeStrategy.from_env()
+
+USPS_2013  = project_path("data", "datasets", "usps_scalar_2013.mat")
 
 VIIRS_ROOT = project_path("data", "tensors", "viirs_2013")
 NLCD_ROOT  = project_path("data", "tensors", "nlcd") 
@@ -377,6 +382,56 @@ def test_usps_opt(
         config_path=config_path
     )
 
+def test_usps_scalar_opt(
+    *,
+    data_path: str = USPS_2013,
+    model_key: str = "Manifold/USPS_SCALAR",
+    trials: int = 50, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH, 
+    **_
+):
+    data   = load_compact_dataset(data_path)
+    X      = np.asarray(data["features"], dtype=np.float32)
+    y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+
+    evaluator = TabularEvaluator(
+        X, y,
+        define_tabular_space,
+        model_factory=make_residual_tabular(),
+        random_state=random_state,
+        compute_strategy=strategy
+    )
+
+    prior_params = None
+    try:
+        prior_params = load_model_params(config_path, model_key)
+    except Exception:
+        prior_params = None
+
+    config  = EngineConfig(
+        n_trials=trials,
+        direction="minimize",
+        random_state=random_state,
+        sampler_type="multivariate-tpe",
+        enqueue_trials=[prior_params] if prior_params else None,
+        devices=strategy.visible_devices()
+    )
+
+    best_params, best_value, _ = run_optimization(
+        name=model_key,
+        evaluator=evaluator,
+        config=config
+    )
+
+    save_model_config(config_path, model_key, best_params)
+
+    return {
+        "header": ["Name", "Corn + RPS"],
+        "row": _row_score(model_key, best_value),
+        "params": best_params
+    }
+
 # ---------------------------------------------------------
 # Tests Entry Point 
 # ---------------------------------------------------------
@@ -385,6 +440,7 @@ TESTS = {
     "viirs-opt": test_viirs_opt, 
     "saipe-opt": test_saipe_opt,
     "usps-opt": test_usps_opt,
+    "usps-scalar-opt": test_usps_scalar_opt,
     "reduce-all": test_reduce_all,
 }
 

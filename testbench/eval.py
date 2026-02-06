@@ -190,6 +190,88 @@ def _fit_eval(train_path, train_loader, test_path, test_loader, model_name, para
     metrics      = metrics_from_probs(y_te, probs, class_labels)
     return metrics
 
+def _tabular_fit_extract(
+    *,
+    train_path: str, 
+    test_path: str, 
+    out_path: str,
+    model_key: str, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH, 
+    class_metrics: bool = False, 
+    save_proba: bool = False, 
+    feature_prefix: str | None = None,
+    proba_key: str | None = None 
+):
+    train_path, train_loader = _resolve_dataset(train_path)
+    test_path, test_loader   = _resolve_dataset(test_path)
+
+    X_tr, y_tr, _ = _load_dataset(train_path, train_loader)
+    X_te, y_te, _ = _load_dataset(test_path, test_loader)
+
+    scaler = StandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr)
+    X_te_s = scaler.transform(X_te)
+
+    params = load_model_params(config_path, model_key)
+
+    model = make_residual_tabular()(
+        in_dim=X_tr_s.shape[1],
+        **params,
+        random_state=random_state,
+        compute_strategy=strategy
+    )
+
+    model.fit(X_tr_s, y_tr)
+    embs = model.extract(X_te_s)
+    loss = model.loss(X_te_s, y_te)
+
+    probs = model.predict_proba(X_te_s)
+
+    if save_proba and proba_key: 
+        proba_path = EXPERT_PROBA[proba_key] 
+        class_labels = np.sort(np.unique(y_tr))
+        fips = np.asarray(load_compact_dataset(test_path)["sample_ids"])
+        _save_probs_mat(
+            proba_path,
+            probs=probs,
+            labels=y_te,
+            fips=fips,
+            class_labels=class_labels,
+            model_name=proba_key
+        )
+
+    metrics = None 
+    if class_metrics: 
+        class_labels = np.sort(np.unique(y_tr))
+        metrics      = metrics_from_probs(y_te, probs, class_labels)
+
+    if feature_prefix is None: 
+        feature_prefix = model_key.split("/")[-1].lower() 
+    feature_names = np.array([f"{feature_prefix}_emb_{i}" for i in range(embs.shape[1])],
+                             dtype="U64")
+
+    savemat(out_path, {
+        "features": embs, 
+        "labels": y_te.reshape(-1, 1),
+        "fips_codes": np.asarray(load_compact_dataset(test_path)["sample_ids"]),
+        "feature_names": feature_names,
+        "n_counties": np.array([len(y_te)], dtype=np.int64)
+    })
+
+    header = ["Name", "Val Loss"]
+    row    = {
+        "Name": f"{model_key}",
+        "Val Loss": format_metric(loss),
+    }
+
+    if metrics is not None: 
+        header += ["Acc", "F1", "ECE", "QWK", "wRPS"] 
+        row.update(_row(row["Name"], metrics))
+
+    return {"header": header, "row": row}
+    
+
 def _spatial_fit_extract(
     *,
     train_root: str, 
@@ -344,7 +426,6 @@ def test_saipe_manifold(
     test: str, 
     out: str | None = None, 
     model_key: str = SAIPE_KEY, 
-    trials: int = 50, 
     random_state: int = 0,
     config_path: str = CONFIG_PATH,
     class_metrics: bool = False, 
@@ -352,73 +433,51 @@ def test_saipe_manifold(
     proba_key: str = "SAIPE_MANIFOLD",
     **_
 ): 
-    train_path, train_loader = _resolve_dataset(train)
-    test_path, test_loader   = _resolve_dataset(test)
+    if out is None: 
+        out = project_path("data", "datasets", "saipe_2023_pooled.mat")
 
-    X_tr, y_tr, _ = _load_dataset(train_path, train_loader)
-    X_te, y_te, _ = _load_dataset(test_path, test_loader)
-
-    scaler = StandardScaler()
-    X_tr_s = scaler.fit_transform(X_tr)
-    X_te_s = scaler.transform(X_te)
-
-    params = load_model_params(config_path, model_key)
-
-    model = make_residual_tabular()(
-        in_dim=X_tr_s.shape[1],
-        **params,
+    return _tabular_fit_extract(
+        train_path=train,
+        test_path=test,
+        out_path=out,
+        model_key=model_key,
         random_state=random_state,
-        compute_strategy=strategy
+        config_path=config_path,
+        class_metrics=class_metrics,
+        save_proba=save_proba,
+        proba_key=proba_key,
+        feature_prefix="saipe",
     )
 
-    model.fit(X_tr_s, y_tr)
-    embs = model.extract(X_te_s)
-    loss = model.loss(X_te_s, y_te)
-
-    probs = model.predict_proba(X_te_s)
-
-    if save_proba and proba_key: 
-        proba_path = EXPERT_PROBA[proba_key] 
-        class_labels = np.sort(np.unique(y_tr))
-        fips = np.asarray(load_compact_dataset(test_path)["sample_ids"])
-        _save_probs_mat(
-            proba_path,
-            probs=probs,
-            labels=y_te,
-            fips=fips,
-            class_labels=class_labels,
-            model_name=proba_key
-        )
-
-    metrics = None 
-    if class_metrics: 
-        class_labels = np.sort(np.unique(y_tr))
-        metrics      = metrics_from_probs(y_te, probs, class_labels)
-
+def test_usps_scalar_manifold(
+    _buf,
+    *,
+    train: str, 
+    test: str, 
+    out: str | None = None, 
+    model_key: str = "Manifold/USPS_SCALAR", 
+    random_state: int = 0,
+    config_path: str = CONFIG_PATH,
+    class_metrics: bool = False, 
+    save_proba: bool = False, 
+    proba_key: str = "USPS_SCALAR_MANIFOLD",
+    **_
+):
     if out is None: 
-        out = project_path("data", "datasets", f"{test.lower()}_pooled.mat")
-    feature_names = np.array([f"{test.lower()}_manifold_{i}" for i in range(embs.shape[1])],
-                             dtype="U64")
+        out = project_path("data", "datasets", "usps_scalar_2023_pooled.mat")
 
-    savemat(out, {
-        "features": embs, 
-        "labels": y_te.reshape(-1, 1),
-        "fips_codes": np.asarray(load_compact_dataset(test_path)["sample_ids"]),
-        "feature_names": feature_names,
-        "n_counties": np.array([len(y_te)], dtype=np.int64)
-    })
-
-    header = ["Name", "Val Loss"]
-    row    = {
-        "Name": f"{model_key}",
-        "Val Loss": format_metric(loss),
-    }
-
-    if metrics is not None: 
-        header += ["Acc", "F1", "ECE", "QWK", "wRPS"] 
-        row.update(_row(row["Name"], metrics))
-
-    return {"header": header, "row": row}
+    return _tabular_fit_extract(
+        train_path=train,
+        test_path=test,
+        out_path=out,
+        model_key=model_key,
+        random_state=random_state,
+        config_path=config_path,
+        class_metrics=class_metrics,
+        save_proba=save_proba,
+        proba_key=proba_key,
+        feature_prefix="usps_scalar",
+    )
 
 def test_viirs_manifold(
     _buf,
@@ -495,7 +554,8 @@ TESTS = {
     "fit-eval": test_fit_eval,
     "usps-manifold": test_usps_manifold,
     "saipe-manifold": test_saipe_manifold,
-    "viirs-manifold": test_viirs_manifold
+    "viirs-manifold": test_viirs_manifold,
+    "usps-scalar-manifold": test_usps_scalar_manifold
 }
 
 
