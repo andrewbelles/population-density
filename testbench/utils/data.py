@@ -103,6 +103,12 @@ BASE: dict[str, ConcatSpec] = {
         "path": project_path("data", "datasets", "usps_2023_pooled.mat"),
         "loader": load_compact_dataset
     },
+    "USPS_SCALAR_MANIFOLD": {
+        "name": "USPS_SCALAR_MANIFOLD",
+        "path": project_path("data", "datasets", "usps_scalar_2023_pooled.mat"),
+        "loader": load_compact_dataset
+    },
+
     "COORDS": {
         "name": "COORDS",
         "path": project_path("data", "datasets", "travel_proxy.mat"),

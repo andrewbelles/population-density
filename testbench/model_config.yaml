@@ -304,7 +304,7 @@ models:
     depth: 15
     dropout: 0.0858220902528919
     mix_alpha: 0.3802465273929052
-    mix_mult: 16
+    mix_mult: 8
     beta_supcon: 0.3499484360424506
     alpha_rps: 4.215660521346364
     supcon_temperature: 0.12634898861272004
@@ -340,3 +340,23 @@ models:
   USPS_MANIFOLD/Logistic:
     C: 0.003382286306527411
     class_weight: balanced
+  Manifold/USPS_SCALAR:
+    hidden_dim: 896
+    depth: 15
+    dropout: 0.0858220902528919
+    mix_alpha: 0.3802465273929052
+    mix_mult: 8 
+    beta_supcon: 0.3499484360424506
+    alpha_rps: 4.215660521346364
+    supcon_temperature: 0.12634898861272004
+    supcon_dim: 64
+    transformer_dim: 128
+    transformer_tokens: 4
+    transformer_heads: 8
+    transformer_layers: 4
+    transformer_dropout: 0.19565516735505484
+    transformer_attn_dropout: 0.054176312450119626
+    reduce_depth: 4
+    reduce_dropout: 0.06583919801125074
+    lr: 0.0008389050182081556
+    weight_decay: 1.5930762847274783e-06

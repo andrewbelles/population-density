@@ -1262,11 +1262,12 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         reduce_depth: int = 1, 
         reduce_dropout: float = 0.0, 
 
-        epochs: int = 2000, 
+        soft_epochs: int = 400,
+        hard_epochs: int = 300, 
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
         random_state: int = 0, 
-        early_stopping_rounds: int = 15, 
+        early_stopping_rounds: int = 20, 
         eval_fraction: float = 0.15, 
         min_delta: float = 1e-3, 
         batch_size: int = 1024, 
@@ -1301,7 +1302,8 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.reduce_depth             = reduce_depth
         self.reduce_dropout           = reduce_dropout
 
-        self.epochs                   = epochs
+        self.soft_epochs              = soft_epochs
+        self.hard_epochs              = hard_epochs
         self.lr                       = lr
         self.weight_decay             = weight_decay
         self.batch_size               = batch_size
@@ -1350,7 +1352,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
             name="Manifold-Mixing",
             train_loader=train_loader,
             val_loader=val_loader,
-            epochs=self.epochs,
+            epochs=self.soft_epochs,
             mixing=True 
         )
 
@@ -1359,7 +1361,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
                 name="Hard-Labels",
                 train_loader=train_loader,
                 val_loader=val_loader,
-                epochs=max(1, self.epochs), 
+                epochs=max(1, self.hard_epochs), 
                 mixing=False, 
                 start_state=best_soft,
                 lr_scale=0.3

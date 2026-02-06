@@ -237,8 +237,11 @@ class MILOrdinalHead(nn.Module):
         self.act    = nn.GELU() 
         self.drop   = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
         self.out    = nn.Linear(fc_dim, 1, bias=False)
-        self.scaler = LogitScaler(1.0) if use_logit_scaler else nn.Identity() 
-
+        if use_logit_scaler: 
+            self.scaler = nn.Linear(1, 1, bias=False)
+            self.scaler.weight.data.fill_(1.0)
+        else: 
+            self.scaler = nn.Identity() 
 
         self.cut_anchor = nn.Parameter(torch.zeros(1))
         self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 0.5)
@@ -266,7 +269,12 @@ class MILOrdinalHead(nn.Module):
         feat_v = self.drop(self.act(self.fc(emb)))
         score  = self.out(feat_v)
         logits = score + cuts 
-        logits = self.scaler(logits)
+
+        if isinstance(self.scaler, nn.Linear): 
+            scale  = F.softplus(self.scaler.weight)
+            logits = logits * scale   
+        else: 
+            logits = self.scaler(logits)
 
         proj   = self.proj(feats) if self.proj is not None else None 
         return emb, logits, proj 

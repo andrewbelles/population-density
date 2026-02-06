@@ -59,6 +59,7 @@ def compute_channels(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df[total > 0].copy() 
     
+    df["total_addresses"] = total 
     df["comm_ratio"] = df["ams_bus"] / total 
     df["vac_rate"]   = df["res_vac"] / total 
 
@@ -92,7 +93,7 @@ def main():
     usps = compute_channels(usps)
 
     merged = tracts.merge(
-        usps[["GEOID", "flux_rate", "bus_vac_rate", "comm_ratio", "vac_rate"]],
+        usps[["GEOID", "flux_rate", "bus_vac_rate", "comm_ratio", "vac_rate", "total_addresses"]],
         on="GEOID",
         how="inner"
     )

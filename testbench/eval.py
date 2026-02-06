@@ -89,6 +89,7 @@ EXPERT_PROBA = {
     "SAIPE_2023": project_path("data", "stacking", "saipe_optimized_probs.mat"), 
     "VIIRS_2023": project_path("data", "stacking", "viirs_optimized_probs.mat"), 
     "USPS_2023":  project_path("data", "stacking", "usps_optimized_probs.mat"), 
+    "USPS_SCALAR_MANIFOLD": project_path("data", "stacking", "usps_scalar_probs.mat"), 
     "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat"), 
     "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"), 
     "USPS_MANIFOLD":  project_path("data", "stacking", "usps_pooled_probs.mat"), 

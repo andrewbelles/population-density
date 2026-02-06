@@ -110,13 +110,26 @@ class UspsScalarDataset:
         gdf  = gdf[gdf["area"] > 0].copy() 
 
         def agg(group: pd.DataFrame) -> pd.Series: 
-            w = group["area"].to_numpy()
-            den = w.sum() 
-            if den <= 0:
-                 return pd.Series({f"usps_{c}": np.nan for c in self.CHANNELS})
+            w_area = group["area"].to_numpy()
+            w_pop  = group["total_addresses"].to_numpy()
+
             out = {}
-            for c in self.CHANNELS:
-                out[f"usps_{c}"] = np.average(group[c].to_numpy(), weights=w)
+
+            if "texture" in group and not np.isnan(group["texture"]).all(): 
+                out["usps_texture"] = np.average(group["texture"], weights=w_area)
+            else: 
+                out["usps_texture"] = 0.0 
+
+            rate_cols = ["flux_rate", "comm_ratio", "vac_rate"]
+
+            if w_pop.sum() > 0: 
+                for c in rate_cols: 
+                    if c in group: 
+                        out[f"usps_{c}"] = np.average(group[c], weights=w_pop)
+            else: 
+                for c in rate_cols: 
+                    out[f"usps_{c}"] = 0.0 
+
             return pd.Series(out)
         
         df = gdf.groupby("fips", as_index=False).apply(agg) 

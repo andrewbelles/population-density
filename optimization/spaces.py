@@ -222,7 +222,8 @@ def define_tabular_space(trial: optuna.Trial):
         "min_delta": 1e-4, 
         "early_stopping_rounds": 30, 
         "batch_size": 256,
-        "epochs": 1200, 
+        "soft_epochs": 400,
+        "hard_epochs": 200, 
         "max_mix": None, 
         "anchor_power": 1.0 
     }
