@@ -296,16 +296,14 @@ class LightweightBackbone(nn.Module):
 
         if flat:
             self.encoder = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1), 
                 nn.Conv2d(in_channels, 64, kernel_size=1), 
                 nn.GELU(),
                 nn.Conv2d(64, 128, kernel_size=1),
                 nn.GELU(),
                 nn.Conv2d(128, embed_dim, kernel_size=1)
             )
-            self.projector = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten()
-            ) 
+            self.projector = nn.Flatten()
         else: 
             mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
             encoder   = mobilenet.features 
