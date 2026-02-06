@@ -236,7 +236,8 @@ class MILOrdinalHead(nn.Module):
         self.fc     = nn.Linear(feat_dim, fc_dim)
         self.act    = nn.GELU() 
         self.drop   = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
-        self.out    = nn.Linear(fc_dim, n_classes - 1)
+        self.out    = nn.Linear(fc_dim, 1, bias=False)
+        self.cut    = nn.Parameter(torch.linspace(-1.0, 1.0, n_classes - 1))
         self.scaler = LogitScaler(1.0) if use_logit_scaler else nn.Identity() 
 
         self.proj = None 
@@ -254,7 +255,9 @@ class MILOrdinalHead(nn.Module):
             feats = self.reducer(feats)
 
         emb    = feats  
-        logits = self.out(self.drop(self.act(self.fc(emb))))
+        feat_v = self.drop(self.act(self.fc(emb)))
+        score  = self.out(feat_v)
+        logits = score + self.cut 
         logits = self.scaler(logits)
 
         proj   = self.proj(feats) if self.proj is not None else None 

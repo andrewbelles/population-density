@@ -11,13 +11,16 @@ import argparse, io
 from pathlib import Path 
 
 import matplotlib.pyplot as plt 
-from matplotlib.colors import ListedColormap, BoundaryNorm 
+
+from matplotlib.colors import ListedColormap, BoundaryNorm, LogNorm 
+
 from matplotlib.lines  import Line2D
 
 import numpy as np 
 
 import geopandas 
 
+from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 
 from dataclasses import dataclass 
@@ -32,7 +35,8 @@ from testbench.utils.oof   import load_probs_labels_fips
 from testbench.utils.graph import coords_for_fips 
 from testbench.utils.paths import (
     MOBILITY_PATH,
-    SHAPEFILE 
+    SHAPEFILE,
+    check_paths_exist 
 ) 
 
 from testbench.utils.plotting import (
@@ -62,6 +66,12 @@ def _log(msg, quiet=False):
     if not quiet: 
         print(msg)
 
+def _require_expert_probs(data): 
+    items = data.get("expert_probs") or []
+    if not items: 
+        raise ValueError("no expert_probs. run with --cached-experts and --datasets")
+    return items 
+
 # ---------------------------------------------------------
 # Testbench Data Fetchers 
 # ---------------------------------------------------------
@@ -70,7 +80,9 @@ def build_stacking_data(
     *, 
     cross: str = "off", 
     datasets: list[str] | None = None, 
-    plots=None, **_
+    plots=None,
+    cached_experts: bool = False, 
+    **_
 ):
 
     need_experts  = (plots is None) or ("expert_confusion" in plots)
@@ -83,7 +95,10 @@ def build_stacking_data(
 
 
     if need_experts: 
-        expert_data  = stacking.test_expert_oof(datasets=datasets)
+        expert_data  = stacking.test_expert_oof(
+            datasets=datasets,
+            cached=cached_experts 
+        )
         out["experts"] = expert_data["experts"]
 
     if not need_stacking: 
@@ -120,7 +135,14 @@ def build_adjacency_data(*, metric_keys=None, **_):
 
     return {"graphs": graphs, "learned": learned}
 
-def build_embedding_data(*, embedding_dir: str | None = None, embedding_paths=None, **_): 
+def build_embedding_data(
+    *, 
+    embedding_dir: str | None = None, 
+    embedding_paths=None,
+    datasets: list[str] | None = None, 
+    cached_experts: bool = False, 
+    **_
+): 
     if embedding_paths is None: 
         base  = embedding_dir or project_path("testbench", "local")
         paths = sorted(Path(base).glob("*.mat")) 
@@ -150,7 +172,29 @@ def build_embedding_data(*, embedding_dir: str | None = None, embedding_paths=No
             "min_dist": float(_mat_scalar(mat.get("min_dist")))
         })
 
-    return {"embeddings": entries}
+    expert_probs = []
+    if cached_experts:
+        if not datasets: 
+            raise ValueError("cached_experts requires --datasets")
+        expert_data = stacking.test_expert_oof(datasets=datasets, cached=True)
+        paths = expert_data["experts"]
+        check_paths_exist(list(paths.values()), "cached expert prob files")
+
+        for name, path in paths.items(): 
+            oof = load_oof_predictions(path) 
+            probs = np.asarray(oof["probs"], dtype=np.float64)
+            if probs.ndim == 3: 
+                P = probs[:, 0, :] if probs.shape[1] == 1 else probs.mean(axis=1)
+            else: 
+                P = probs 
+            expert_probs.append({
+                "name": name, 
+                "probs": P, 
+                "labels": np.asarray(oof["labels"]).reshape(-1), 
+                "class_labels": np.asarray(oof.get("class_labels", []))
+            })
+
+    return {"embeddings": entries, "expert_probs": expert_probs}
 
 # --------------------------------------------------------- 
 # Stacking  
@@ -343,7 +387,7 @@ def plot_edge_weight_distribution(data, log_hist: bool = False):
     return fig 
 
 # --------------------------------------------------------- 
-# Plot Calls 
+# Embeddings Group  
 # ---------------------------------------------------------
 
 def plot_embedding_umap(data): 
@@ -397,6 +441,124 @@ def plot_embedding_umap(data):
             cbar.set_ticklabels([str(u) for u in uniq])
             cbar.set_label("Class")
 
+    return fig 
+
+def plot_qwk_penalty(data): 
+    items = _require_expert_probs(data)
+    n     = len(items)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), sharey=True, constrained_layout=True)
+    if n == 1: 
+        axes = [axes]
+    im = None 
+    for ax, item in zip(axes, items): 
+        P = item["probs"]
+        y_true = item["labels"] 
+        labels = get_labels(item["class_labels"], P.shape[1] if P.ndim > 1 else 2)
+        y_pred = get_pred_labels(P, labels)
+        cm     = confusion_matrix(y_true, y_pred, labels=labels)
+        k      = len(labels)
+        i, j   = np.indices((k, k))
+        weights = (i - j)**2 
+        penalty = cm * weights 
+        im = ax.imshow(penalty, cmap="Reds")
+        for r in range(k): 
+            for c in range(k): 
+                if cm[r, c] > 0: 
+                    ax.text(c, r, f"{cm[r,c]}", ha="center", va="center", fontsize=8)
+
+        ax.set_title(item["name"])
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        ax.set_xticks(np.arange(k))
+        ax.set_yticks(np.arange(k))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+
+    if im is not None: 
+        fig.colorbar(im, ax=axes)
+    fig.suptitle("QWK Penalty Contribution")
+    return fig 
+
+def plot_log_confusion(data): 
+    items = _require_expert_probs(data)
+    n     = len(items)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), sharey=True, constrained_layout=True)
+    if n == 1: 
+        axes = [axes]
+
+    im = None 
+    for ax, item in zip(axes, items): 
+        P = item["probs"]
+        y_true = item["labels"] 
+        labels = get_labels(item["class_labels"], P.shape[1] if P.ndim > 1 else 2)
+        y_pred = get_pred_labels(P, labels)
+
+        cm     = confusion_matrix(y_true, y_pred, labels=labels)
+        k, m   = cm.shape[0], cm.shape[1] 
+        vmax   = max(cm.max(), 1)
+        im = ax.imshow(cm, cmap="Blues", norm=LogNorm(vmin=1, vmax=vmax))
+        for r in range(k): 
+            for c in range(m): 
+                if cm[r, c] > 0: 
+                    ax.text(c, r, f"{cm[r,c]}", ha="center", va="center", fontsize=8)
+
+        ax.set_title(item["name"])
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        ax.set_xticks(np.arange(k))
+        ax.set_yticks(np.arange(k))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+
+    if im is not None: 
+        fig.colorbar(im, ax=axes)
+    fig.suptitle("Log-Scale Confusion Matrix")
+    return fig 
+
+def plot_ordinal_ridges(data): 
+    items = _require_expert_probs(data)
+    n     = len(items)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), sharey=True, constrained_layout=True)
+    if n == 1: 
+        axes = [axes]
+
+    for ax, item in zip(axes, items): 
+        P = item["probs"]
+        y_true = item["labels"] 
+        labels = get_labels(item["class_labels"], P.shape[1] if P.ndim > 1 else 2)
+        label_vals = labels.astype(np.float64)
+
+        k = len(labels)
+        idx = np.arange(k, dtype=np.float64)
+        if P.ndim == 1: 
+            preds = P.reshape(-1)
+        else: 
+            preds = (P * idx).sum(axis=1)
+
+        y_idx = get_label_indices(y_true, labels)
+        xmin, xmax = label_vals.min(), label_vals.max() 
+
+        for i in range(k): 
+            vals = preds[y_idx == i]
+            if vals.size == 0: 
+                continue 
+
+            hist, bins = np.histogram(vals, bins=4*k, range=(xmin, xmax), density=True) 
+            centers    = (bins[:-1] + bins[1:]) / 2.0 
+            hist       = hist / (hist.max() + 1e-9)
+
+            ax.fill_between(centers, i, i + hist, alpha=0.5)
+            ax.axvline(i, color="k", linewidth=0.5, alpha=0.25)
+
+        ax.set_title(item["name"])
+        ax.set_xlabel("Predicted Class Index")
+        ax.set_ylabel("True Class")
+        ax.set_yticks(np.arange(k))
+        ax.set_yticklabels(labels)
+        ax.set_xlim(xmin, xmax) 
+        ax.grid(True, axis="x", alpha=0.3)
+
+    fig.suptitle("Ordinal Smear Ridge Plot")
     return fig 
 
 # ---------------------------------------------------------
@@ -488,7 +650,10 @@ PLOT_GROUPS = {
         name="embeddings",
         build=build_embedding_data,
         plots={
-            "manifold_umap": plot_embedding_umap
+            "manifold_umap": plot_embedding_umap,
+            "qwk_penalty": plot_qwk_penalty,
+            "log_confusion": plot_log_confusion,
+            "ordinal_ridges": plot_ordinal_ridges
         }
     )
 }
@@ -510,6 +675,7 @@ def main():
     parser.add_argument("--log-hist", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--embedding-paths", nargs="*", default=None)
+    parser.add_argument("--cached-experts", action="store_true")
     args = parser.parse_args()
 
     plot_kwargs = dict(
@@ -519,7 +685,8 @@ def main():
         quiet=args.quiet, 
         datasets=args.datasets,
         metric_keys=args.metric_keys,
-        embedding_paths=args.embedding_paths
+        embedding_paths=args.embedding_paths,
+        cached_experts=args.cached_experts
     )
 
     if args.group == "all": 

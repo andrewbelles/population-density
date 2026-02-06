@@ -9,6 +9,7 @@
 import argparse, io 
 
 import numpy as np
+from numpy.typing import NDArray
 
 from analysis.cross_validation import (
     CVConfig,
@@ -19,7 +20,9 @@ from models.estimators         import (
     TFTabular, 
 )
 
-from scipy.io                  import savemat 
+from scipy.io                  import (
+    savemat 
+) 
 
 from sklearn.preprocessing     import StandardScaler 
 
@@ -81,6 +84,37 @@ USPS_KEY  = "Manifold/USPS"
 
 VIIRS_ANCHORS = project_path("data", "anchors", "viirs.npy")
 USPS_ANCHORS  = project_path("data", "anchors", "usps.npy")
+
+EXPERT_PROBA = {
+    "SAIPE_2023": project_path("data", "stacking", "saipe_optimized_probs.mat"), 
+    "VIIRS_2023": project_path("data", "stacking", "viirs_optimized_probs.mat"), 
+    "USPS_2023":  project_path("data", "stacking", "usps_optimized_probs.mat"), 
+    "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat"), 
+    "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"), 
+    "USPS_MANIFOLD":  project_path("data", "stacking", "usps_pooled_probs.mat"), 
+}
+
+def _save_probs_mat(
+    out_path: str, 
+    probs: NDArray,
+    labels: NDArray,
+    fips: NDArray,
+    class_labels: NDArray,
+    model_name: str 
+): 
+    probs_stack = probs[:, None, :]
+    if class_labels.size: 
+        feature_names = np.array([f"{model_name}_p{c}" for c in class_labels], dtype="U64") 
+    else: 
+        feature_names = np.array([f"{model_name}_pred"], dtype="U64")
+
+    savemat(out_path, {
+        "features": probs, 
+        "probs": probs_stack,
+        "labels": labels, 
+        "feature_names": feature_names, 
+        "sample_ids": fips 
+    })
 
 def _resolve_dataset(spec: str): 
     if spec in BASE: 
@@ -168,6 +202,9 @@ def _spatial_fit_extract(
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
+    class_metrics: bool = False, 
+    save_proba: bool = False, 
+    proba_key: str | None = None, 
     **_
 ): 
     train_ds, train_y, _, train_collate, in_ch = load_spatial_dataset(
@@ -205,15 +242,28 @@ def _spatial_fit_extract(
 
     model.fit(train_ds, train_y)
     
-    '''
-    Nonlinear projection 892 -> 256 is optimized here. 
-    '''
-
-
     test_emb = model.extract(test_ds)
 
+    _, val_corn, val_rps  = model.validate(model.as_eval_loader(test_ds))
 
-    _, val_corn, val_rps  = model.eval_loss(model.as_eval_loader(test_ds))
+    probs = model.predict_proba(test_ds)
+
+    if save_proba and proba_key: 
+        proba_path = EXPERT_PROBA[proba_key] 
+        class_labels = np.sort(np.unique(train_y))
+        _save_probs_mat(
+            proba_path,
+            probs=probs,
+            labels=test_y,
+            fips=test_fips,
+            class_labels=class_labels,
+            model_name=proba_key
+        )
+
+    metrics = None 
+    if class_metrics: 
+        class_labels = np.sort(np.unique(train_y))
+        metrics      = metrics_from_probs(test_y, probs, class_labels)
 
     feature_names = np.array(
         [f"{model_key.split('/')[-1].lower()}_emb_{i}" for i in range(test_emb.shape[1])],
@@ -228,15 +278,19 @@ def _spatial_fit_extract(
         "n_counties": np.array([len(test_y)], dtype=np.int64)
     })
 
-    return {
-        "header": ["Name", "Dim", "RPS", "Corn"],
-        "row": {
-            "Name": f"{model_key}/2013->2023",
-            "Dim": test_emb.shape[1],
-            "RPS": format_metric(val_rps),
-            "Corn": format_metric(val_corn)
-        }
+    header = ["Name", "Dim", "RPS", "Corn"]
+    row    = {
+        "Name": f"{model_key}/2013->2023",
+        "Dim": test_emb.shape[1],
+        "RPS": format_metric(val_rps),
+        "Corn": format_metric(val_corn)
     }
+
+    if metrics is not None: 
+        header += ["Acc", "F1", "ECE", "QWK", "wRPS"] 
+        row.update(_row(row["Name"], metrics))
+
+    return {"header": header, "row": row}
 
 def _row(name, metrics): 
     return {
@@ -246,7 +300,7 @@ def _row(name, metrics):
         "ROC":  format_metric(metrics.get("roc_auc")),
         "ECE":  format_metric(metrics.get("ece")),
         "QWK":  format_metric(metrics.get("qwk")),
-        "RPS":  format_metric(metrics.get("rps"))
+        "wRPS": format_metric(metrics.get("rps"))
     }
 
 # ---------------------------------------------------------
@@ -293,6 +347,9 @@ def test_saipe_manifold(
     trials: int = 50, 
     random_state: int = 0,
     config_path: str = CONFIG_PATH,
+    class_metrics: bool = False, 
+    save_proba: bool = False, 
+    proba_key: str = "SAIPE_MANIFOLD",
     **_
 ): 
     train_path, train_loader = _resolve_dataset(train)
@@ -318,6 +375,26 @@ def test_saipe_manifold(
     embs = model.extract(X_te_s)
     loss = model.loss(X_te_s, y_te)
 
+    probs = model.predict_proba(X_te_s)
+
+    if save_proba and proba_key: 
+        proba_path = EXPERT_PROBA[proba_key] 
+        class_labels = np.sort(np.unique(y_tr))
+        fips = np.asarray(load_compact_dataset(test_path)["sample_ids"])
+        _save_probs_mat(
+            proba_path,
+            probs=probs,
+            labels=y_te,
+            fips=fips,
+            class_labels=class_labels,
+            model_name=proba_key
+        )
+
+    metrics = None 
+    if class_metrics: 
+        class_labels = np.sort(np.unique(y_tr))
+        metrics      = metrics_from_probs(y_te, probs, class_labels)
+
     if out is None: 
         out = project_path("data", "datasets", f"{test.lower()}_pooled.mat")
     feature_names = np.array([f"{test.lower()}_manifold_{i}" for i in range(embs.shape[1])],
@@ -331,14 +408,17 @@ def test_saipe_manifold(
         "n_counties": np.array([len(y_te)], dtype=np.int64)
     })
 
-    return {
-        "header": ["Name", "Dim", "Corn + RPS"],
-        "row": {
-            "Name": f"saipe-2013->saipe-2023/manifold",
-            "Dim": embs.shape[1],
-            "Corn + RPS": format_metric(loss)
-        }
+    header = ["Name", "Val Loss"]
+    row    = {
+        "Name": f"{model_key}",
+        "Val Loss": format_metric(loss),
     }
+
+    if metrics is not None: 
+        header += ["Acc", "F1", "ECE", "QWK", "wRPS"] 
+        row.update(_row(row["Name"], metrics))
+
+    return {"header": header, "row": row}
 
 def test_viirs_manifold(
     _buf,
@@ -352,6 +432,9 @@ def test_viirs_manifold(
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
+    class_metrics: bool = False, 
+    save_proba: bool = False, 
+    proba_key: str = "VIIRS_MANIFOLD",
     **_
 ): 
     node_anchors, anchor_stats = load_node_anchors(viirs_anchors)
@@ -366,7 +449,10 @@ def test_viirs_manifold(
         random_state=random_state,
         config_path=config_path,
         node_anchors=node_anchors,
-        anchor_stats=anchor_stats
+        anchor_stats=anchor_stats,
+        class_metrics=class_metrics,
+        save_proba=save_proba,
+        proba_key=proba_key
     )
 
 def test_usps_manifold(
@@ -381,6 +467,9 @@ def test_usps_manifold(
     sample_frac: float | None = None, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
+    class_metrics: bool = False, 
+    save_proba: bool = False, 
+    proba_key: str = "USPS_MANIFOLD",
     **_
 ):
     node_anchors, anchor_stats = load_node_anchors(usps_anchors)
@@ -395,7 +484,10 @@ def test_usps_manifold(
         random_state=random_state,
         config_path=config_path,
         node_anchors=node_anchors,
-        anchor_stats=anchor_stats
+        anchor_stats=anchor_stats,
+        class_metrics=class_metrics,
+        save_proba=save_proba,
+        proba_key=proba_key
     )
 
 
@@ -417,6 +509,8 @@ def main():
     parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--random-state", type=int, default=0)
+    parser.add_argument("--class-metrics", action="store_true")
+    parser.add_argument("--save-proba", action="store_true")
     args = parser.parse_args()
 
     buf = io.StringIO() 
@@ -433,7 +527,9 @@ def main():
         models=args.models,
         trials=args.trials,
         folds=args.folds,
-        random_state=args.random_state
+        random_state=args.random_state,
+        class_metrics=args.class_metrics,
+        save_proba=args.save_proba
     )
 
     print(buf.getvalue().strip())

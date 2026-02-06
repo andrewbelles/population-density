@@ -24,8 +24,6 @@ from preprocessing.loaders   import (
 
 from numpy.typing            import NDArray
 
-from models.estimators       import SpatialClassifier
-
 from testbench.utils.paths   import (
     PROBA_PATH,
     check_paths_exist
@@ -68,19 +66,6 @@ def stacking_metadata(proba_path: str):
         "fips": fips,
         "class_labels": class_labels 
     }
-
-def make_spatial_classifier(
-    in_channels,
-    compute_strategy,
-    params,
-    features=None
-): 
-    kwargs = dict(params)
-    kwargs["in_channels"] = in_channels 
-    kwargs["compute_strategy"] = compute_strategy 
-    if features is not None: 
-        kwargs["features"] = features 
-    return SpatialClassifier(**kwargs)
 
 def extract_pooled(model, subset): 
     return model.extract_pooled(subset)

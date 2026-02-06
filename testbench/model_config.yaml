@@ -335,7 +335,7 @@ models:
     supcon_dim: 128
     lr: 2.060296433578417e-05
     weight_decay: 3.4614284737793472e-06
-    batch_size: 1024
+    batch_size: 512
   USPS_MANIFOLD/Logistic:
     C: 0.003382286306527411
     class_weight: balanced

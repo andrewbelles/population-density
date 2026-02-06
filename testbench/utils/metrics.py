@@ -28,6 +28,8 @@ from sklearn.cross_decomposition import CCA
 
 from sklearn.feature_selection   import mutual_info_regression
 
+from utils.loss_funcs import compute_ens_weights
+
 OPT_TASK = TaskSpec("classification", ("rps",))
 
 def _softmax_rows(probs: NDArray) -> NDArray: 
@@ -90,8 +92,8 @@ def metrics_from_probs(y_true, probs, class_labels):
 
     preds = np.argmax(probs, axis=1)
 
-    counts = np.bincount(y_idx, minlength=K)
-    weights = counts.max() / np.clip(counts, 1, None)
+    counts  = np.bincount(y_idx, minlength=K)
+    weights = compute_ens_weights(counts, 0.999) 
 
     if K == 2:
         roc = roc_auc_score(y_idx, probs[:, 1])

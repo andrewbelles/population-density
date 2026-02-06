@@ -92,16 +92,12 @@ strategy = ComputeStrategy.from_env()
 
 EXPERT_DATASETS = {
     "VIIRS": project_path("data", "datasets", "viirs_nchs_2023.mat"),
-    # "TIGER": project_path("data", "datasets", "tiger_nchs_2023.mat"),
     "NLCD": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
     "SAIPE": project_path("data", "datasets", "saipe_nchs_2023.mat")
 }
 
 EXPERT_PROBA    = {
-    "VIIRS": project_path("data", "stacking", "viirs_optimized_probs.mat"),
-    # "TIGER": project_path("data", "stacking", "tiger_optimized_probs.mat"),
-    "NLCD": project_path("data", "stacking", "nlcd_optimized_probs.mat"),
-    "SAIPE": project_path("data", "datasets", "saipe_optimized_probs.mat"),
+    "VIIRS_2023": project_path("data", "stacking", "viirs_optimized_probs.mat"),
     "SAIPE_2023": project_path("data", "stacking", "saipe_optimized_probs.mat"),
     "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"),
     "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat"),
@@ -435,11 +431,25 @@ def test_expert_oof(
     datasets: list[str] | None = None, 
     filter_dir: str | None = None, 
     config_path: str = CONFIG_PATH, 
+    cached: bool = False, 
     **_
 ):
     rows    = []
     config  = cv_config(5, RANDOM_STATE) 
     targets = datasets or list(DATASETS) 
+
+    if cached: 
+        missing = [n for n in targets if n not in EXPERT_PROBA]
+        if missing: 
+            raise KeyError(f"missing EXPERT_PROBA entries for: {missing}")
+
+        paths = {n: EXPERT_PROBA[n] for n in targets}
+        check_paths_exist(list(paths.values()), "cached expert prob files")
+        return {
+            "header": ["Name", "Acc", "F1", "ROC", "ECE", "QWK", "RPS"], 
+            "rows": [], 
+            "experts": paths 
+        }
 
     for name in targets:
         if name not in BASE: 

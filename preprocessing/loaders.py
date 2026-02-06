@@ -592,12 +592,18 @@ def load_oof_predictions(filepath: str) -> OOFDatasetDict:
     mat = loadmat(filepath) 
 
     if "fips_codes" not in mat: 
-        raise ValueError(f"{filepath} missing fips_codes")
-    fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+        if "sample_ids" not in mat: 
+            raise ValueError(f"{filepath} missing fips_codes and sample_ids")
+        else: 
+            key = "sample_ids"
+    else: 
+        key = "fips_codes"
+    fips = _mat_str_vector(mat[key]).astype("U5")
 
-    if "model_names" not in mat: 
-        raise ValueError(f"{filepath} missing model_names")
-    model_names = _mat_str_vector(mat["model_names"]).astype("U64")
+    if "model_names" in mat: 
+        model_names = _mat_str_vector(mat["model_names"]).astype("U64")
+    else: 
+        model_names = np.zeros((0,), dtype="U64")
 
     if "class_labels" in mat:
         class_labels = np.asarray(mat["class_labels"]).reshape(-1).astype(np.int64)
