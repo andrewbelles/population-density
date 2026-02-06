@@ -24,6 +24,8 @@ from torch.utils.data import Dataset, get_worker_info
 
 from scipy.ndimage import uniform_filter
 
+from scipy.stats   import entropy 
+
 from rasterio.warp import (
     transform_geom,
     reproject,
@@ -803,9 +805,17 @@ class UspsTensorDataset(SpatialTensorDataset):
                     target = tract_mask & land_mask 
 
                     if target.any(): 
+                        tract_land_cover = nlcd_dst[target]
+
+                        if tract_land_cover.size > 0: 
+                            _, counts = np.unique(tract_land_cover, return_counts=True)
+                            texture   = entropy(counts)
+                        else: 
+                            texture   = 0.0 
+
                         channels[0, target] = comm_ratio 
                         channels[1, target] = vac_rate 
-                        channels[2, target] = bus_vac_rate 
+                        channels[2, target] = texture  
                         channels[3, target] = flux_rate 
 
                 mask = (valid_mask & nlcd_valid).astype(np.uint8)

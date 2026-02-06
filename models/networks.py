@@ -281,7 +281,8 @@ class LightweightBackbone(nn.Module):
         patch_size=32,
         stat="viirs",
         patch_quantile=0.95,
-        anchor_stats: list[float] | None = None 
+        anchor_stats: list[float] | None = None,
+        flat: bool = False, 
     ): 
         super().__init__()
         
@@ -293,31 +294,42 @@ class LightweightBackbone(nn.Module):
         with torch.no_grad(): 
             self.grayscale.weight.fill_(1.0 / 3.0)
 
-        mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
-        encoder   = mobilenet.features 
+        if flat:
+            self.encoder = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1), 
+                nn.GELU(),
+                nn.Conv2d(64, 128, kernel_size=1),
+                nn.GELU(),
+                nn.Conv2d(128, embed_dim, kernel_size=1)
+            )
+            self.projector = nn.Identity() 
+        else: 
+            mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
+            encoder   = mobilenet.features 
 
-        orig_conv = encoder[0][0]
-        new_conv  = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=orig_conv.out_channels,
-            kernel_size=orig_conv.kernel_size,
-            stride=orig_conv.stride, 
-            padding=orig_conv.padding, 
-            bias=False 
-        )
+            orig_conv = encoder[0][0]
+            new_conv  = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=orig_conv.out_channels,
+                kernel_size=orig_conv.kernel_size,
+                stride=orig_conv.stride, 
+                padding=orig_conv.padding, 
+                bias=False 
+            )
 
-        with torch.no_grad(): 
-            new_conv.weight.copy_(orig_conv.weight.sum(dim=1, keepdim=True))
-        encoder[0][0] = new_conv 
+            with torch.no_grad(): 
+                new_conv.weight.copy_(orig_conv.weight.sum(dim=1, keepdim=True))
+            encoder[0][0] = new_conv 
 
-        self.encoder   = encoder[:4] # truncate encoder to 4 blocks 
-        self.projector = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(24, embed_dim),
-            nn.LayerNorm(embed_dim),
-            nn.GELU() 
-        ) 
+            self.encoder   = encoder[:4] # truncate encoder to 4 blocks 
+
+            self.projector = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(24, embed_dim),
+                nn.LayerNorm(embed_dim),
+                nn.GELU() 
+            ) 
 
         self.stat           = stat 
         self.patch_quantile = patch_quantile
@@ -582,16 +594,20 @@ class HypergraphBackbone(nn.Module):
         thresh_low=LOGRADIANCE_GATE_LOW,
         thresh_high=LOGRADIANCE_GATE_HIGH,             # ignored for > 1 channels 
         node_anchors: list[list[float]] | None = None, # 1 channel -> None, 1 > must pass 
-        anchor_stats: list[float] | None = None        # [mean, std] used to z-score anchor values 
+        anchor_stats: list[float] | None = None        # [mean, std] used to z-score anchors 
     ): 
         super().__init__()
+       
+        is_flat = True if patch_stat == "usps" else False 
+
         self.encoder = LightweightBackbone(
             in_channels=in_channels,
             embed_dim=embed_dim, 
             patch_size=patch_size,
             stat=patch_stat,
             patch_quantile=patch_quantile, 
-            anchor_stats=anchor_stats
+            anchor_stats=anchor_stats,
+            flat=is_flat 
         )
 
         if node_anchors is not None: 
