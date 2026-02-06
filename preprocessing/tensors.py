@@ -690,7 +690,7 @@ class UspsTensorDataset(SpatialTensorDataset):
     @property
     def tile_shape(self) -> tuple[int, int, int]: 
         ht, wt = self.tile_hw 
-        return (3, ht, wt)
+        return (4, ht, wt)
 
     @property 
     def dtype(self) -> np.dtype: 
@@ -737,7 +737,7 @@ class UspsTensorDataset(SpatialTensorDataset):
                     continue 
 
                 H, W     = arr.shape 
-                channels = np.zeros((3, H, W), dtype=np.float32) 
+                channels = np.zeros((4, H, W), dtype=np.float32) 
 
                 nlcd_dst = np.zeros((H, W), dtype=nlcd.dtypes[0])
 
@@ -755,7 +755,6 @@ class UspsTensorDataset(SpatialTensorDataset):
                 nlcd_valid     = (nlcd_dst != nlcd.nodata if nlcd.nodata is not None 
                                   else np.ones_like(nlcd_dst, bool))
                 water_mask     = np.isin(nlcd_dst, self.water_codes) & nlcd_valid 
-                developed_mask = np.isin(nlcd_dst, self.developed_codes) & nlcd_valid 
                 land_mask      = (~water_mask) & nlcd_valid 
 
                 county_shape   = shape(geom)
@@ -763,16 +762,14 @@ class UspsTensorDataset(SpatialTensorDataset):
                 
                 for feat in tracts.filter(bbox=bbox): 
 
-                    props      = feat.get("properties") or {}
-                    capacity   = self._as_float(props, "capacity")
-                    comm_ratio = self._as_float(props, "comm_ratio")
-                    vac_rate   = self._as_float(props, "vac_rate")
+                    props        = feat.get("properties") or {}
+                    bus_vac_rate = self._as_float(props, "bus_vac_rate")
+                    comm_ratio   = self._as_float(props, "comm_ratio")
+                    vac_rate     = self._as_float(props, "vac_rate")
+                    flux_rate    = self._as_float(props, "flux_rate")
 
-                    if capacity is None or capacity <= 0: 
-                        skipped += 1
-                        continue 
-
-                    if comm_ratio is None or vac_rate is None: 
+                    if (bus_vac_rate is None or flux_rate is None or 
+                        comm_ratio is None or vac_rate is None): 
                         skipped += 1
                         continue 
 
@@ -796,24 +793,20 @@ class UspsTensorDataset(SpatialTensorDataset):
                         out_shape=(H, W), 
                         transform=out_transform,
                         fill=0,
-                        all_touched=self.all_touched,
+                        all_touched=True,
                         dtype=np.uint8
                     ).astype(bool)
 
                     if not tract_mask.any(): 
                         continue 
 
-                    target = tract_mask & developed_mask 
-                    if not target.any(): 
-                        target = tract_mask & land_mask 
+                    target = tract_mask & land_mask 
 
                     if target.any(): 
-                        density   = capacity / float(target.sum())
-                        pixel_val = np.log1p(density) 
-
-                        channels[0, target] += pixel_val 
-                        channels[1, target] += comm_ratio 
-                        channels[2, target] += vac_rate 
+                        channels[0, target] = comm_ratio 
+                        channels[1, target] = vac_rate 
+                        channels[2, target] = bus_vac_rate 
+                        channels[3, target] = flux_rate 
 
                 mask = (valid_mask & nlcd_valid).astype(np.uint8)
                 if not np.any(mask):
@@ -847,8 +840,6 @@ class UspsTensorDataset(SpatialTensorDataset):
         if not np.isfinite(v): 
             return None 
         return v
-
-
 
 # ---------------------------------------------------------
 # Main entry point  

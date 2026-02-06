@@ -347,12 +347,8 @@ class LightweightBackbone(nn.Module):
         N, C, _, _ = patches.shape 
         flat       = patches.view(N, C, -1)
 
-        if stat == "viirs": 
+        if stat == "viirs" or stat == "usps": 
             feats = torch.quantile(flat, q, dim=2) 
-        elif stat == "usps": 
-            max0  = flat[:, :1, :].max(dim=2).values 
-            med12 = flat[:, 1:, :].median(dim=2).values
-            feats = torch.cat([max0, med12], dim=1)
         elif stat == "p95": 
             feats = torch.quantile(flat, q, dim=1)
         elif stat == "max": 

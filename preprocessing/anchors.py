@@ -45,14 +45,10 @@ def usps_patch_features(x, patch_size=32):
     patches = patches.reshape(B * L, C, P, P)
 
     flat = patches.view(patches.size(0), C, -1)
-    maxv = flat.max(dim=2).values 
-    med  = flat.median(dim=2).values 
 
-    c0   = maxv[:, :1] 
-    c12  = med[:, 1:] * 100.0 # scale up \in [0, 10] 
+    p95 = torch.quantile(flat, 0.95, dim=2)
 
-    return torch.cat([c0, c12], dim=1)
-
+    return p95 
 
 def compute_anchors(loader, n_samples=5e5, k=3, patch_size=32, device="cuda", feature_fn=None): 
     if feature_fn is None: 
@@ -106,7 +102,7 @@ def main():
         in_channels = 2 
     else: 
         feature_fn = usps_patch_features 
-        in_channels = 3 
+        in_channels = 4 
 
     bags    = load_spatial_mmap_manifest(args.root, tile_shape=(in_channels, 256, 256), max_bag_size=64)
     dataset = bags["dataset"]

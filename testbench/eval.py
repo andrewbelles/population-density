@@ -462,7 +462,7 @@ def test_usps_manifold(
     test: str, 
     out: str, 
     model_key: str = USPS_KEY, 
-    tile_shape: tuple[int, int, int] = (3, 256, 256), 
+    tile_shape: tuple[int, int, int] = (4, 256, 256), 
     usps_anchors: str = USPS_ANCHORS, 
     sample_frac: float | None = None, 
     random_state: int = 0, 

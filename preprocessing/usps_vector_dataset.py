@@ -8,6 +8,8 @@
 
 import argparse 
 
+import numpy as np 
+
 import geopandas as gpd 
 
 import pandas as pd 
@@ -31,6 +33,10 @@ def load_usps_attrs(path: Path) -> pd.DataFrame:
         "ams_res", 
         "ams_bus",
         "res_vac", 
+        "bus_vac", 
+        "nostat_res",
+        "nostat_bus",
+        "nostat_oth"
     ]
 
     missing = [c for c in cols if c not in df.columns]
@@ -46,13 +52,20 @@ def load_usps_attrs(path: Path) -> pd.DataFrame:
 
 def compute_channels(df: pd.DataFrame) -> pd.DataFrame: 
 
-    total = df["ams_res"] + df["ams_bus"] + df["res_vac"]
+    df["no_stat"] = df["nostat_res"] + df["nostat_bus"] + df["nostat_oth"]
+
+    total = (df["ams_res"] + df["ams_bus"] + df["res_vac"] + df["bus_vac"] +
+             df["no_stat"])
 
     df = df[total > 0].copy() 
     
-    df["capacity"]   = df["ams_res"] + df["res_vac"] 
     df["comm_ratio"] = df["ams_bus"] / total 
     df["vac_rate"]   = df["res_vac"] / total 
+
+    bus_total = df["ams_bus"] + df["bus_vac"]
+    df["bus_vac_rate"] = np.where(bus_total > 0, df["bus_vac"] / bus_total, 0.0)
+
+    df["flux_rate"] = df["no_stat"] / total 
 
     return df 
 
@@ -79,7 +92,7 @@ def main():
     usps = compute_channels(usps)
 
     merged = tracts.merge(
-        usps[["GEOID", "capacity", "comm_ratio", "vac_rate"]],
+        usps[["GEOID", "flux_rate", "bus_vac_rate", "comm_ratio", "vac_rate"]],
         on="GEOID",
         how="inner"
     )
