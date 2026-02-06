@@ -335,6 +335,7 @@ class LightweightBackbone(nn.Module):
         patches = self.unfold(tiles)
         score   = self.patch_stat(patches, stat=self.stat, q=self.patch_quantile)
 
+        # x      = self.grayscale(patches)
         feats  = self.encoder(patches)
         embs   = self.projector(feats)
 

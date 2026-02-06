@@ -283,59 +283,60 @@ models:
     class_weight: balanced
   Manifold/VIIRS:
     patch_size: 32
-    embed_dim: 128
-    gnn_dim: 128
+    embed_dim: 64
+    gnn_dim: 64
     gnn_layers: 3
     gnn_heads: 8
-    fc_dim: 128
-    dropout: 0.10780059829737508
-    attn_dropout: 0.19627229936357576
-    max_bag_frac: 0.7919413154054114
-    alpha_rps: 1.0613741311382698
-    beta_supcon: 1.1089716204767714
-    supcon_temperature: 0.11664395239064992
+    fc_dim: 256
+    dropout: 0.41559756610848575
+    attn_dropout: 0.12971015973236713
+    max_bag_frac: 0.917224658236531
+    alpha_rps: 3.6381905312541565
+    beta_supcon: 1.6111087877183636
+    supcon_temperature: 0.2586811920825075
     supcon_dim: 128
-    lr: 3.965761586675901e-05
-    weight_decay: 8.781769994076174e-05
-    batch_size: 512
+    lr: 0.0006611761535788001
+    weight_decay: 1.988214226110796e-05
+    reduce_depth: 1
+    reduce_dropout: 0.140111617401261
   Manifold/SAIPE:
-    hidden_dim: 832
-    depth: 16
-    dropout: 0.21132432057705983
-    mix_alpha: 0.11591946476565393
+    hidden_dim: 896
+    depth: 15
+    dropout: 0.0858220902528919
+    mix_alpha: 0.3802465273929052
     mix_mult: 16
-    beta_supcon: 0.33057181909707783
-    alpha_rps: 4.1829088553098
-    supcon_temperature: 0.16544571772083352
-    supcon_dim: 128
-    transformer_dim: 64
-    transformer_tokens: 8
+    beta_supcon: 0.3499484360424506
+    alpha_rps: 4.215660521346364
+    supcon_temperature: 0.12634898861272004
+    supcon_dim: 64
+    transformer_dim: 128
+    transformer_tokens: 4
     transformer_heads: 8
-    transformer_layers: 3
-    transformer_dropout: 0.03723860117606723
-    transformer_attn_dropout: 0.18887447799678672
-    reduce_depth: 3
-    reduce_dropout: 0.09809176172351342
-    lr: 0.00016881639737451154
-    weight_decay: 5.79521356649678e-06
-    batch_size: 256
+    transformer_layers: 4
+    transformer_dropout: 0.19565516735505484
+    transformer_attn_dropout: 0.054176312450119626
+    reduce_depth: 4
+    reduce_dropout: 0.06583919801125074
+    lr: 0.0008389050182081556
+    weight_decay: 1.5930762847274783e-06
   Manifold/USPS:
     patch_size: 64
-    embed_dim: 128
+    embed_dim: 64
     gnn_dim: 256
-    gnn_layers: 3
-    gnn_heads: 8
-    fc_dim: 128
-    dropout: 0.1918990802252705
-    attn_dropout: 0.20195034157334565
-    max_bag_frac: 0.8354489832450539
-    alpha_rps: 1.5771319730538558
-    beta_supcon: 0.36716220808177685
-    supcon_temperature: 0.22198975849933741
+    gnn_layers: 2
+    gnn_heads: 4
+    fc_dim: 256
+    dropout: 0.14076599964979272
+    attn_dropout: 0.20704078249920105
+    max_bag_frac: 0.8655915192396935
+    alpha_rps: 2.962453183957117
+    beta_supcon: 0.7028450457629686
+    supcon_temperature: 0.07345789470866265
     supcon_dim: 128
-    lr: 2.060296433578417e-05
-    weight_decay: 3.4614284737793472e-06
-    batch_size: 512
+    lr: 0.00013954702334818668
+    weight_decay: 2.6585454599593032e-06
+    reduce_depth: 2
+    reduce_dropout: 0.12110007475811556
   USPS_MANIFOLD/Logistic:
     C: 0.003382286306527411
     class_weight: balanced

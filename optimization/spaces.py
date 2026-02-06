@@ -165,14 +165,14 @@ def define_hgnn_space(trial: optuna.Trial):
         "reduce_depth": trial.suggest_int("reduce_depth", 1, 4), 
         "reduce_dropout": trial.suggest_float("reduce_dropout", 0.0, 0.2), 
 
-        "batch_size": trial.suggest_int("batch_size", 512, 1024, step=512), 
+        "batch_size": 256, 
 
         "threshold_scale": 1.0,
         "ens": 0.999,
-        "soft_epochs": 200, 
+        "soft_epochs": 400, 
         "hard_epochs": 200, 
         "patch_stat": "viirs", 
-        "early_stopping_rounds": 15, 
+        "early_stopping_rounds": 10, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,
         "target_global_batch": 2048

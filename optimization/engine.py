@@ -18,6 +18,8 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Proto
 
 from numpy.typing import NDArray
 
+torch.multiprocessing.set_sharing_strategy("file_system") 
+
 # ---------------------------------------------------------
 # Evaluator Contracts 
 # ---------------------------------------------------------
