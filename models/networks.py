@@ -813,7 +813,7 @@ class Mixer(nn.Module):
         class_weights: torch.Tensor, 
         *,
         alpha: float = 0.2, 
-        mix_mult: int = 2, 
+        mix_mult: int = 4, 
         max_mix: int | None = None, 
         anchor_power: float = 1.0, 
         with_replacement: bool = True 

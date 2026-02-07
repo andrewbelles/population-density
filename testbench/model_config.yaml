@@ -300,25 +300,25 @@ models:
     reduce_depth: 1
     reduce_dropout: 0.140111617401261
   Manifold/SAIPE:
-    hidden_dim: 896
+    hidden_dim: 768
     depth: 15
-    dropout: 0.0858220902528919
-    mix_alpha: 0.3802465273929052
-    mix_mult: 8
-    beta_supcon: 0.3499484360424506
-    alpha_rps: 4.215660521346364
-    supcon_temperature: 0.12634898861272004
-    supcon_dim: 64
+    dropout: 0.04923574818834402
+    mix_alpha: 0.28843220172877526
+    mix_mult: 16
+    beta_supcon: 0.26638848119879655
+    alpha_rps: 2.9664511846190282
+    supcon_temperature: 0.058281768167717234
+    supcon_dim: 128
     transformer_dim: 128
     transformer_tokens: 4
-    transformer_heads: 8
-    transformer_layers: 4
-    transformer_dropout: 0.19565516735505484
-    transformer_attn_dropout: 0.054176312450119626
-    reduce_depth: 4
-    reduce_dropout: 0.06583919801125074
-    lr: 0.0008389050182081556
-    weight_decay: 1.5930762847274783e-06
+    transformer_heads: 4
+    transformer_layers: 3
+    transformer_dropout: 0.029578560441406936
+    transformer_attn_dropout: 0.123201131125599
+    reduce_depth: 1
+    reduce_dropout: 0.15025754703231417
+    lr: 0.00015629013652840908
+    weight_decay: 2.2628471112969796e-06
   Manifold/USPS:
     patch_size: 64
     embed_dim: 64
@@ -341,22 +341,22 @@ models:
     C: 0.003382286306527411
     class_weight: balanced
   Manifold/USPS_SCALAR:
-    hidden_dim: 896
-    depth: 15
-    dropout: 0.0858220902528919
-    mix_alpha: 0.3802465273929052
-    mix_mult: 8 
-    beta_supcon: 0.3499484360424506
-    alpha_rps: 4.215660521346364
-    supcon_temperature: 0.12634898861272004
-    supcon_dim: 64
-    transformer_dim: 128
-    transformer_tokens: 4
+    hidden_dim: 832
+    depth: 14
+    dropout: 0.293393431148155
+    mix_alpha: 0.1732572224904824
+    mix_mult: 16
+    beta_supcon: 0.7320973626903584
+    alpha_rps: 3.0352679639331606
+    supcon_temperature: 0.18305145932263847
+    supcon_dim: 128
+    transformer_dim: 64
+    transformer_tokens: 8
     transformer_heads: 8
-    transformer_layers: 4
-    transformer_dropout: 0.19565516735505484
-    transformer_attn_dropout: 0.054176312450119626
+    transformer_layers: 3
+    transformer_dropout: 0.08879308003690248
+    transformer_attn_dropout: 0.19003992882368284
     reduce_depth: 4
-    reduce_dropout: 0.06583919801125074
-    lr: 0.0008389050182081556
-    weight_decay: 1.5930762847274783e-06
+    reduce_dropout: 0.0862008020828347
+    lr: 0.000355949924569822
+    weight_decay: 1.0021740819205156e-06
