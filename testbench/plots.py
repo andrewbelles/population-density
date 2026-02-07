@@ -20,6 +20,7 @@ import numpy as np
 
 import geopandas 
 
+from shapely import line_interpolate_point
 from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 
@@ -29,10 +30,15 @@ from typing import Callable, Mapping
 from preprocessing.loaders import load_oof_predictions
 
 import testbench.adjacency    as adjacency 
+
 import testbench.stacking     as stacking 
 
+import testbench.eval         as eval 
+
 from testbench.utils.oof   import load_probs_labels_fips 
+
 from testbench.utils.graph import coords_for_fips 
+
 from testbench.utils.paths import (
     MOBILITY_PATH,
     SHAPEFILE,
@@ -194,6 +200,17 @@ def build_embedding_data(
             })
 
     return {"embeddings": entries, "expert_probs": expert_probs}
+
+def build_sweep_data(
+    *,
+    dataset: str = "SAIPE", 
+    **_ 
+): 
+    out = eval.test_scalar_ens_sweep(
+        _buf=None, 
+        dataset=dataset 
+    ) 
+    return out 
 
 # --------------------------------------------------------- 
 # Stacking  
@@ -537,6 +554,26 @@ def plot_ordinal_distribution(data):
     return fig 
 
 # ---------------------------------------------------------
+# Evaluation Plots 
+# ---------------------------------------------------------
+
+def plot_ens_beta_sweep(data): 
+    betas    = np.asarray(data["betas"], dtype=np.float64)
+    qwk_2013 = np.asarray(data["qwk_2013"], dtype=np.float64)
+    qwk_2023 = np.asarray(data["qwk_2023"], dtype=np.float64)
+    dataset  = data.get("dataset", "Unknown")
+
+    fig, ax  = plt.subplots(figsize=(7, 4))
+    ax.plot(betas, qwk_2013, color="blue", linewidth=0.8, alpha=0.7, label="Optimized QWK (2013)")
+    ax.plot(betas, qwk_2023, color="green", linewidth=1.0, label="Generalized QWK (2023)")
+    ax.set_xlabel(r"ENS $\beta$")
+    ax.set_ylabel("QWK")
+    ax.set_title(r"ENS $\beta$ " + f"({dataset})")
+    ax.grid(True, alpha=0.25)
+    ax.legend() 
+    return fig 
+
+# ---------------------------------------------------------
 # Plot interface 
 # ---------------------------------------------------------
 
@@ -628,6 +665,13 @@ PLOT_GROUPS = {
             "manifold_umap": plot_embedding_umap,
             "qwk_penalty": plot_qwk_penalty,
             "ordinal_distribution": plot_ordinal_distribution
+        }
+    ), 
+    "sweep": PlotGroup(
+        name="sweep",
+        build=build_sweep_data,
+        plots={
+            "ens_beta_qwk": plot_ens_beta_sweep
         }
     )
 }

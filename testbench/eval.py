@@ -10,6 +10,7 @@ import argparse, io
 
 import numpy as np
 from numpy.typing import NDArray
+from sklearn.model_selection import StratifiedShuffleSplit
 
 from analysis.cross_validation import (
     CVConfig,
@@ -95,6 +96,19 @@ EXPERT_PROBA = {
     "USPS_MANIFOLD":  project_path("data", "stacking", "usps_pooled_probs.mat"), 
 }
 
+SCALAR_SWEEP_DATASETS = {
+    "SAIPE": {
+        "train": "SAIPE_2013", 
+        "test": "SAIPE_2023", 
+        "model_key": "Manifold/SAIPE"
+    },
+    "USPS_SCALAR": {
+        "train": project_path("data", "datasets", "usps_scalar_2013.mat"), 
+        "test":  project_path("data", "datasets", "usps_scalar_2023.mat"), 
+        "model_key": "Manifold/USPS_SCALAR"
+    }
+}
+
 def _save_probs_mat(
     out_path: str, 
     probs: NDArray,
@@ -135,7 +149,6 @@ def _load_dataset(path, loader):
     if coords is not None: 
         coords = np.asarray(coords, dtype=np.float64)
     return X, y, coords 
-
 
 def _optimize_on_train(
     train_path, 
@@ -550,13 +563,89 @@ def test_usps_manifold(
         proba_key=proba_key
     )
 
+def test_scalar_ens_sweep(
+    _buf, 
+    *, 
+    dataset: str = "SAIPE", 
+    train: str | None = None, 
+    test: str | None = None,
+    model_key: str | None = None, 
+    beta_min: float = 0.9, 
+    beta_max: float = 0.999, 
+    beta_steps: int = 25, 
+    holdout_frac: float = 0.2, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH
+): 
+    if dataset not in SCALAR_SWEEP_DATASETS: 
+        raise ValueError(f"unknown dataset: {dataset}")
+
+    spec       = SCALAR_SWEEP_DATASETS[dataset]
+    train_spec = train     or spec["train"]
+    test_spec  = test      or spec["test"]
+    model_key  = model_key or spec["model_key"]
+
+    train_path, train_loader = _resolve_dataset(train_spec)
+    test_path, test_loader   = _resolve_dataset(test_spec)
+
+    X13, y13, _ = _load_dataset(train_path, train_loader)
+    X23, y23, _ = _load_dataset(test_path, test_loader)
+
+    splitter = StratifiedShuffleSplit(
+        n_splits=1, test_size=holdout_frac, random_state=random_state
+    )
+    tr_idx, va_idx = next(splitter.split(X13, y13)) 
+    
+    scaler = StandardScaler() 
+    X13_tr   = scaler.fit_transform(X13[tr_idx])
+    X13_va   = scaler.transform(X13[va_idx])
+    y13_tr   = y13[tr_idx]
+    y13_va   = y13[va_idx]
+    X23      = scaler.transform(X23) 
+
+    class_labels_13 = np.sort(np.unique(y13))
+    class_labels_23 = np.sort(np.unique(y23))
+
+    base_params = load_model_params(config_path, model_key)
+
+    betas = np.linspace(beta_min, beta_max, beta_steps)
+    qwk13 = np.zeros_like(betas, dtype=np.float64)
+    qwk23 = np.zeros_like(betas, dtype=np.float64)
+
+    for i, b in enumerate(betas): 
+
+        params = dict(base_params)
+        params["ens"] = float(b)
+        params["random_state"] = random_state 
+
+        model = make_residual_tabular()(
+            in_dim=X13_tr.shape[1],
+            **params, 
+            compute_strategy=strategy
+        )
+        model.fit(X13_tr, y13_tr)
+
+        probs13  = model.predict_proba(X13_va)
+        qwk13[i] = metrics_from_probs(y13_va, probs13, class_labels_13)["qwk"] 
+
+        probs23  = model.predict_proba(X23)
+        qwk23[i] = metrics_from_probs(y23, probs23, class_labels_23)["qwk"] 
+
+    return {
+        "betas": betas, 
+        "qwk_2013": qwk13, 
+        "qwk_2023": qwk23, 
+        "dataset": dataset, 
+        "model_key": model_key 
+    }
 
 TESTS = {
     "fit-eval": test_fit_eval,
     "usps-manifold": test_usps_manifold,
     "saipe-manifold": test_saipe_manifold,
     "viirs-manifold": test_viirs_manifold,
-    "usps-scalar-manifold": test_usps_scalar_manifold
+    "usps-scalar-manifold": test_usps_scalar_manifold,
+    "scalar-ens-sweep": test_scalar_ens_sweep 
 }
 
 
