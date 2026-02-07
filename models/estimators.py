@@ -1249,7 +1249,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         beta_supcon: float = 0.5, 
         supcon_temperature: float = 0.07, 
         supcon_dim: int = 128,
-        ens: float = 0.999, 
+        ens: float = 0.995, 
 
         transformer_dim: int,     
         transformer_tokens: int, 

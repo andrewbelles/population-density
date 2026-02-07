@@ -284,41 +284,41 @@ models:
   Manifold/VIIRS:
     patch_size: 32
     embed_dim: 64
-    gnn_dim: 64
+    gnn_dim: 256
     gnn_layers: 3
     gnn_heads: 8
-    fc_dim: 256
-    dropout: 0.41559756610848575
-    attn_dropout: 0.12971015973236713
-    max_bag_frac: 0.917224658236531
-    alpha_rps: 3.6381905312541565
-    beta_supcon: 1.6111087877183636
-    supcon_temperature: 0.2586811920825075
-    supcon_dim: 128
-    lr: 0.0006611761535788001
-    weight_decay: 1.988214226110796e-05
-    reduce_depth: 1
-    reduce_dropout: 0.140111617401261
+    fc_dim: 128
+    dropout: 0.49764000341998593
+    attn_dropout: 0.1454554590554234
+    max_bag_frac: 0.8890396983442015
+    alpha_rps: 2.465862332753677
+    beta_supcon: 1.391295588294204
+    supcon_temperature: 0.23692862364560804
+    supcon_dim: 256
+    lr: 0.0004867740674473713
+    weight_decay: 4.36359843744835e-06
+    reduce_depth: 3
+    reduce_dropout: 0.13911111623750236
   Manifold/SAIPE:
-    hidden_dim: 768
-    depth: 15
-    dropout: 0.04923574818834402
-    mix_alpha: 0.28843220172877526
+    hidden_dim: 896
+    depth: 16
+    dropout: 0.20034362724214383
+    mix_alpha: 0.33944773885184987
     mix_mult: 16
-    beta_supcon: 0.26638848119879655
-    alpha_rps: 2.9664511846190282
-    supcon_temperature: 0.058281768167717234
-    supcon_dim: 128
-    transformer_dim: 128
+    beta_supcon: 0.1570862754832724
+    alpha_rps: 6.211470597931696
+    supcon_temperature: 0.1984301280090353
+    supcon_dim: 64
+    transformer_dim: 64
     transformer_tokens: 4
     transformer_heads: 4
-    transformer_layers: 3
-    transformer_dropout: 0.029578560441406936
-    transformer_attn_dropout: 0.123201131125599
-    reduce_depth: 1
-    reduce_dropout: 0.15025754703231417
-    lr: 0.00015629013652840908
-    weight_decay: 2.2628471112969796e-06
+    transformer_layers: 4
+    transformer_dropout: 0.0019407536288285295
+    transformer_attn_dropout: 0.17255159800636077
+    reduce_depth: 4
+    reduce_dropout: 0.13860384183177055
+    lr: 0.00014751933085672449
+    weight_decay: 4.098056784979874e-06
   Manifold/USPS:
     patch_size: 64
     embed_dim: 64
@@ -341,22 +341,22 @@ models:
     C: 0.003382286306527411
     class_weight: balanced
   Manifold/USPS_SCALAR:
-    hidden_dim: 832
-    depth: 14
-    dropout: 0.293393431148155
-    mix_alpha: 0.1732572224904824
+    hidden_dim: 1024
+    depth: 16
+    dropout: 0.043648426348015266
+    mix_alpha: 0.19096076264972
     mix_mult: 16
-    beta_supcon: 0.7320973626903584
-    alpha_rps: 3.0352679639331606
-    supcon_temperature: 0.18305145932263847
-    supcon_dim: 128
+    beta_supcon: 0.3471640214334131
+    alpha_rps: 9.103221149716179
+    supcon_temperature: 0.15587939947561605
+    supcon_dim: 64
     transformer_dim: 64
-    transformer_tokens: 8
-    transformer_heads: 8
-    transformer_layers: 3
-    transformer_dropout: 0.08879308003690248
-    transformer_attn_dropout: 0.19003992882368284
-    reduce_depth: 4
-    reduce_dropout: 0.0862008020828347
-    lr: 0.000355949924569822
-    weight_decay: 1.0021740819205156e-06
+    transformer_tokens: 4
+    transformer_heads: 4
+    transformer_layers: 4
+    transformer_dropout: 0.13946835554927248
+    transformer_attn_dropout: 0.10141586806858505
+    reduce_depth: 3
+    reduce_dropout: 0.03994762958310362
+    lr: 0.0002521236158516647
+    weight_decay: 0.0001489783980672275

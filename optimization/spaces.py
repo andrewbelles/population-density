@@ -128,7 +128,7 @@ def define_spatial_space(trial):
 
         "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
 
-        "ens": 0.999, # effective number of samples hyperparam   
+        "ens": 0.99, # effective number of samples hyperparam   
         "epochs": 350, 
         "early_stopping_rounds": 10, 
         "eval_fraction": 0.2,
@@ -168,7 +168,7 @@ def define_hgnn_space(trial: optuna.Trial):
         "batch_size": 512, 
 
         "threshold_scale": 1.0,
-        "ens": 0.999,
+        "ens": 0.995,
         "soft_epochs": 400, 
         "hard_epochs": 200, 
         "patch_stat": "viirs", 
