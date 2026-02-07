@@ -693,6 +693,7 @@ def main():
     parser.add_argument("--log-hist", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--embedding-paths", nargs="*", default=None)
+    parser.add_argument("--dataset", default=None)
     parser.add_argument("--cached-experts", action="store_true")
     args = parser.parse_args()
 
@@ -702,6 +703,7 @@ def main():
         log_hist=args.log_hist, 
         quiet=args.quiet, 
         datasets=args.datasets,
+        dataset=args.dataset, 
         metric_keys=args.metric_keys,
         embedding_paths=args.embedding_paths,
         cached_experts=args.cached_experts
