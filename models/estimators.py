@@ -1319,6 +1319,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.model_     = nn.Module()
 
     def fit(self, X, y): 
+        print(f"[ENS Beta] {self.ens}")
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64).reshape(-1)
 

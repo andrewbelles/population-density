@@ -478,43 +478,7 @@ def plot_qwk_penalty(data):
     fig.suptitle("QWK Penalty Contribution")
     return fig 
 
-def plot_log_confusion(data): 
-    items = _require_expert_probs(data)
-    n     = len(items)
-    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), sharey=True, constrained_layout=True)
-    if n == 1: 
-        axes = [axes]
-
-    im = None 
-    for ax, item in zip(axes, items): 
-        P = item["probs"]
-        y_true = item["labels"] 
-        labels = get_labels(item["class_labels"], P.shape[1] if P.ndim > 1 else 2)
-        y_pred = get_pred_labels(P, labels)
-
-        cm     = confusion_matrix(y_true, y_pred, labels=labels)
-        k, m   = cm.shape[0], cm.shape[1] 
-        vmax   = max(cm.max(), 1)
-        im = ax.imshow(cm, cmap="Blues", norm=LogNorm(vmin=1, vmax=vmax))
-        for r in range(k): 
-            for c in range(m): 
-                if cm[r, c] > 0: 
-                    ax.text(c, r, f"{cm[r,c]}", ha="center", va="center", fontsize=8)
-
-        ax.set_title(item["name"])
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("True")
-        ax.set_xticks(np.arange(k))
-        ax.set_yticks(np.arange(k))
-        ax.set_xticklabels(labels)
-        ax.set_yticklabels(labels)
-
-    if im is not None: 
-        fig.colorbar(im, ax=axes)
-    fig.suptitle("Log-Scale Confusion Matrix")
-    return fig 
-
-def plot_ordinal_ridges(data): 
+def plot_ordinal_distribution(data): 
     items = _require_expert_probs(data)
     n     = len(items)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), sharey=True, constrained_layout=True)
@@ -525,39 +489,51 @@ def plot_ordinal_ridges(data):
         P = item["probs"]
         y_true = item["labels"] 
         labels = get_labels(item["class_labels"], P.shape[1] if P.ndim > 1 else 2)
-        label_vals = labels.astype(np.float64)
 
         k = len(labels)
         idx = np.arange(k, dtype=np.float64)
+
         if P.ndim == 1: 
             preds = P.reshape(-1)
         else: 
             preds = (P * idx).sum(axis=1)
 
         y_idx = get_label_indices(y_true, labels)
-        xmin, xmax = label_vals.min(), label_vals.max() 
 
+        dist_per_class = []
+        positions      = []
         for i in range(k): 
             vals = preds[y_idx == i]
-            if vals.size == 0: 
-                continue 
+            if vals.size > 0: 
+                dist_per_class.append(vals)
+                positions.append(i)
 
-            hist, bins = np.histogram(vals, bins=4*k, range=(xmin, xmax), density=True) 
-            centers    = (bins[:-1] + bins[1:]) / 2.0 
-            hist       = hist / (hist.max() + 1e-9)
+        ax.plot([0, k-1], [0, k-1], color="green", linestyle="--", alpha=0.5, label="Ideal")
 
-            ax.fill_between(centers, i, i + hist, alpha=0.5)
-            ax.axvline(i, color="k", linewidth=0.5, alpha=0.25)
+        box = ax.boxplot(
+            dist_per_class,
+            positions=positions,
+            widths=0.6,
+            patch_artist=True,
+            showfliers=False,
+            medianprops={"color": "black", "linewidth": 1.5}
+        )
 
+        for patch in box["boxes"]: 
+            patch.set_facecolor("lightblue")
+            patch.set_alpha(0.6)
+        
         ax.set_title(item["name"])
-        ax.set_xlabel("Predicted Class Index")
-        ax.set_ylabel("True Class")
-        ax.set_yticks(np.arange(k))
-        ax.set_yticklabels(labels)
-        ax.set_xlim(xmin, xmax) 
-        ax.grid(True, axis="x", alpha=0.3)
+        ax.set_xlabel("True Class")
+        ax.set_ylabel("Prediced Score")
+        
+        ax.set_xticks(np.arange(k))
+        ax.set_xticklabels(labels)
 
-    fig.suptitle("Ordinal Smear Ridge Plot")
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.set_ylim(-0.5, k - 0.5)
+
+    fig.suptitle("Ordinal Prediction Distribution")
     return fig 
 
 # ---------------------------------------------------------
@@ -651,8 +627,7 @@ PLOT_GROUPS = {
         plots={
             "manifold_umap": plot_embedding_umap,
             "qwk_penalty": plot_qwk_penalty,
-            "log_confusion": plot_log_confusion,
-            "ordinal_ridges": plot_ordinal_ridges
+            "ordinal_distribution": plot_ordinal_distribution
         }
     )
 }

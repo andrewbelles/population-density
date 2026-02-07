@@ -300,11 +300,12 @@ models:
     reduce_depth: 3
     reduce_dropout: 0.13911111623750236
   Manifold/SAIPE:
+<<<<<<< Updated upstream
     hidden_dim: 896
     depth: 16
     dropout: 0.20034362724214383
     mix_alpha: 0.33944773885184987
-    mix_mult: 16
+    mix_mult: 8
     beta_supcon: 0.1570862754832724
     alpha_rps: 6.211470597931696
     supcon_temperature: 0.1984301280090353
@@ -345,7 +346,7 @@ models:
     depth: 16
     dropout: 0.043648426348015266
     mix_alpha: 0.19096076264972
-    mix_mult: 16
+    mix_mult: 8
     beta_supcon: 0.3471640214334131
     alpha_rps: 9.103221149716179
     supcon_temperature: 0.15587939947561605

@@ -32,8 +32,10 @@ def load_usps_attrs(path: Path) -> pd.DataFrame:
         "GEOID",
         "ams_res", 
         "ams_bus",
+        "ams_oth",
         "res_vac", 
-        "bus_vac", 
+        "bus_vac",
+        "oth_vac", 
         "nostat_res",
         "nostat_bus",
         "nostat_oth"
@@ -47,28 +49,50 @@ def load_usps_attrs(path: Path) -> pd.DataFrame:
     for c in cols[1:]: 
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df = df.dropna(subset=cols[1:])
+    df = df.dropna(subset=cols[1:], how="all")
     return df 
 
 def compute_channels(df: pd.DataFrame) -> pd.DataFrame: 
+    df["total_res"] = (
+        df["ams_res"].fillna(0) + 
+        df["res_vac"].fillna(0) + 
+        df["nostat_res"].fillna(0)
+    )
+    df["total_business"] = (
+        df["ams_bus"].fillna(0) + 
+        df["bus_vac"].fillna(0) + 
+        df["nostat_bus"].fillna(0)
+    )
+    df["total_other"] = (
+        df["ams_oth"].fillna(0) + 
+        df["oth_vac"].fillna(0) + 
+        df["nostat_oth"].fillna(0)
+    )
+    df["total_addresses"] = (
+        df["total_res"] + 
+        df["total_business"] + 
+        df["total_other"]
+    )
 
-    df["no_stat"] = df["nostat_res"] + df["nostat_bus"] + df["nostat_oth"]
-
-    total = (df["ams_res"] + df["ams_bus"] + df["res_vac"] + df["bus_vac"] +
-             df["no_stat"])
-
-    df = df[total > 0].copy() 
+    df = df[df["total_addresses"] > 0].copy() 
     
-    df["total_addresses"] = total 
-    df["comm_ratio"] = df["ams_bus"] / total 
-    df["vac_rate"]   = df["res_vac"] / total 
+    df["comm_ratio"] = df["total_business"] / df["total_addresses"]
+    
+    total_vac = (
+        df["res_vac"].fillna(0) + 
+        df["bus_vac"].fillna(0) + 
+        df["oth_vac"].fillna(0)
+    )
+    df["vac_rate"] = total_vac / df["total_addresses"]
 
-    bus_total = df["ams_bus"] + df["bus_vac"]
-    df["bus_vac_rate"] = np.where(bus_total > 0, df["bus_vac"] / bus_total, 0.0)
+    total_nostat = (
+        df["nostat_res"].fillna(0) + 
+        df["nostat_bus"].fillna(0) + 
+        df["nostat_oth"].fillna(0)
+    )
+    df["flux_rate"] = total_nostat / df["total_addresses"]
 
-    df["flux_rate"] = df["no_stat"] / total 
-
-    return df 
+    return df
 
 
 def main(): 
@@ -93,7 +117,14 @@ def main():
     usps = compute_channels(usps)
 
     merged = tracts.merge(
-        usps[["GEOID", "flux_rate", "bus_vac_rate", "comm_ratio", "vac_rate", "total_addresses"]],
+        usps[[
+            "GEOID", 
+            "flux_rate", 
+            "comm_ratio", 
+            "total_other", 
+            "total_business", 
+            "total_addresses"
+        ]],
         on="GEOID",
         how="inner"
     )
