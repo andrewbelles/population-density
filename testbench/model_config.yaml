@@ -300,25 +300,25 @@ models:
     reduce_depth: 3
     reduce_dropout: 0.13911111623750236
   Manifold/SAIPE:
-    hidden_dim: 896
-    depth: 16
-    dropout: 0.20034362724214383
-    mix_alpha: 0.33944773885184987
-    mix_mult: 8
-    beta_supcon: 0.1570862754832724
-    alpha_rps: 6.211470597931696
-    supcon_temperature: 0.1984301280090353
+    hidden_dim: 960
+    depth: 15
+    dropout: 0.1603907847207383
+    mix_alpha: 0.1454840927102477
+    mix_mult: 16
+    beta_supcon: 0.19908565050923122
+    alpha_rps: 9.053711495120458
+    supcon_temperature: 0.23532826829206296
     supcon_dim: 64
     transformer_dim: 64
-    transformer_tokens: 4
-    transformer_heads: 4
+    transformer_tokens: 8
+    transformer_heads: 8
     transformer_layers: 4
-    transformer_dropout: 0.0019407536288285295
-    transformer_attn_dropout: 0.17255159800636077
-    reduce_depth: 4
-    reduce_dropout: 0.13860384183177055
-    lr: 0.00014751933085672449
-    weight_decay: 4.098056784979874e-06
+    transformer_dropout: 0.006332476775095417
+    transformer_attn_dropout: 0.0505545972906838
+    reduce_depth: 3
+    reduce_dropout: 0.008423385773528587
+    lr: 0.0001443218421793436
+    weight_decay: 1.939605073877735e-06
   Manifold/USPS:
     patch_size: 64
     embed_dim: 64
@@ -343,20 +343,20 @@ models:
   Manifold/USPS_SCALAR:
     hidden_dim: 1024
     depth: 16
-    dropout: 0.043648426348015266
-    mix_alpha: 0.19096076264972
-    mix_mult: 8
-    beta_supcon: 0.3471640214334131
-    alpha_rps: 9.103221149716179
-    supcon_temperature: 0.15587939947561605
-    supcon_dim: 64
-    transformer_dim: 64
-    transformer_tokens: 4
+    dropout: 0.04573884037466514
+    mix_alpha: 0.2702893664233766
+    mix_mult: 16
+    beta_supcon: 0.3034516557151667
+    alpha_rps: 9.660696669355671
+    supcon_temperature: 0.12419130720765689
+    supcon_dim: 128
+    transformer_dim: 128
+    transformer_tokens: 8
     transformer_heads: 4
-    transformer_layers: 4
-    transformer_dropout: 0.13946835554927248
-    transformer_attn_dropout: 0.10141586806858505
-    reduce_depth: 3
-    reduce_dropout: 0.03994762958310362
-    lr: 0.0002521236158516647
-    weight_decay: 0.0001489783980672275
+    transformer_layers: 3
+    transformer_dropout: 0.17955371670665143
+    transformer_attn_dropout: 0.13033822284867722
+    reduce_depth: 4
+    reduce_dropout: 0.02134090648790369
+    lr: 0.00040057248299002506
+    weight_decay: 0.0002596297219777291

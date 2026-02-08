@@ -572,7 +572,7 @@ def test_scalar_ens_sweep(
     model_key: str | None = None, 
     beta_min: float = 0.9, 
     beta_max: float = 0.999, 
-    beta_steps: int = 25, 
+    beta_steps: int = 200, 
     holdout_frac: float = 0.2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH
@@ -613,6 +613,7 @@ def test_scalar_ens_sweep(
     qwk23 = np.zeros_like(betas, dtype=np.float64)
 
     for i, b in enumerate(betas): 
+        print(f"[sweep] beta={b:.4f}") 
 
         params = dict(base_params)
         params["ens"] = float(b)
