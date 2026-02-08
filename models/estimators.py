@@ -1004,6 +1004,8 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             alpha=self.mix_alpha, 
             mix_mult=self.mix_mult, 
         )
+
+        self.norm_     = nn.LayerNorm(self.backbone_.out_dim)
         
         # pool across tiles per bag via attention 
         self.pool_     = GatedAttentionPooling(
@@ -1015,6 +1017,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         self.model_          = nn.Module() 
         self.model_.backbone = self.backbone_ 
         self.model_.head     = self.head_
+        self.model_.norm     = self.norm_ 
         self.model_.pool     = self.pool_ 
 
         self.model_.to(self.device)
@@ -1080,15 +1083,6 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
                 x = feats 
 
             _, logits, proj = self.forward_logits(x, with_supcon=with_supcon)
-
-            probs_gt = torch.sigmoid(logits)
-            preds    = torch.argmax(self.logits_to_probs(logits), dim=1)
-            
-            c1_wins = (preds == 1).sum().item()
-            
-            if c1_wins == 0:
-                p1_mass = (probs_gt[:, 0] - probs_gt[:, 1]).mean().item()
-                print(f"[Batch] No Class 1 Wins. Avg P(C1) on True C1 samples: {p1_mass:.4f}")
 
             if with_mixing: 
                 loss, corn, rps, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
@@ -1229,6 +1223,8 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
 
         batch_size = int(bidx.max().item()) + 1 
         pooled     = self.model_.pool(tile_feats, bidx, batch_size)
+        pooled     = self.model_.norm(pooled)
+
         return pooled 
 
     def forward_logits(self, feats, with_supcon: bool): 

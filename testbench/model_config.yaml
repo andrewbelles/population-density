@@ -300,7 +300,6 @@ models:
     reduce_depth: 3
     reduce_dropout: 0.13911111623750236
   Manifold/SAIPE:
-<<<<<<< Updated upstream
     hidden_dim: 896
     depth: 16
     dropout: 0.20034362724214383

@@ -238,12 +238,11 @@ class MILOrdinalHead(nn.Module):
         self.drop   = nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
         self.out    = nn.Linear(fc_dim, 1, bias=False)
         if use_logit_scaler: 
-            self.scaler = nn.Linear(1, 1, bias=False)
-            self.scaler.weight.data.fill_(1.0)
+            self.logit_scale = nn.Parameter(torch.tensor(1.0))
         else: 
-            self.scaler = nn.Identity() 
+            self.register_parameter("logit_scale", None)
 
-        self.cut_anchor = nn.Parameter(torch.tensor([0.0]))
+        self.cut_anchor = nn.Parameter(torch.tensor(0.0))
         self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 5.0)
 
         self.proj = None 
@@ -261,20 +260,17 @@ class MILOrdinalHead(nn.Module):
             feats = self.reducer(feats)
 
         # logit cut logic 
-        deltas   = F.softplus(self.cut_deltas)
-        spacings = torch.cat([torch.zeros(1, device=deltas.device), torch.cumsum(deltas, dim=0)])
-        cuts     = self.cut_anchor - spacings 
+        deltas = F.softplus(self.cut_deltas)
+        cuts   = self.cut_anchor - torch.cat([
+            torch.zeros(1, device=deltas.device, dtype=deltas.dtype), torch.cumsum(deltas, dim=0)
+        ]) 
 
         emb    = feats  
         feat_v = self.drop(self.act(self.fc(emb)))
         score  = self.out(feat_v)
-
-        if isinstance(self.scaler, nn.Linear): 
-            scale  = F.softplus(self.scaler.weight)
-            logits = (score * scale) + cuts    
-        else: 
-            logits = score + cuts 
-
+        if self.logit_scale is not None: 
+            score = score * F.softplus(self.logit_scale)
+        logits = score + cuts 
         proj   = self.proj(feats) if self.proj is not None else None 
         return emb, logits, proj 
 
