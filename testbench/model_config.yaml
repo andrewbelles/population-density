@@ -221,23 +221,6 @@ models:
     reg_lambda: 45.623853218041454
     max_delta_step: 2
     gamma: 6.1612411028932375
-  SAIPE/Manifold:
-    hidden_dim: 384
-    depth: 14
-    dropout: 0.03953935872131765
-    mix_alpha: 0.45816360205928275
-    mix_mult: 8
-    weight_decay: 5.209016311370386e-05
-    lr: 0.004312503660051927
-    batch_size: 512
-    epochs: 500
-    beta_supcon: 0.12815056466249097
-    alpha_rps: 6.744348900169637,
-    supcon_temperature: 0.05093909523850942
-    supcon_dim: 256
-    eval_fraction: 0.2
-    early_stopping_rounds: 20
-    out_dim: 12
   SAIPE_MANIFOLD/XGBoost:
     n_estimators: 532
     learning_rate: 0.07687399379259809
@@ -299,6 +282,7 @@ models:
     weight_decay: 4.36359843744835e-06
     reduce_depth: 3
     reduce_dropout: 0.13911111623750236
+    batch_size: 512 
   Manifold/SAIPE:
     hidden_dim: 960
     depth: 15

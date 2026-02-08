@@ -793,6 +793,11 @@ class TransformerProjector(nn.Module):
         B      = tokens.size(0)
         cls    = self.cls_token.expand(B, -1, -1)
         tokens = torch.cat([cls, tokens], dim=1)
+        
+        if tokens.size(1) > self.pos_embed.size(1): 
+            raise ValueError(f"token length {tokens.size(1)} exceeds pos_embed length " 
+                             f"{self.pos_embed.size(1)}")
+        tokens = tokens + self.pos_embed[:, :tokens.size(1), :]
         enc    = self.encoder(tokens)
         pooled = enc[:, 0]
         return self.out_proj(pooled)
@@ -845,7 +850,8 @@ class Mixer(nn.Module):
 
         mix_lambda = mix_lambda = torch.distributions.Beta(
             self.alpha, self.alpha).sample((n_mix,)).to(device)
-        lam = mix_lambda.view(-1, 1)
+        lam_shape = (n_mix,) + (1,) * (x.ndim - 1)
+        lam = mix_lambda.view(*lam_shape)
 
         x_mix = lam * x[idx_a] + (1 - lam) * x[idx_b]
         y_a   = y[idx_a]
