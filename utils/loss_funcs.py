@@ -295,10 +295,10 @@ class MixedLoss(nn.Module):
         )
 
         # values returned are already weighted. 
-        loss = loss_a * loss_b
-        corn = corn_a * corn_b
-        rps  = rps_a  * rps_b
-        sup  = sup_a  * sup_b
+        loss = loss_a + loss_b
+        corn = corn_a + corn_b
+        rps  = rps_a  + rps_b
+        sup  = sup_a  + sup_b
 
         return loss.mean(), corn.mean(), rps.mean(), sup.mean() 
 

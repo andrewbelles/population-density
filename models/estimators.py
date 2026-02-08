@@ -1081,6 +1081,15 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
 
             _, logits, proj = self.forward_logits(x, with_supcon=with_supcon)
 
+            # DEBUG prints checking for class 2 collapse 
+            probs_gt = torch.sigmoid(logits)
+            if probs_gt.shape[1] >= 3: 
+                p2 = probs_gt[:, 1] - probs_gt[:, 2]
+                
+                if p2.max() < 0.01:
+                    print(f"\n[Batch Debug] WARNING: Class 2 Collapse Detected!")
+                    print(f"    Max P(Class 2) in batch: {p2.max().item():.6f}")
+
             if with_mixing: 
                 loss, corn, rps, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
             else: 

@@ -617,6 +617,7 @@ class ViirsTensorDataset(SpatialTensorDataset):
 
                 if self.log_scale: 
                     data = np.log1p(np.maximum(data, 0.0))
+                    data = data / 9.0 
 
                 # get local standard deviation across data 
                 win_size = 3 
