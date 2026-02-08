@@ -288,7 +288,7 @@ models:
     depth: 15
     dropout: 0.1603907847207383
     mix_alpha: 0.1454840927102477
-    mix_mult: 16
+    mix_mult: 8
     beta_supcon: 0.19908565050923122
     alpha_rps: 9.053711495120458
     supcon_temperature: 0.23532826829206296
@@ -329,7 +329,7 @@ models:
     depth: 16
     dropout: 0.04573884037466514
     mix_alpha: 0.2702893664233766
-    mix_mult: 16
+    mix_mult: 8
     beta_supcon: 0.3034516557151667
     alpha_rps: 9.660696669355671
     supcon_temperature: 0.12419130720765689
