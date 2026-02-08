@@ -455,10 +455,12 @@ class HypergraphBuilder:
         patch_global_nodes  = torch.arange(N, device=device)
         patch_global_hedges = (patch_global_nodes // K) * E_per_tile + (K + 3) 
 
-        readout_nodes = torch.arange(N, N + B, device=device)
+        readout_nodes = torch.arange(N, N + B, device=device).repeat_interleave(4)
 
-        batch_indices  = torch.arange(B, device=device)
-        readout_hedges = batch_indices * E_per_tile + (K + 3)
+        batch_indices_repeated = torch.arange(B, device=device).repeat_interleave(4)
+        offsets        = torch.tensor([K, K + 1, K + 2, K + 3], device=device).repeat(B)
+        readout_hedges = batch_indices_repeated * E_per_tile + offsets 
+
         readout_types  = torch.full((B,), 3, device=device, dtype=torch.long)
 
         all_nodes  = torch.cat([

@@ -243,8 +243,8 @@ class MILOrdinalHead(nn.Module):
         else: 
             self.scaler = nn.Identity() 
 
-        self.cut_anchor = nn.Parameter(torch.zeros(1))
-        self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 0.5)
+        self.cut_anchor = nn.Parameter(torch.tensor([0.0]))
+        self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 5.0)
 
         self.proj = None 
         if supcon_dim is not None: 
@@ -268,13 +268,12 @@ class MILOrdinalHead(nn.Module):
         emb    = feats  
         feat_v = self.drop(self.act(self.fc(emb)))
         score  = self.out(feat_v)
-        logits = score + cuts 
 
         if isinstance(self.scaler, nn.Linear): 
             scale  = F.softplus(self.scaler.weight)
-            logits = logits * scale   
+            logits = (score * scale) + cuts    
         else: 
-            logits = self.scaler(logits)
+            logits = score + cuts 
 
         proj   = self.proj(feats) if self.proj is not None else None 
         return emb, logits, proj 
