@@ -197,7 +197,7 @@ def define_tabular_space(trial: optuna.Trial):
         "dropout": trial.suggest_float("dropout", 0.0, 0.3), 
 
         "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.6),
-        "mix_mult": trial.suggest_categorical("mix_mult", [16]), 
+        "mix_mult": trial.suggest_categorical("mix_mult", [8]), 
 
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5), 
         "alpha_rps": trial.suggest_float("alpha_rps", 1.0, 10.0, log=True),
