@@ -141,10 +141,9 @@ class SupConLoss(nn.Module):
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits        = anchor_dot_contrast - logits_max.detach() 
 
-        logits_mask = torch.scatter(
-            torch.ones_like(mask), 0, 
-            torch.arange(batch_size).view(-1, 1).to(device), 0 
-        )
+        # Filter self positives 
+        logits_mask   = torch.ones_like(mask)
+        logits_mask .fill_diagonal_(0.0)
 
         mask = mask * logits_mask 
 
