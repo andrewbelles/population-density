@@ -188,7 +188,7 @@ def _optimize_on_train(
         param_space=param_space,
         task=OPT_TASK,
         config=cv,
-        metric="rps"
+        metric="mae"
     )
 
     config = EngineConfig(
@@ -330,7 +330,7 @@ def _tabular_fit_extract(
     }
 
     if metrics is not None: 
-        header += ["MAPE", "WAPE", "ECE", "wRPS"] 
+        header += ["MAPE", "WAPE", "ECE", "MAE"] 
         row.update(_row(row["Name"], metrics))
 
     return {"header": header, "row": row}
@@ -392,7 +392,7 @@ def _spatial_fit_extract(
     train_emb = model.extract(train_ds)
     test_emb  = model.extract(test_ds)
 
-    _, val_corn, val_rps  = model.validate(model.as_eval_loader(test_ds))
+    _, val_corn, val_mae  = model.validate(model.as_eval_loader(test_ds))
 
     probs = model.predict_proba(test_ds)
 
@@ -438,11 +438,11 @@ def _spatial_fit_extract(
         "n_counties": np.array([len(test_y)], dtype=np.int64)
     })
 
-    header = ["Name", "Dim", "RPS", "Corn"]
+    header = ["Name", "Dim", "mae", "Corn"]
     row    = {
         "Name": f"{model_key}/2013->2023",
         "Dim": test_emb.shape[1],
-        "RPS": format_metric(val_rps),
+        "mae": format_metric(val_mae),
         "Corn": format_metric(val_corn)
     }
 
@@ -462,7 +462,7 @@ def _spatial_fit_extract(
         )
 
     if metrics is not None: 
-        header += ["MAPE", "WAPE", "ECE", "wRPS"] 
+        header += ["MAPE", "WAPE", "ECE", "MAE"] 
         row.update(_row(row["Name"], metrics))
 
     return {"header": header, "row": row}
@@ -473,7 +473,7 @@ def _row(name, metrics):
         "MAPE":  format_metric(metrics.get("mape")),
         "WAPE":   format_metric(metrics.get("wape")),
         "ECE":  format_metric(metrics.get("ece")),
-        "wRPS": format_metric(metrics.get("rps"))
+        "MAE": format_metric(metrics.get("mae"))
     }
 
 # ---------------------------------------------------------
@@ -506,7 +506,7 @@ def test_fit_eval(
         rows.append(_row(f"{train}->{test}/{model_name}", metrics))
 
     return {
-        "header": ["Name", "Acc", "F1", "ROC", "ECE", "QWK", "RPS"],
+        "header": ["Name", "Acc", "F1", "ROC", "ECE", "QWK", "MAE"],
         "rows": rows,
     }
 

@@ -121,7 +121,7 @@ def define_spatial_space(trial):
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
-        "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 10.0, log=True),
+        "alpha_mae": trial.suggest_float("alpha_mae", 0.5, 10.0, log=True),
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.0), 
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.7, 6.0, log=True),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
@@ -154,7 +154,7 @@ def define_hgnn_space(trial: optuna.Trial):
 
         "max_bag_frac": trial.suggest_float("max_bag_frac", 0.6, 0.95), 
 
-        "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 4.0),
+        "alpha_mae": trial.suggest_float("alpha_mae", 0.5, 4.0),
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.0), 
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.7, 6.0, log=True),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
@@ -165,7 +165,7 @@ def define_hgnn_space(trial: optuna.Trial):
         "reduce_depth": trial.suggest_int("reduce_depth", 1, 4), 
         "reduce_dropout": trial.suggest_float("reduce_dropout", 0.0, 0.2), 
 
-        "batch_size": 512, 
+        "batch_size": 256, 
 
         "threshold_scale": 1.0,
         "ens": 0.995,
@@ -175,7 +175,6 @@ def define_hgnn_space(trial: optuna.Trial):
         "early_stopping_rounds": 10, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4,
-        "target_global_batch": 2048
     }
 
 def define_usps_space(trial: optuna.Trial): 
@@ -200,7 +199,7 @@ def define_tabular_space(trial: optuna.Trial):
         "mix_mult": trial.suggest_categorical("mix_mult", [8]), 
 
         "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5), 
-        "alpha_rps": trial.suggest_float("alpha_rps", 1.0, 10.0, log=True),
+        "alpha_mae": trial.suggest_float("alpha_mae", 1.0, 10.0, log=True),
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.25), 
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128]),
 

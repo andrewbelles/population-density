@@ -725,7 +725,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         hard_epochs: int = 200,
         lr: float = 1e-3, 
         weight_decay: float = 0.0, 
-        alpha_rps: float = 0.5, 
+        alpha_mae: float = 0.5, 
         beta_supcon: float = 0.5, 
         supcon_temperature: float = 0.07, 
         ens: float = 0.995,
@@ -751,7 +751,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         self.hard_epochs           = hard_epochs
         self.lr                    = lr
         self.weight_decay          = weight_decay
-        self.alpha_rps             = alpha_rps
+        self.alpha_mae             = alpha_mae
         self.beta_supcon           = beta_supcon
         self.ens                   = ens 
         self.supcon_temperature    = supcon_temperature
@@ -827,7 +827,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         self.loss_fn_ = HybridOrdinalLoss(
             n_classes=self.n_classes_,
             class_weights=self.class_weights,
-            alpha_rps=self.alpha_rps,
+            alpha_mae=self.alpha_mae,
             beta_supcon=self.beta_supcon,
             temperature=self.supcon_temperature,
             reduction="none"
@@ -897,7 +897,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
 
         for ep in range(epochs): 
             _         = self.train_epoch(train_loader, mixing=mixing)
-            val_score, val_corn, val_rps = self.validate(val_loader)
+            val_score, val_corn, val_mae = self.validate(val_loader)
 
             if val_score < best_val - self.min_delta: 
                 best_val   = val_score 
@@ -915,7 +915,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             if ep % 5 == 0: 
                 if val_score is not None: 
                     msg += (f" | val_loss={val_score:.4f} | val_corn={val_corn:.4f} | "
-                            f"val_rps={val_rps:.4f}")
+                            f"val_mae={val_mae:.4f}")
                     print(msg, file=sys.stderr, flush=True)
 
         return best_state
@@ -925,24 +925,24 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             return None, None, None 
 
         self.model_.eval() 
-        val_rps  = 0.0 
+        val_mae  = 0.0 
         val_corn = 0.0 
         count    = 0 
 
         with torch.no_grad(): 
             for batch in val_loader: 
-                _, bsz, corn, rps, _ = self.process_batch(batch, with_mixing=False)
+                _, bsz, corn, mae, _ = self.process_batch(batch, with_mixing=False)
 
                 corn = corn.mean() 
-                rps  = (rps.mean() / self.alpha_rps)  
+                mae  = mae.mean()  
 
                 val_corn += corn.item() * bsz 
-                val_rps  += rps.item() * bsz 
+                val_mae  += mae.item() * bsz 
                 count    += bsz
 
-        val_corn = val_corn / max(count, 1)
-        val_rps  = val_rps / max(count, 1)
-        return val_corn + val_rps, val_corn, val_rps  
+        val_corn /= max(count, 1)
+        val_mae  /= max(count, 1)
+        return val_corn + val_mae, val_corn, val_mae  
 
     def train_epoch(self, train_loader, *, mixing: bool): 
         self.model_.train() 
@@ -1091,17 +1091,17 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             _, logits, proj = self.forward_logits(x, with_supcon=with_supcon)
 
             if with_mixing: 
-                loss, corn, rps, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
+                loss, corn, mae, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
             else: 
-                loss, corn, rps, sup = self.loss_fn_(logits, proj, yb)
+                loss, corn, mae, sup = self.loss_fn_(logits, proj, yb)
                 
                 loss = loss.mean() 
                 corn = corn.mean() 
-                rps  = rps.mean() 
+                mae  = mae.mean() 
                 sup  = sup.mean() 
 
         bsz = yb.size(0)
-        return loss, bsz, corn, rps, sup 
+        return loss, bsz, corn, mae, sup 
 
     def resolve_device(self, device: str | None): 
         if device is not None: 
@@ -1256,7 +1256,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         max_mix: int | None = None,
         anchor_power: float = 1.0, 
 
-        alpha_rps: float = 0.5, 
+        alpha_mae: float = 0.5, 
         beta_supcon: float = 0.5, 
         supcon_temperature: float = 0.07, 
         supcon_dim: int = 128,
@@ -1296,7 +1296,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.max_mix                  = max_mix
         self.anchor_power             = anchor_power
 
-        self.alpha_rps                = alpha_rps
+        self.alpha_mae                = alpha_mae
         self.beta_supcon              = beta_supcon
         self.supcon_temperature       = supcon_temperature
         self.supcon_dim               = supcon_dim
@@ -1452,7 +1452,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
 
         for ep in range(epochs): 
             _         = self.train_epoch(train_loader, mixing=mixing)
-            val_score, val_corn, val_rps = self.validate(val_loader)
+            val_score, val_corn, val_mae = self.validate(val_loader)
 
             if val_score < best_val - self.min_delta: 
                 best_val   = val_score 
@@ -1470,14 +1470,14 @@ class TFTabular(BaseEstimator, ClassifierMixin):
             if ep % 20 == 0: 
                 if val_score is not None: 
                     msg += (f" | val_loss={val_score:.4f} | val_corn={val_corn:.4f} | "
-                            f"val_rps={val_rps:.4f}")
+                            f"val_mae={val_mae:.4f}")
                     print(msg, file=sys.stderr, flush=True)
 
         return best_state
 
     def validate(self, val_loader): 
         self.model_.eval() 
-        val_rps  = 0.0 
+        val_mae  = 0.0 
         val_corn = 0.0 
         count    = 0 
 
@@ -1487,18 +1487,18 @@ class TFTabular(BaseEstimator, ClassifierMixin):
 
                 feats  = self.forward_feats(xb)
                 _, logits, proj = self.forward_logits(feats, with_supcon=False)
-                _, corn, rps, _ = self.loss_fn_(logits, proj, yb)
+                _, corn, mae, _ = self.loss_fn_(logits, proj, yb)
 
                 corn = corn.mean() 
-                rps  = (rps.mean() / self.alpha_rps)  
+                mae  = mae.mean()  
 
                 val_corn += corn.item() * yb.size(0) 
-                val_rps  += rps.item() * yb.size(0)
+                val_mae  += mae.item() * yb.size(0)
                 count    += yb.size(0)
 
-        val_corn = val_corn / max(count, 1)
-        val_rps  = val_rps / max(count, 1)
-        return val_corn + val_rps, val_corn, val_rps  
+        val_corn /= max(count, 1)
+        val_mae  /= max(count, 1)
+        return val_corn + val_mae, val_corn, val_mae  
 
     def train_epoch(self, train_loader, *, mixing: bool): 
         self.model_.train() 
@@ -1569,7 +1569,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.loss_fn_ = HybridOrdinalLoss(
             n_classes=self.n_classes_,
             # class_weights=class_weights,
-            alpha_rps=self.alpha_rps,
+            alpha_mae=self.alpha_mae,
             beta_supcon=self.beta_supcon,
             temperature=self.supcon_temperature,
             reduction="none"
@@ -1606,15 +1606,15 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         _, logits, proj = self.forward_logits(feats, with_supcon=True)
 
         if with_mixing:
-            loss, corn, rps, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
+            loss, corn, mae, sup = self.mix_loss_(logits, proj, y_a, y_b, mix_lam)
         else: 
-            loss, corn, rps, sup = self.loss_fn_(logits, proj, yb)
+            loss, corn, mae, sup = self.loss_fn_(logits, proj, yb)
             loss = loss.mean() 
             corn = corn.mean() 
-            rps  = rps.mean() 
+            mae  = mae.mean() 
             sup  = sup.mean() 
 
-        return loss, corn, rps, sup, x.size(0)
+        return loss, corn, mae, sup, x.size(0)
 
     def forward_feats(self, x): 
         x = self.model_.tokenizer(x)

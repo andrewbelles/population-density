@@ -229,7 +229,11 @@ class TileLoader(Dataset):
                 if f.isdigit():
                     f = f.zfill(5)
 
-                label       = int(row["label"])
+                label_raw   = row.get("label" or "".strip())
+                try: 
+                    label   = float(label_raw)
+                except ValueError as e: 
+                    raise ValueError(f"invalid label {label_raw} in {self.index_csv}") from e 
                 byte_offset = int(row["byte_offset"])
                 num_tiles   = int(row["num_tiles"])
 
@@ -329,7 +333,7 @@ class SpatialRowLoader(Dataset):
     ): 
 
         X = np.asarray(rows, dtype=np.float32)
-        y = np.asarray(labels, dtype=np.int64).reshape(-1)
+        y = np.asarray(labels, dtype=np.float32).reshape(-1)
 
         if X.ndim != 2: 
             raise ValueError(f"rows must be 2d, got {X.shape}")
@@ -381,7 +385,7 @@ class SpatialRowLoader(Dataset):
         return self.rows.shape[0] 
 
     def __getitem__(self, idx: int): 
-        out = [self.rows[idx], int(self.labels[idx])]
+        out = [self.rows[idx], float(self.labels[idx])]
         if self.return_fips: 
             out.append(self.fips[idx])
         if self.return_index: 

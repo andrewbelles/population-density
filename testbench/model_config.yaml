@@ -186,7 +186,7 @@ models:
     dropout: 0.1355
     lr: 0.0001905
     weight_decay: 2.69191e-06
-    alpha_rps: 8.473
+    alpha_mae: 8.473
     beta_supcon: 1.091512
     supcon_temperature: 0.15367
     supcon_dim: 128
@@ -274,7 +274,7 @@ models:
     dropout: 0.49764000341998593
     attn_dropout: 0.1454554590554234
     max_bag_frac: 0.8890396983442015
-    alpha_rps: 2.465862332753677
+    alpha_mae: 2.465862332753677
     beta_supcon: 1.391295588294204
     supcon_temperature: 0.23692862364560804
     supcon_dim: 256
@@ -290,7 +290,7 @@ models:
     mix_alpha: 0.1454840927102477
     mix_mult: 8
     beta_supcon: 0.19908565050923122
-    alpha_rps: 9.053711495120458
+    alpha_mae: 9.053711495120458
     supcon_temperature: 0.23532826829206296
     supcon_dim: 64
     transformer_dim: 64
@@ -313,7 +313,7 @@ models:
     mix_alpha: 0.2702893664233766
     mix_mult: 8
     beta_supcon: 0.3034516557151667
-    alpha_rps: 9.660696669355671
+    alpha_mae: 9.660696669355671
     supcon_temperature: 0.12419130720765689
     supcon_dim: 128
     transformer_dim: 128

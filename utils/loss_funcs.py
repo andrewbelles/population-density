@@ -186,14 +186,14 @@ class HybridOrdinalLoss(nn.Module):
         self, 
         n_classes: int, 
         class_weights: torch.Tensor | None = None, 
-        alpha_rps: float = 1.0, 
+        alpha_mae: float = 1.0, 
         beta_supcon: float = 0.5, 
         temperature: float = 0.1, 
         reduction="mean"            # if none then returns per sample loss values 
     ): 
 
         super().__init__()
-        self.alpha      = alpha_rps 
+        self.alpha      = alpha_mae 
         self.beta       = beta_supcon
         self.corn_fn_   = CornLoss(n_classes, class_weights=class_weights)
         self.supcon_fn_ = SupConLoss(temperature, class_weights=class_weights)
@@ -225,16 +225,17 @@ class HybridOrdinalLoss(nn.Module):
         sw = sample_weight.view(-1) if sample_weight is not None else None 
 
         probs_exceed = torch.sigmoid(logits)
-        rps_per      = torch.sum((probs_exceed - targets)**2, dim=1)
-        K            = max(self.n_classes_ - 1, 1)
-        rps_per     /= float(K) 
+        
+        rank_hat     = probs_exceed.sum(dim=1)
+        denom        = float(max(self.n_classes_ - 1, 1))
+        mae_per      = torch.abs(rank_hat - rank) / denom 
  
         corn_per     = self.corn_fn_(logits, labels, reduction="none")
 
         if self.beta > 0 and embeddings is not None: 
             sup_per  = self.supcon_fn_(embeddings, sup_labels, reduction="none") 
         else: 
-            sup_per  = torch.zeros_like(rps_per)
+            sup_per  = torch.zeros_like(mae_per)
 
         weights = None 
         if class_w is not None and sw is not None: 
@@ -245,14 +246,14 @@ class HybridOrdinalLoss(nn.Module):
             weights = sw 
 
         corn = self.reduce(corn_per, weight=weights, normalize=False)
-        rps  = self.reduce(rps_per, weight=weights, normalize=True)
+        mae  = self.reduce(mae_per, weight=weights, normalize=True)
         sup  = self.reduce(sup_per, weight=weights, normalize=True)
 
-        weighted_rps = self.alpha * rps 
+        weighted_mae = self.alpha * mae 
         weighted_sup = self.beta * sup
 
-        loss = corn + weighted_rps + weighted_sup
-        return loss, corn, weighted_rps, weighted_sup 
+        loss = corn + weighted_mae + weighted_sup
+        return loss, corn, mae , sup 
 
     def reduce(self, per_sample, weight=None, normalize=False): 
         if weight is not None: 
@@ -286,20 +287,20 @@ class MixedLoss(nn.Module):
     def forward(self, logits, proj, y_a, y_b, mix_lambda): 
         mix_lambda = mix_lambda.view(-1)
 
-        loss_a, corn_a, rps_a, sup_a = self.loss_fn_(
+        loss_a, corn_a, mae_a, sup_a = self.loss_fn_(
             logits, proj, y_a, sample_weight=mix_lambda
         )
-        loss_b, corn_b, rps_b, sup_b = self.loss_fn_(
+        loss_b, corn_b, mae_b, sup_b = self.loss_fn_(
             logits, proj, y_b, sample_weight=(1 - mix_lambda)
         )
 
         # values returned are already weighted. 
         loss = loss_a + loss_b
         corn = corn_a + corn_b
-        rps  = rps_a  + rps_b
+        mae  = mae_a  + mae_b
         sup  = sup_a  + sup_b
 
-        return loss.mean(), corn.mean(), rps.mean(), sup.mean() 
+        return loss.mean(), corn.mean(), mae.mean(), sup.mean() 
 
 
 def compute_ens_weights(class_counts, beta=0.999):
