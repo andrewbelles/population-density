@@ -728,7 +728,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         alpha_rps: float = 0.5, 
         beta_supcon: float = 0.5, 
         supcon_temperature: float = 0.07, 
-        ens: float = 0.999,
+        ens: float = 0.995,
         random_state: int = 0, 
         early_stopping_rounds: int = 15, 
         eval_fraction: float = 0.15, 
@@ -796,7 +796,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         self.patch_quantile = patch_quantile
 
     def fit(self, X, y=None): 
-
+        print(f"[ENS Beta] {self.ens}") 
         torch.manual_seed(self.random_state)
 
         loader          = self.ensure_loader(X, shuffle=self.shuffle)
@@ -1275,7 +1275,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         early_stopping_rounds: int = 20, 
         eval_fraction: float = 0.15, 
         min_delta: float = 1e-3, 
-        batch_size: int = 1024, 
+        batch_size: int = 256, 
 
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
         compile_model: bool = True 
@@ -1324,7 +1324,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.model_     = nn.Module()
 
     def fit(self, X, y): 
-        print(f"[ENS Beta] {self.ens}")
+        print(f"[params] ens={self.ens}, batch_size={self.batch_size}")
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64).reshape(-1)
 
@@ -1453,6 +1453,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
             if val_score < best_val - self.min_delta: 
                 best_val   = val_score 
                 best_state = copy.deepcopy(self.model_.state_dict())
+                self.best_val_score_ = best_val 
                 patience   = 0
             else: 
                 patience  += 1 

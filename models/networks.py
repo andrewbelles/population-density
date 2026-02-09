@@ -243,7 +243,7 @@ class MILOrdinalHead(nn.Module):
             self.register_parameter("logit_scale", None)
 
         self.cut_anchor = nn.Parameter(torch.tensor(0.0))
-        self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 5.0)
+        self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 1.0)
 
         self.proj = None 
         if supcon_dim is not None: 

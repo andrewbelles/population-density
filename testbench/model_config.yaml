@@ -282,7 +282,7 @@ models:
     weight_decay: 4.36359843744835e-06
     reduce_depth: 3
     reduce_dropout: 0.13911111623750236
-    batch_size: 512 
+    batch_size: 256
   Manifold/SAIPE:
     hidden_dim: 960
     depth: 15
@@ -303,28 +303,10 @@ models:
     reduce_dropout: 0.008423385773528587
     lr: 0.0001443218421793436
     weight_decay: 1.939605073877735e-06
-  Manifold/USPS:
-    patch_size: 64
-    embed_dim: 64
-    gnn_dim: 256
-    gnn_layers: 2
-    gnn_heads: 4
-    fc_dim: 256
-    dropout: 0.14076599964979272
-    attn_dropout: 0.20704078249920105
-    max_bag_frac: 0.8655915192396935
-    alpha_rps: 2.962453183957117
-    beta_supcon: 0.7028450457629686
-    supcon_temperature: 0.07345789470866265
-    supcon_dim: 128
-    lr: 0.00013954702334818668
-    weight_decay: 2.6585454599593032e-06
-    reduce_depth: 2
-    reduce_dropout: 0.12110007475811556
   USPS_MANIFOLD/Logistic:
     C: 0.003382286306527411
     class_weight: balanced
-  Manifold/USPS_SCALAR:
+  Manifold/USPS:
     hidden_dim: 1024
     depth: 16
     dropout: 0.04573884037466514

@@ -10,7 +10,7 @@ import argparse, io
 
 import numpy as np
 from numpy.typing import NDArray
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 
 from analysis.cross_validation import (
     CVConfig,
@@ -43,7 +43,8 @@ from optimization.spaces       import (
 
 from testbench.utils.data      import (
     BASE, 
-    load_spatial_dataset 
+    load_spatial_dataset,
+    save_embedding_artifact 
 ) 
 
 from testbench.utils.etc       import (
@@ -55,7 +56,9 @@ from testbench.utils.etc       import (
 
 from testbench.utils.metrics   import (
     OPT_TASK,
-    metrics_from_probs
+    metrics_from_probs,
+    class_log_centroids_from_edges,
+    mape_wape_from_probs
 )
 
 from testbench.utils.config    import (
@@ -66,6 +69,8 @@ from testbench.utils.config    import (
     normalize_spatial_params,
     load_node_anchors
 )
+
+from preprocessing.population_labels import PopulationLabels, build_label_map
 
 from testbench.utils.paths     import (
     CONFIG_PATH
@@ -79,9 +84,17 @@ from utils.helpers             import project_path
 
 strategy = ComputeStrategy.from_env() 
 
+CENSUS_DIR          = project_path("data", "census")
+_, TRAIN_EDGES      = build_label_map(2013, census_dir=CENSUS_DIR)
+CLASS_LOG_CENTROIDS = class_log_centroids_from_edges(TRAIN_EDGES)
+
 VIIRS_KEY = "Manifold/VIIRS" 
 SAIPE_KEY = "Manifold/SAIPE"
 USPS_KEY  = "Manifold/USPS"
+
+VIIRS_ARTIFACT = project_path("data", "datasets", "viirs_2013_artifact.mat")
+SAIPE_ARTIFACT = project_path("data", "datasets", "saipe_2013_artifact.mat")
+USPS_ARTIFACT = project_path("data", "datasets", "usps_2013_artifact.mat")
 
 VIIRS_ANCHORS = project_path("data", "anchors", "viirs.npy")
 USPS_ANCHORS  = project_path("data", "anchors", "usps.npy")
@@ -90,10 +103,9 @@ EXPERT_PROBA = {
     "SAIPE_2023": project_path("data", "stacking", "saipe_optimized_probs.mat"), 
     "VIIRS_2023": project_path("data", "stacking", "viirs_optimized_probs.mat"), 
     "USPS_2023":  project_path("data", "stacking", "usps_optimized_probs.mat"), 
-    "USPS_SCALAR_MANIFOLD": project_path("data", "stacking", "usps_scalar_probs.mat"), 
+    "USPS_MANIFOLD": project_path("data", "stacking", "usps_pooled_probs.mat"), 
     "SAIPE_MANIFOLD": project_path("data", "stacking", "saipe_pooled_probs.mat"), 
     "VIIRS_MANIFOLD": project_path("data", "stacking", "viirs_pooled_probs.mat"), 
-    "USPS_MANIFOLD":  project_path("data", "stacking", "usps_pooled_probs.mat"), 
 }
 
 SCALAR_SWEEP_DATASETS = {
@@ -102,12 +114,17 @@ SCALAR_SWEEP_DATASETS = {
         "test": "SAIPE_2023", 
         "model_key": "Manifold/SAIPE"
     },
-    "USPS_SCALAR": {
+    "USPS": {
         "train": project_path("data", "datasets", "usps_scalar_2013.mat"), 
         "test":  project_path("data", "datasets", "usps_scalar_2023.mat"), 
-        "model_key": "Manifold/USPS_SCALAR"
+        "model_key": "Manifold/USPS"
     }
 }
+
+def _true_pop_for_fips(fips: np.ndarray, year: int) -> np.ndarray: 
+    pop_table = PopulationLabels(year=year, census_dir=CENSUS_DIR).load_population_table()
+    idx = [str(x).strip().zfill(5) for x in np.asarray(fips).reshape(-1)]
+    return pop_table.reindex(idx)["pop"].to_numpy(np.float64)
 
 def _save_probs_mat(
     out_path: str, 
@@ -215,13 +232,19 @@ def _tabular_fit_extract(
     class_metrics: bool = False, 
     save_proba: bool = False, 
     feature_prefix: str | None = None,
-    proba_key: str | None = None 
+    proba_key: str | None = None,
+    artifact_path: str | None = None
 ):
     train_path, train_loader = _resolve_dataset(train_path)
     test_path, test_loader   = _resolve_dataset(test_path)
 
     X_tr, y_tr, _ = _load_dataset(train_path, train_loader)
     X_te, y_te, _ = _load_dataset(test_path, test_loader)
+
+    train_data = train_loader(train_path)
+    test_data  = test_loader(test_path)
+    train_fips = np.asarray(train_data["sample_ids"]).astype("U5")
+    test_fips  = np.asarray(test_data["sample_ids"]).astype("U5")
 
     scaler = StandardScaler()
     X_tr_s = scaler.fit_transform(X_tr)
@@ -237,7 +260,8 @@ def _tabular_fit_extract(
     )
 
     model.fit(X_tr_s, y_tr)
-    embs = model.extract(X_te_s)
+    train_emb = model.extract(X_tr_s)
+    test_emb = model.extract(X_te_s)
     loss = model.loss(X_te_s, y_te)
 
     probs = model.predict_proba(X_te_s)
@@ -259,19 +283,47 @@ def _tabular_fit_extract(
     if class_metrics: 
         class_labels = np.sort(np.unique(y_tr))
         metrics      = metrics_from_probs(y_te, probs, class_labels)
+        true_pop     = _true_pop_for_fips(test_fips, 2020)
+        valid        = np.isfinite(true_pop) & (true_pop > 0)
+        
+        if valid.any(): 
+            reg = mape_wape_from_probs(
+                probs=np.asarray(probs)[valid],
+                true_pop=true_pop[valid],
+                class_log_centroids=CLASS_LOG_CENTROIDS
+            )
+            metrics.update(reg)
+        else: 
+            metrics.update({"mape": np.nan, "wape": np.nan})
+
 
     if feature_prefix is None: 
         feature_prefix = model_key.split("/")[-1].lower() 
-    feature_names = np.array([f"{feature_prefix}_emb_{i}" for i in range(embs.shape[1])],
+    feature_names = np.array([f"{feature_prefix}_emb_{i}" for i in range(test_emb.shape[1])],
                              dtype="U64")
 
     savemat(out_path, {
-        "features": embs, 
+        "features": test_emb, 
         "labels": y_te.reshape(-1, 1),
         "fips_codes": np.asarray(load_compact_dataset(test_path)["sample_ids"]),
         "feature_names": feature_names,
         "n_counties": np.array([len(y_te)], dtype=np.int64)
     })
+
+    if artifact_path is not None: 
+        save_embedding_artifact(
+            out_path=artifact_path,
+            features=train_emb,
+            labels=y_tr,
+            fips_codes=train_fips,
+            model_key=model_key,
+            fit_train_indices=np.arange(train_fips.shape[0], dtype=np.int64),
+            fit_train_fips=train_fips,
+            source_indices=np.arange(train_fips.shape[0], dtype=np.int64),
+            source_year=2013,
+            fit_year=2013,
+            source_split="train"
+        )
 
     header = ["Name", "Val Loss"]
     row    = {
@@ -280,7 +332,7 @@ def _tabular_fit_extract(
     }
 
     if metrics is not None: 
-        header += ["Acc", "F1", "ECE", "QWK", "wRPS"] 
+        header += ["MAPE", "WAPE", "ECE", "wRPS"] 
         row.update(_row(row["Name"], metrics))
 
     return {"header": header, "row": row}
@@ -301,9 +353,10 @@ def _spatial_fit_extract(
     class_metrics: bool = False, 
     save_proba: bool = False, 
     proba_key: str | None = None, 
+    artifact_path: str | None = None, 
     **_
 ): 
-    train_ds, train_y, _, train_collate, in_ch = load_spatial_dataset(
+    train_ds, train_y, train_fips, train_collate, in_ch = load_spatial_dataset(
         train_root, 
         tile_shape=tile_shape,
         sample_frac=sample_frac,
@@ -338,7 +391,8 @@ def _spatial_fit_extract(
 
     model.fit(train_ds, train_y)
     
-    test_emb = model.extract(test_ds)
+    train_emb = model.extract(train_ds)
+    test_emb  = model.extract(test_ds)
 
     _, val_corn, val_rps  = model.validate(model.as_eval_loader(test_ds))
 
@@ -360,6 +414,18 @@ def _spatial_fit_extract(
     if class_metrics: 
         class_labels = np.sort(np.unique(train_y))
         metrics      = metrics_from_probs(test_y, probs, class_labels)
+        true_pop     = _true_pop_for_fips(test_fips, 2020)
+        valid        = np.isfinite(true_pop) & (true_pop > 0)
+        
+        if valid.any(): 
+            reg = mape_wape_from_probs(
+                probs=np.asarray(probs)[valid],
+                true_pop=true_pop[valid],
+                class_log_centroids=CLASS_LOG_CENTROIDS
+            )
+            metrics.update(reg)
+        else: 
+            metrics.update({"mape": np.nan, "wape": np.nan})
 
     feature_names = np.array(
         [f"{model_key.split('/')[-1].lower()}_emb_{i}" for i in range(test_emb.shape[1])],
@@ -382,8 +448,23 @@ def _spatial_fit_extract(
         "Corn": format_metric(val_corn)
     }
 
+    if artifact_path is not None: 
+        save_embedding_artifact(
+            out_path=artifact_path,
+            features=train_emb,
+            labels=train_y,
+            fips_codes=train_fips,
+            model_key=model_key, 
+            fit_train_indices=np.arange(train_fips.shape[0], dtype=np.int64),
+            fit_train_fips=train_fips,
+            source_indices=np.arange(len(train_y), dtype=np.int64), 
+            source_year=2013,
+            fit_year=2013,
+            source_split="train"
+        )
+
     if metrics is not None: 
-        header += ["Acc", "F1", "ECE", "QWK", "wRPS"] 
+        header += ["MAPE", "WAPE", "ECE", "wRPS"] 
         row.update(_row(row["Name"], metrics))
 
     return {"header": header, "row": row}
@@ -391,11 +472,9 @@ def _spatial_fit_extract(
 def _row(name, metrics): 
     return {
         "Name": name, 
-        "Acc":  format_metric(metrics.get("accuracy")),
-        "F1":   format_metric(metrics.get("f1_macro")),
-        "ROC":  format_metric(metrics.get("roc_auc")),
+        "MAPE":  format_metric(metrics.get("mape")),
+        "WAPE":   format_metric(metrics.get("wape")),
         "ECE":  format_metric(metrics.get("ece")),
-        "QWK":  format_metric(metrics.get("qwk")),
         "wRPS": format_metric(metrics.get("rps"))
     }
 
@@ -445,6 +524,7 @@ def test_saipe_manifold(
     class_metrics: bool = False, 
     save_proba: bool = False, 
     proba_key: str = "SAIPE_MANIFOLD",
+    artifact_path: str = SAIPE_ARTIFACT, 
     **_
 ): 
     if out is None: 
@@ -463,18 +543,19 @@ def test_saipe_manifold(
         feature_prefix="saipe",
     )
 
-def test_usps_scalar_manifold(
+def test_usps_manifold(
     _buf,
     *,
     train: str, 
     test: str, 
     out: str | None = None, 
-    model_key: str = "Manifold/USPS_SCALAR", 
+    model_key: str = "Manifold/USPS", 
     random_state: int = 0,
     config_path: str = CONFIG_PATH,
     class_metrics: bool = False, 
     save_proba: bool = False, 
-    proba_key: str = "USPS_SCALAR_MANIFOLD",
+    proba_key: str = "USPS_MANIFOLD",
+    artifact_path: str = USPS_ARTIFACT, 
     **_
 ):
     if out is None: 
@@ -508,6 +589,7 @@ def test_viirs_manifold(
     class_metrics: bool = False, 
     save_proba: bool = False, 
     proba_key: str = "VIIRS_MANIFOLD",
+    artifact_path: str = VIIRS_ARTIFACT, 
     **_
 ): 
     node_anchors, anchor_stats = load_node_anchors(viirs_anchors)
@@ -525,42 +607,8 @@ def test_viirs_manifold(
         anchor_stats=anchor_stats,
         class_metrics=class_metrics,
         save_proba=save_proba,
-        proba_key=proba_key
-    )
-
-def test_usps_manifold(
-    _buf,
-    *,
-    train: str, 
-    test: str, 
-    out: str, 
-    model_key: str = USPS_KEY, 
-    tile_shape: tuple[int, int, int] = (4, 256, 256), 
-    usps_anchors: str = USPS_ANCHORS, 
-    sample_frac: float | None = None, 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH,
-    class_metrics: bool = False, 
-    save_proba: bool = False, 
-    proba_key: str = "USPS_MANIFOLD",
-    **_
-):
-    node_anchors, anchor_stats = load_node_anchors(usps_anchors)
-
-    return _spatial_fit_extract(
-        train_root=train,
-        test_root=test,
-        out_path=out,
-        model_key=model_key,
-        tile_shape=tile_shape,
-        sample_frac=sample_frac,
-        random_state=random_state,
-        config_path=config_path,
-        node_anchors=node_anchors,
-        anchor_stats=anchor_stats,
-        class_metrics=class_metrics,
-        save_proba=save_proba,
-        proba_key=proba_key
+        proba_key=proba_key,
+        artifact_path=artifact_path
     )
 
 def test_scalar_ens_sweep(
@@ -570,9 +618,9 @@ def test_scalar_ens_sweep(
     train: str | None = None, 
     test: str | None = None,
     model_key: str | None = None, 
-    beta_min: float = 0.9, 
+    beta_min: float = 0.99, 
     beta_max: float = 0.999, 
-    beta_steps: int = 200, 
+    beta_steps: int = 10, 
     holdout_frac: float = 0.2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH
@@ -642,10 +690,9 @@ def test_scalar_ens_sweep(
 
 TESTS = {
     "fit-eval": test_fit_eval,
-    "usps-manifold": test_usps_manifold,
     "saipe-manifold": test_saipe_manifold,
     "viirs-manifold": test_viirs_manifold,
-    "usps-scalar-manifold": test_usps_scalar_manifold,
+    "usps-manifold": test_usps_manifold,
     "scalar-ens-sweep": test_scalar_ens_sweep 
 }
 

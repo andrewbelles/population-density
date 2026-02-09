@@ -10,6 +10,8 @@ import numpy as np
 
 from typing import Sequence
 
+from numpy.typing import NDArray
+
 from utils.helpers import (
     bind,
     make_cfg_gap_factory, 
@@ -28,7 +30,9 @@ from testbench.utils.etc        import flatten_imaging
 
 from testbench.utils.paths      import keep_list
 
-from scipy.io import loadmat 
+from pathlib import Path 
+
+from scipy.io import loadmat, savemat 
 
 from preprocessing.loaders import (
     DatasetDict,
@@ -63,66 +67,30 @@ PREFIXES = (
 )
 
 BASE: dict[str, ConcatSpec] = {
-    "VIIRS": {
-        "name": "VIIRS",
-        "path": project_path("data", "datasets", "viirs_nchs_2023.mat"),
-        "loader": load_viirs_nchs
-    },
     "VIIRS_MANIFOLD": {
         "name": "VIIRS_MANIFOLD",
-        "path": project_path("data", "datasets", "viirs_2023_pooled.mat"),
+        "path": project_path("data", "datasets", "viirs_2020_pooled.mat"),
         "loader": load_compact_dataset
     },
-    "TIGER": {
-        "name": "tiger",
-        "path": project_path("data", "datasets", "tiger_nchs_2023.mat"),
-        "loader": load_compact_dataset
-    },
-    "NLCD": {
-        "name": "NLCD",
-        "path": project_path("data", "datasets", "nlcd_nchs_2023.mat"),
-        "loader": load_compact_dataset
-    },
-    "SAIPE_2023": {
+    "SAIPE_2020": {
         "name": "SAIPE", 
-        "path": project_path("data", "datasets", "saipe_nchs_2023.mat"),
+        "path": project_path("data", "datasets", "saipe_scalar_2020.mat"),
         "loader": load_compact_dataset
     },
     "SAIPE_2013": {
         "name": "SAIPE", 
-        "path": project_path("data", "datasets", "saipe_nchs_2013.mat"),
+        "path": project_path("data", "datasets", "saipe_scalar_2013.mat"),
         "loader": load_compact_dataset
     },
     "SAIPE_MANIFOLD": {
         "name": "SAIPE_MANIFOLD",
-        "path": project_path("data", "datasets", "saipe_2023_pooled.mat"),
+        "path": project_path("data", "datasets", "saipe_2020_pooled.mat"),
         "loader": load_compact_dataset
     },
     "USPS_MANIFOLD": {
         "name": "USPS_MANIFOLD",
-        "path": project_path("data", "datasets", "usps_2023_pooled.mat"),
+        "path": project_path("data", "datasets", "usps_2020_pooled.mat"),
         "loader": load_compact_dataset
-    },
-    "USPS_SCALAR_MANIFOLD": {
-        "name": "USPS_SCALAR_MANIFOLD",
-        "path": project_path("data", "datasets", "usps_scalar_2023_pooled.mat"),
-        "loader": load_compact_dataset
-    },
-
-    "COORDS": {
-        "name": "COORDS",
-        "path": project_path("data", "datasets", "travel_proxy.mat"),
-        "loader": load_coords_from_mobility
-    },
-    "PASSTHROUGH": {
-        "name": "PASSTHROUGH",
-        "path": project_path("data", "datasets", "cross_modal_2023.mat"),
-        "loader": load_viirs_nchs
-    },
-    "OOF": {
-        "name": "OOF",
-        "path": project_path("data", "results", "final_stacked_predictions.mat"),
-        "loader": make_oof_dataset_loader()
     },
 }
 
@@ -443,3 +411,97 @@ def load_spatial_dataset(
         data["collate_fn"],
         data["in_channels"]
     )
+
+def _canon_fips(fips: NDArray) -> NDArray[np.str_]: 
+    arr = np.asarray(fips).reshape(-1)
+    out = []
+    for v in arr: 
+        s = str(v).strip() 
+        if s.isdigit():
+            s = s.zfill(5)
+        out.append(s)
+    return np.asarray(out, dtype="U5")
+
+def save_embedding_artifact(
+    out_path: str, 
+    *,
+    features: NDArray,
+    labels: NDArray,
+    fips_codes: NDArray,
+    model_key: str, 
+    fit_train_indices: NDArray,
+    feature_names: NDArray | None = None, 
+    source_indices: NDArray | None = None, 
+    fit_train_fips: NDArray | None = None, 
+    source_year: int = 2013, 
+    fit_year: int = 2013, 
+    source_split: str = "train",
+    extra: dict | None = None 
+): 
+
+    if source_split not in {"train", "test", "all"}: 
+        raise ValueError(f"invalid source_split: {source_split}")
+
+    X    = np.asarray(features, dtype=np.float32)
+    y    = np.asarray(labels).reshape(-1).astype(np.int64)
+    fips = _canon_fips(fips_codes)
+    if X.ndim != 2:
+        raise ValueError(f"features must be 2D, got {X.shape}")
+    if not (X.shape[0] == y.shape[0] == fips.shape[0]):
+        raise ValueError("features/labels/fips row mismatch")
+
+    n, d = X.shape
+
+    src_idx = (
+        np.arange(n, dtype=np.int64)
+        if source_indices is None
+        else np.asarray(source_indices).reshape(-1).astype(np.int64)
+    )
+    if src_idx.shape[0] != n:
+        raise ValueError("source_indices length mismatch")
+
+    tr_idx = np.asarray(fit_train_indices).reshape(-1).astype(np.int64)
+    tr_idx = np.unique(tr_idx)
+    if tr_idx.size == 0:
+        raise ValueError("fit_train_indices is empty")
+
+    if fit_train_fips is None:
+        mask = np.isin(src_idx, tr_idx)
+        if mask.any():
+            tr_fips = np.unique(fips[mask])
+        elif np.all((tr_idx >= 0) & (tr_idx < n)):
+            tr_fips = np.unique(fips[tr_idx])
+        else:
+            raise ValueError("cannot derive fit_train_fips from fit_train_indices/source_indices")
+    else:
+        tr_fips = np.unique(_canon_fips(fit_train_fips))
+
+    if feature_names is None:
+        prefix = model_key.split("/")[-1].lower()
+        names = np.asarray([f"{prefix}_emb_{i}" for i in range(d)], dtype="U64")
+    else:
+        names = np.asarray(feature_names).reshape(-1).astype("U64")
+        if names.shape[0] != d:
+            raise ValueError(f"feature_names length {names.shape[0]} != embed dim {d}")
+
+    meta = {
+        "features": X,
+        "labels": y.reshape(-1, 1),
+        "fips_codes": fips,
+        "feature_names": names,
+        "source_indices": src_idx,
+        "fit_train_indices": tr_idx,
+        "fit_train_fips": tr_fips,
+        "model_key": np.asarray([model_key], dtype="U128"),
+        "source_year": np.asarray([int(source_year)], dtype=np.int64),
+        "fit_year": np.asarray([int(fit_year)], dtype=np.int64),
+        "source_split": np.asarray([source_split], dtype="U16"),
+        "n_counties": np.asarray([n], dtype=np.int64),
+        "embed_dim": np.asarray([d], dtype=np.int64),
+    }
+
+    if extra:
+        meta.update(extra)
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    savemat(out_path, meta)

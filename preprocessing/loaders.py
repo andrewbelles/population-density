@@ -1038,3 +1038,86 @@ def mmap_loader(
         pad_value=pad_value,
         should_validate_index=should_validate_index
     )
+
+# ---------------------------------------------------------
+# Fusion Dataset Loaders 
+# ---------------------------------------------------------
+
+def load_embedding_artifact(path: str, *, require_train_meta: bool = True) -> dict: 
+    '''
+    Loads embeddings extracted from full 2013 training dataset for propagating training 
+    set forward in model without having to fit expert models per epoch. 
+    '''
+
+    mat = loadmat(path)
+    X   = np.asarray(mat["features"], dtype=np.float32)
+    y   = np.asarray(mat["labels"]).reshape(-1).astype(np.int64)
+
+    key = "fips_codes" if "fips_codes" in mat else "sample_ids" 
+    if key not in mat: 
+        raise ValueError(f"{path}: missing fips_codes/sample_ids")
+
+    fips = _mat_str_vector(mat[key]).astype("U5")
+
+    src_idx = np.asarray(
+        mat.get("source_indices", np.arange(X.shape[0]))
+    ).reshape(-1).astype(np.int64)
+    
+    tr_idx  = mat.get("fit_train_indices")
+    tr_fips = mat.get("fit_train_fips")
+
+    if require_train_meta and (tr_idx is None or tr_fips is None): 
+        raise ValueError(f"{path}: missing fit_train_indices/fit_train_fips")
+
+    tr_idx  = np.asarray(tr_idx).reshape(-1).astype(np.int64) if tr_idx is not None else None  
+    tr_fips = _mat_str_vector(tr_fips).astype("U5")           if tr_fips is not None else None  
+
+    return {
+        "features": X, 
+        "labels": y, 
+        "sample_ids": fips, 
+        "source_indices": src_idx, 
+        "fit_train_indices": tr_idx, 
+        "fit_train_fips": tr_fips
+    }
+
+def load_fusion(
+    saipe_path: str, 
+    usps_path: str, 
+    viirs_path: str,
+    *,
+    train_only: bool = True 
+) -> dict: 
+
+    S = load_embedding_artifact(saipe_path)
+    U = load_embedding_artifact(usps_path)
+    V = load_embedding_artifact(viirs_path)
+
+    if train_only: 
+        for A in (S, U, V): 
+            m = np.isin(A["sample_ids"], A["fit_train_fips"])
+            A["features"]       = A["features"][m]
+            A["labels"]         = A["labels"][m]
+            A["sample_ids"]     = A["sample_ids"][m]
+            A["source_indices"] = A["source_indices"][m]
+
+    common = [f for f in S["sample_ids"] if f in set(U["sample_ids"]) and 
+              f in set(V["sample_ids"])]
+    if not common: 
+        raise ValueError("no common fips across manifolds")
+
+    S_fips = align_on_fips(common, S["sample_ids"])
+    U_fips = align_on_fips(common, U["sample_ids"])
+    V_fips = align_on_fips(common, V["sample_ids"])
+    y      = S["labels"][S_fips]
+    if not (np.array_equal(y, U["labels"][U_fips]) and np.array_equal(y, V["labels"][V_fips])):
+        raise ValueError("label mismatch after FIPS alignment")
+
+    return {
+        "saipe": S["features"][S_fips], 
+        "usps":  U["features"][U_fips],
+        "viirs": V["features"][V_fips],
+        "labels": y,
+        "sample_ids": np.asarray(common, dtype="U5"), 
+        "source_indices": S["source_indices"][S_fips]
+    }

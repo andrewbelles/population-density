@@ -20,7 +20,9 @@ from abc import ABC, abstractmethod
 
 from dataclasses import dataclass 
 
-from torch.utils.data import Dataset, get_worker_info
+from torch.utils.data import Dataset, get_worker_info, Sampler 
+
+from preprocessing.population_labels import build_label_map 
 
 from scipy.ndimage import uniform_filter
 
@@ -43,7 +45,9 @@ from shapely.geometry import (
 
 from rasterio.errors import WindowError
 
-from utils.helpers import project_path 
+from scipy.io import loadmat 
+
+from utils.helpers import project_path, _mat_str_vector 
 
 # --------------------------------------------------------- 
 # Tiled MMap Loader 
@@ -254,6 +258,205 @@ class TileLoader(Dataset):
                 raise ValueError(f"index row {i} points past end of dataset.bin")
 
 # ---------------------------------------------------------
+# Geospatially Aware Sampler 
+# ---------------------------------------------------------
+
+class GeoBatchSampler(Sampler[list[int]]): 
+
+    def __init__(
+        self, 
+        chunks: list[NDArray], 
+        *,
+        batch_size: int = 256, 
+        chunks_per_batch: int = 16, 
+        random_state: int = 0, 
+        drop_last: bool = False 
+    ): 
+        if batch_size % chunks_per_batch != 0: 
+            raise ValueError("batch_size must be divisible by chunks_per_batch")
+
+        self.chunks = [np.asarray(c, dtype=np.int64) for c in chunks if len(c) > 0]
+        if not self.chunks: 
+            raise ValueError("no non-empty geo chunks")
+
+        self.batch_size         = batch_size 
+        self.chunks_per_batch   = chunks_per_batch
+        self.samples_per_chunk  = self.batch_size // self.chunks_per_batch 
+        self.random_state       = random_state 
+        self.drop_last          = drop_last 
+        self.epoch              = 0 
+        self.n_items            = int(sum(len(c) for c in self.chunks))
+
+    def set_epoch(self, epoch: int): 
+        self.epoch = epoch 
+
+    def __len__(self): 
+        if self.drop_last: 
+            return max(1, self.n_items // self.batch_size) 
+        return max(1, int(np.ceil(self.n_items / self.batch_size)))
+
+    def __iter__(self): 
+        rng            = np.random.default_rng(self.random_state + 9973 * self.epoch)
+        n_chunks       = len(self.chunks)
+        replace_chunks = n_chunks < self.chunks_per_batch
+
+        for _ in range(len(self)): 
+            choice = rng.choice(n_chunks, size=self.chunks_per_batch, replace=replace_chunks)
+            batch  = []
+            for cid in choice: 
+                chunk = self.chunks[int(cid)]
+                srepl = len(chunk) < self.samples_per_chunk
+                take  = rng.choice(chunk, size=self.samples_per_chunk, replace=srepl) 
+                batch.extend(int(i) for i in take.tolist())
+            yield batch 
+
+
+class SpatialRowLoader(Dataset): 
+
+    def __init__(
+        self, 
+        *,
+        rows: NDArray, 
+        labels: NDArray, 
+        fips: NDArray, 
+        coords: NDArray | None = None, 
+        coords_path: str | None = None, 
+        random_state: int = 0, 
+        geo_chunk_size: int = 16, 
+        geo_bins: int = 256, 
+        return_index: bool = True, 
+        return_fips: bool = False 
+    ): 
+
+        X = np.asarray(rows, dtype=np.float32)
+        y = np.asarray(labels, dtype=np.int64).reshape(-1)
+
+        if X.ndim != 2: 
+            raise ValueError(f"rows must be 2d, got {X.shape}")
+        if X.shape[0] != y.shape[0]: 
+            raise ValueError(f"rows n={X.shape[0]} != labels n={y.shape[0]}")
+
+        self.rows           = X 
+        self.labels         = y 
+        self.random_state   = random_state 
+        self.geo_chunk_size = geo_chunk_size
+        self.geo_bins       = geo_bins 
+        self.return_index   = return_index
+        self.return_fips    = return_fips
+
+        f = np.asarray(fips).astype("U5").reshape(-1)
+        if f.shape[0] != X.shape[0]: 
+            raise ValueError("fips length mismatch") 
+        self.fips = f 
+
+        if coords is None: 
+            self.coords = self.load_aligned_coords(coords_path)
+        else: 
+            c = np.asarray(coords, dtype=np.float32)
+            if c.ndim != 2 or c.shape != (X.shape[0], 2): 
+                raise ValueError(f"coords must be (N, 2), got {c.shape}")
+            self.coords = c 
+
+        self.geo_rank = self.build_geo_rank(self.coords, bins=self.geo_bins)
+
+    def make_sampler(
+        self, 
+        *,
+        indices: NDArray | None = None, 
+        batch_size: int = 256, 
+        chunks_per_batch: int = 16, 
+        random_state: int = 0, 
+        drop_last: bool = False 
+    ): 
+        chunks = self.build_geo_chunks(indices=indices, chunk_size=self.geo_chunk_size)
+        return GeoBatchSampler(
+            chunks, 
+            batch_size=batch_size, 
+            chunks_per_batch=chunks_per_batch,
+            random_state=random_state, 
+            drop_last=drop_last 
+        )
+
+    def __len__(self) -> int: 
+        return self.rows.shape[0] 
+
+    def __getitem__(self, idx: int): 
+        out = [self.rows[idx], int(self.labels[idx])]
+        if self.return_fips: 
+            out.append(self.fips[idx])
+        if self.return_index: 
+            out.append(int(idx))
+        return tuple(out)
+
+    def build_geo_chunks(
+        self, 
+        indices: NDArray | None = None, 
+        *, 
+        chunk_size: int | None = None
+    ): 
+        if indices is None: 
+            indices = np.arange(len(self), dtype=np.int64)
+        else: 
+            indices = np.asarray(indices, dtype=np.int64)
+
+        csize   = int(self.geo_chunk_size if chunk_size is None else chunk_size)
+        ordered = indices[np.argsort(self.geo_rank[indices], kind="stable")]
+
+        return [ordered[i:i+csize] for i in range(0, ordered.size, csize) 
+                if ordered[i:i+csize].size > 0]
+
+    def load_aligned_coords(self, coords_path: str | None): 
+        out = np.full((len(self.fips), 2), np.nan, dtype=np.float32)
+        if coords_path is None: 
+            coords_path = project_path("data", "datasets", "travel_proxy.mat")
+
+        mat = loadmat(coords_path)
+        if "fips_codes" not in mat or "coords" not in mat: 
+            return out 
+
+        fips   = _mat_str_vector(mat["fips_codes"]).astype("U5")
+        coords = np.asarray(mat["coords"], dtype=np.float32)
+        if coords.ndim == 2 and coords.shape == (2, fips.shape[0]): 
+            coords = coords.T 
+        if coords.ndim != 2 or coords.shape[1] != 2: 
+            return out 
+
+        idx_map = {f: i for i, f in enumerate(fips)}
+        for i, f in enumerate(self.fips): 
+            j = idx_map.get(f)
+            if j is not None: 
+                out[i] = coords[j]
+        return out 
+
+    @staticmethod 
+    def build_geo_rank(coords: NDArray, bins: int = 256): 
+        n    = coords.shape[0]
+        rank = np.arange(n, dtype=np.int64)
+
+        valid = np.isfinite(coords).all(axis=1)
+        idx   = np.flatnonzero(valid)
+        if idx.size == 0: 
+            return rank 
+
+        lat = coords[idx, 0]
+        lon = coords[idx, 1]
+
+        lat_span = max(float(lat.max() - lat.min()), 1e-6)
+        lon_span = max(float(lon.max() - lon.min()), 1e-6)
+        lat_bin  = np.clip(((lat - lat.min()) / lat_span * (bins - 1)).astype(np.int32), 
+                           0, bins - 1)
+        lon_norm = np.clip((lon - lon.min()) / lon_span, 0.0, 1.0)
+        lon_key  = np.where((lat_bin % 2) == 0, lon_norm, 1.0 - lon_norm)
+        
+        order_local = np.lexsort((lon_key, lat_bin))
+        order = idx[order_local]
+
+        rank  = np.empty(n, dtype=np.int64)
+        rank[order]  = np.arange(order.shape[0], dtype=np.int64)
+        rank[~valid] = np.arange(order.shape[0], n, dtype=np.int64)
+        return rank 
+
+# ---------------------------------------------------------
 # Binary Data Writer 
 # ---------------------------------------------------------
 
@@ -377,7 +580,8 @@ class SpatialTensorDataset(ABC, TileStreamSource):
     def __init__(
         self,
         counties_path: str | None = None, 
-        labels_path: str | None = None, 
+        label_year: int = 2010, 
+        census_dir: str | Path = project_path("data", "census"), 
         max_counties: int | None = None, 
         tile_hw: tuple[int, int] = (256, 256)
     ): 
@@ -385,15 +589,17 @@ class SpatialTensorDataset(ABC, TileStreamSource):
             counties_path = project_path(
                 "data", "geography", "county_shapefile", "tl_2020_us_county.shp"
             )
-        if labels_path is None: 
-            labels_path = project_path("data", "nchs", "nchs_classification.csv")
 
         self.counties_path = counties_path 
-        self.labels_path   = labels_path 
         self.tile_hw       = tuple(int(x) for x in tile_hw)
         self.max_counties  = max_counties if max_counties is None else int(max_counties)
-        self.label_map     = self.load_labels()
-
+        
+        if label_year == 2013: 
+            self.label_map, _ = build_label_map(2013, census_dir=census_dir)
+        else: 
+            _, edges          = build_label_map(2013, census_dir=census_dir)
+            self.label_map, _ = build_label_map(label_year, train_edges=edges, census_dir=census_dir)
+    
     def save(
         self,
         *,
@@ -411,33 +617,6 @@ class SpatialTensorDataset(ABC, TileStreamSource):
             empty_threshold=empty_threshold
         )
         writer.write() 
-
-    def load_labels(self) -> Dict[str, int]: 
-        path = Path(self.labels_path)
-        if not path.exists(): 
-            raise FileNotFoundError(f"label CSV not found: {path}")
-
-        labels: Dict[str, int] = {}
-        with path.open(newline="", encoding="utf-8") as f: 
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None: 
-                raise ValueError("label CSV missing header row")
-            if "FIPS" not in reader.fieldnames or "class_code" not in reader.fieldnames: 
-                raise ValueError(f"expected header FIPS,class_code, got {reader.fieldnames}")
-
-            for row in reader: 
-                fips = (row.get("FIPS") or "").strip() 
-                code = (row.get("class_code") or "").strip() 
-                if not fips or not code: 
-                    continue 
-                if fips.isdigit(): 
-                    fips = fips.zfill(5)
-                if code.isdigit():
-                    labels[fips] = int(code) - 1 
-
-        if not labels: 
-            raise ValueError("label map is empty")
-        return labels 
 
     def iter_counties(
         self, 
@@ -557,7 +736,8 @@ class ViirsTensorDataset(SpatialTensorDataset):
         *,
         viirs_path: str | None = None, 
         counties_path: str | None = None, 
-        labels_path: str | None = None,
+        label_year: int = 2010, 
+        census_dir: str | Path = project_path("data", "census"), 
         tile_hw: tuple[int, int] = (256, 256), 
         all_touched: bool = False, 
         log_scale: bool = True, 
@@ -566,7 +746,8 @@ class ViirsTensorDataset(SpatialTensorDataset):
     ): 
         super().__init__(
             counties_path=counties_path,
-            labels_path=labels_path,
+            label_year=label_year,
+            census_dir=census_dir, 
             max_counties=max_counties,
             tile_hw=tile_hw
         )
@@ -870,6 +1051,9 @@ def main():
     parser.add_argument("--labels-path", default=project_path(
         "data", "nchs", "nchs_classification_2013.csv"))
 
+    parser.add_argument("--year", type=int, default=2010)
+    parser.add_argument("--census-dir", default=project_path("data", "census"))
+
     parser.add_argument("--out-root", default=project_path("data", "tensors"))
     parser.add_argument("--viirs-out", default=None)
     parser.add_argument("--usps-out", default=None)
@@ -894,7 +1078,8 @@ def main():
         viirs = ViirsTensorDataset(
             viirs_path=args.viirs_path,
             counties_path=args.counties_path,
-            labels_path=args.labels_path,
+            label_year=args.year,
+            census_dir=args.census_dir, 
             log_scale=not args.no_log_scale,
         )
         viirs.save(out_bin_path=str(bin_out), out_index_path=str(index_out))

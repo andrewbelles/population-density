@@ -6,13 +6,9 @@
 # as the USPS tensor dataset 
 # 
 
-import argparse, rasterio  
-
-import rasterio.mask 
+import argparse  
 
 from pathlib import Path 
-
-from typing import Dict 
 
 import numpy as np 
 
@@ -22,13 +18,9 @@ import geopandas as gpd
 
 from scipy.io import savemat 
 
-from scipy.stats import entropy 
-
 from utils.helpers import project_path
 
-from shapely.geometry import shape, box 
-
-from rasterio.warp import transform_geom 
+from preprocessing.population_labels import build_label_map 
 
 
 class UspsScalarDataset: 
@@ -48,7 +40,9 @@ class UspsScalarDataset:
         usps_gpkg: str | None = None, 
         labels_path: str | None = None, 
         counties_path: str | None = None, 
-        *, 
+        *,
+        label_year: int = 2013, 
+        census_dir: str | Path = project_path("data", "census"), 
         layer: str | None = None, 
         area_crs: str = "EPSG:5070",
     ): 
@@ -58,9 +52,6 @@ class UspsScalarDataset:
         if counties_path is None: 
             counties_path = project_path("data", "geography", "county_shapefile",
                                          "tl_2020_us_county.shp")
-        
-        if labels_path is None: 
-            labels_path = project_path("data", "nchs", "nchs_classification_2013.csv")
 
         self.usps_gpkg     = usps_gpkg 
         self.labels_path   = labels_path 
@@ -68,7 +59,11 @@ class UspsScalarDataset:
         self.layer         = layer 
         self.area_crs      = area_crs
         
-        self.label_map     = self.load_labels() 
+        if label_year == 2013: 
+            self.label_map, _ = build_label_map(2013, census_dir=census_dir)
+        else: 
+            _, edges          = build_label_map(2013, census_dir=census_dir)
+            self.label_map, _ = build_label_map(label_year, train_edges=edges, census_dir=census_dir)
         self.df            = self.build() 
 
     def save(self, out_path: str, csv_path: str | None = None): 
@@ -195,33 +190,12 @@ class UspsScalarDataset:
             raise ValueError("no rows produced")
         return df 
 
-    def load_labels(self) -> Dict[str, int]: 
-        path = Path(self.labels_path)
-        if not path.exists(): 
-            raise FileNotFoundError(f"missing labels CSV: {path}")
-
-        labels: Dict[str, int] = {}
-        df = pd.read_csv(path, dtype=str)
-
-        required = {"FIPS", "class_code"}
-        if not required.issubset(df.columns): 
-            raise ValueError(f"label CSV expected: {required}")
-
-        for _, row in df.iterrows(): 
-            fips = str(row.get("FIPS", "")).strip().zfill(5)
-            code = str(row.get("class_code", "")).strip() 
-            if fips and code.isdigit(): 
-                labels[fips] = int(code) - 1 
-
-        if not labels: 
-            raise ValueError("label map is empty")
-        return labels 
-
 
 def main(): 
     parser = argparse.ArgumentParser() 
     parser.add_argument("--usps-gpkg", type=str, required=True)
-    parser.add_argument("--labels-path", type=str, default=None)
+    parser.add_argument("--year", type=int, default=2013)
+    parser.add_argument("--census-dir", default=project_path("data", "census"))
     parser.add_argument("--counties-path", type=str, default=None)
     parser.add_argument("--layer", type=str, default=None)
     parser.add_argument("--area-crs", type=str, default="EPSG:5070")
@@ -231,7 +205,8 @@ def main():
 
     ds = UspsScalarDataset(
         usps_gpkg=args.usps_gpkg,
-        labels_path=args.labels_path,
+        label_year=args.year,
+        census_dir=args.census_dir, 
         counties_path=args.counties_path,
         layer=args.layer,
         area_crs=args.area_crs,

@@ -20,8 +20,6 @@ from scipy.io                  import savemat
 
 from sklearn.preprocessing     import StandardScaler
 
-from sklearn.decomposition     import PCA 
-
 from preprocessing.loaders     import (
     load_spatial_mmap_manifest,
     load_compact_dataset 
@@ -324,7 +322,6 @@ def test_viirs_opt(
     *,
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
-    canvas_hw: tuple[int, int] = (512, 512), 
     tile_shape: tuple[int, int, int] = (2, 256, 256), 
     viirs_anchors: str = VIIRS_ANCHORS,
     trials: int = 50, 
@@ -339,7 +336,6 @@ def test_viirs_opt(
     return _spatial_opt(
         root_dir=data_path,
         model_key=model_key,
-        canvas_hw=canvas_hw,
         tile_shape=tile_shape, 
         trials=trials,
         folds=folds,
@@ -352,40 +348,8 @@ def test_viirs_opt(
 
 def test_usps_opt(
     *,
-    data_path: str = USPS_ROOT,
-    model_key: str = USPS_KEY, 
-    canvas_hw: tuple[int, int] = (512, 512), 
-    tile_shape: tuple[int, int, int] = (3, 256, 256), 
-    usps_anchors: str = USPS_ANCHORS,  
-    trials: int = 50, 
-    folds: int = 2, 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH, 
-    **_ 
-): 
-    node_anchors, anchor_stats = load_node_anchors(usps_anchors)
-    
-    return _spatial_opt(
-        root_dir=data_path,
-        model_key=model_key,
-        canvas_hw=canvas_hw,
-        tile_shape=tile_shape, 
-        node_anchors=node_anchors,
-        anchor_stats=anchor_stats,
-        factory_overrides={
-            "patch_stat": "usps"
-        },
-        trials=trials,
-        folds=folds,
-        param_space=define_usps_space,
-        random_state=random_state,
-        config_path=config_path
-    )
-
-def test_usps_scalar_opt(
-    *,
     data_path: str = USPS_2013,
-    model_key: str = "Manifold/USPS_SCALAR",
+    model_key: str = "Manifold/USPS",
     trials: int = 50, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
@@ -440,7 +404,6 @@ TESTS = {
     "viirs-opt": test_viirs_opt, 
     "saipe-opt": test_saipe_opt,
     "usps-opt": test_usps_opt,
-    "usps-scalar-opt": test_usps_scalar_opt,
     "reduce-all": test_reduce_all,
 }
 
@@ -460,7 +423,6 @@ def main():
     parser.add_argument("--tests", nargs="*", default=None)
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--folds", type=int, default=2)
-    parser.add_argument("--canvas-hw", nargs=2, type=int, default=(512, 512))
     parser.add_argument("--random-state", default=0)
     parser.add_argument("--embedding-paths", default=None)
     args = parser.parse_args()
@@ -481,7 +443,6 @@ def main():
         embedding_paths=args.embedding_paths,
         random_state=args.random_state,
         ablation_groups=ablation_groups,
-        canvas_hw=tuple(args.canvas_hw),
     )
 
     print(buf.getvalue().strip())

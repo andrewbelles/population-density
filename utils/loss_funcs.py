@@ -6,12 +6,11 @@
 # 
 # 
 
-from typing import Optional, Required
 import torch 
 
 import torch.nn as nn 
 
-import torch.nn.functional as F 
+from typing import Optional 
 
 import numpy as np 
 
@@ -110,7 +109,7 @@ class SupConLoss(nn.Module):
     ordinal supervised contrastive loss. 
     '''
 
-    def __init__(self, temperature=0.07, class_weights=None): 
+    def __init__(self, temperature=1.0, class_weights=None): 
         super().__init__() 
         self.temperature = temperature 
 
@@ -132,11 +131,9 @@ class SupConLoss(nn.Module):
 
         mask = torch.eq(labels, labels.T).float().to(device)
 
-        # Similarity matrix via cosine similarity
-        anchor_dot_contrast = torch.div(
-            torch.matmul(features, features.T),
-            self.temperature
-        )
+        # hyperplane geometry to determine similarity 
+        pairwise_dist       = torch.cdist(features, features, p=2)
+        anchor_dot_contrast = -pairwise_dist / self.temperature
 
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits        = anchor_dot_contrast - logits_max.detach() 
@@ -150,7 +147,7 @@ class SupConLoss(nn.Module):
         # Get ordinal weight from discrete labels 
         label_dist     = torch.abs(labels - labels.T).float() 
         max_dist       = label_dist.max().clamp(min=1.0)
-        ordinal_weight = label_dist / max_dist  
+        ordinal_weight = (label_dist / max_dist).pow(2) # matches qwk
 
         exp_logits   = torch.exp(logits) * logits_mask 
         denom_weight = mask + (1.0 - mask) * ordinal_weight 
@@ -231,8 +228,7 @@ class HybridOrdinalLoss(nn.Module):
         corn_per     = self.corn_fn_(logits, labels, reduction="none")
 
         if self.beta > 0 and embeddings is not None: 
-            norm_emb = F.normalize(embeddings, dim=1) 
-            sup_per  = self.supcon_fn_(norm_emb, labels, reduction="none") 
+            sup_per  = self.supcon_fn_(embeddings, labels, reduction="none") 
         else: 
             sup_per  = torch.zeros_like(rps_per)
 

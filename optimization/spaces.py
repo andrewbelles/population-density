@@ -122,13 +122,13 @@ def define_spatial_space(trial):
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
 
         "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 10.0, log=True),
-        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 2.0), 
-        "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.3),
+        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.0), 
+        "supcon_temperature": trial.suggest_float("supcon_temperature", 0.7, 6.0, log=True),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
 
         "batch_size": trial.suggest_int("batch_size", 256, 512, step=128), 
 
-        "ens": 0.99, # effective number of samples hyperparam   
+        "ens": 0.995, # effective number of samples hyperparam   
         "epochs": 350, 
         "early_stopping_rounds": 10, 
         "eval_fraction": 0.2,
@@ -155,8 +155,8 @@ def define_hgnn_space(trial: optuna.Trial):
         "max_bag_frac": trial.suggest_float("max_bag_frac", 0.6, 0.95), 
 
         "alpha_rps": trial.suggest_float("alpha_rps", 0.5, 4.0),
-        "beta_supcon": trial.suggest_float("beta_supcon", 0.25, 2.0), 
-        "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.3),
+        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.0), 
+        "supcon_temperature": trial.suggest_float("supcon_temperature", 0.7, 6.0, log=True),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
 
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),

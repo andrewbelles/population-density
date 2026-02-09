@@ -208,3 +208,39 @@ def moran_i(x: NDArray, W) -> float:
     S0 = W.sum()
     num = x @ (W @ x) 
     return float((n / S0) * (num / denom))
+
+def class_log_centroids_from_edges(edges: np.ndarray) -> np.ndarray: 
+    e = np.asarray(edges, dtype=np.float64).reshape(-1)
+    if e.size < 2: 
+        raise ValueError("edges must have length >= 2")
+    return 0.5 * (e[:-1] + e[1:])
+
+def mape_wape_from_probs(
+    probs: np.ndarray,  
+    true_pop: np.ndarray,
+    class_log_centroids: np.ndarray
+) -> dict[str, float]: 
+
+    P = np.asarray(probs, dtype=np.float64)
+    y = np.asarray(true_pop, dtype=np.float64).reshape(-1)
+    c = np.asarray(class_log_centroids, dtype=np.float64).reshape(-1)
+
+    if P.ndim != 2: 
+        raise ValueError(f"probs shape (N,2) got {P.shape}")
+    if P.shape[0] != y.size: 
+        raise ValueError(f"prob rows != y size")
+    if P.shape[1] != c.size: 
+        raise ValueError(f"prob cols != centroids size")
+
+    row_sum = P.sum(axis=1, keepdims=True)
+    P = np.divide(P, row_sum, out=np.zeros_like(P), where=row_sum > 0)
+    
+    pred_log_pop = P @ c 
+    pred_pop     = np.exp(pred_log_pop)
+
+    y = np.clip(y, 1.0, None)
+    abs_err = np.abs(pred_pop - y) 
+
+    mape = float(np.mean(abs_err / np.clip(np.abs(y), 1e-9, None)))
+    wape = float(abs_err.sum() / (np.abs(y).sum() + 1e-9))
+    return {"mape": mape, "wape": wape}
