@@ -34,15 +34,15 @@ class SaipeScalarDataset:
             "unemployment_claims": 33,
             "social_security_returns": 35,
         },
-        2020: {
-            "file": "20incyall.csv",
+        2019: {
+            "file": "19incyall.csv",
             "total_returns": 4,
-            "total_income_amount": 22,
-            "wages_amount": 24,
-            "dividends_amount": 28,
-            "business_returns": 33,
-            "unemployment_claims": 42,
-            "social_security_returns": 44,
+            "total_income_amount": 21,
+            "wages_amount": 23,
+            "dividends_amount": 27,
+            "business_returns": 32,
+            "unemployment_claims": 41,
+            "social_security_returns": 43,
         },
     }
 
@@ -139,7 +139,7 @@ class SaipeScalarDataset:
         }
 
     def _load_incy_rates(self) -> pd.DataFrame:
-        year = 2020 if self.label_year == 2020 else 2013
+        year = 2019 if self.label_year != 2013 else 2013
         spec = self.INCY_LAYOUT[year]
 
         incy_path = Path(self.csv_path).with_name(spec["file"])
@@ -267,11 +267,11 @@ class SaipeScalarDataset:
 
 def main(): 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", default=project_path("data", "saipe", "saipe_2023.csv"))
+    parser.add_argument("--csv", default=project_path("data", "saipe", "saipe_2019.csv"))
     parser.add_argument("--year", type=int, default=2013)
     parser.add_argument("--census-dir", default=project_path("data", "census"))
     parser.add_argument("--out", default=project_path("data", "datasets",
-                                                      "saipe_nchs_2023.mat"))
+                                                      "saipe_scalar_2019.mat"))
     parser.add_argument("--out-csv", default=None)
     args = parser.parse_args()
 

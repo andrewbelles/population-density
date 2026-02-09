@@ -826,7 +826,7 @@ class Mixer(nn.Module):
         self.anchor_power     = anchor_power 
         self.with_replacement = with_replacement
         
-    def forward(self, x, y, generator=None): 
+    def forward(self, x, y, generator=None, return_indices: bool = False): 
 
         B      = y.numel() 
         device = y.device 
@@ -856,8 +856,10 @@ class Mixer(nn.Module):
         x_mix = lam * x[idx_a] + (1 - lam) * x[idx_b]
         y_a   = y[idx_a]
         y_b   = y[idx_b]
-
-        return x_mix, y_a, y_b, mix_lambda
+        
+        if return_indices:
+            return x_mix, idx_a, idx_b, mix_lambda
+        return x_mix, y_a, y_b, mix_lambda 
 
 
 class PreNormResBlock(nn.Module):

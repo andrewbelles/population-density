@@ -57,7 +57,6 @@ from testbench.utils.etc       import (
 from testbench.utils.metrics   import (
     OPT_TASK,
     metrics_from_probs,
-    class_log_centroids_from_edges,
     mape_wape_from_probs
 )
 
@@ -84,9 +83,8 @@ from utils.helpers             import project_path
 
 strategy = ComputeStrategy.from_env() 
 
-CENSUS_DIR          = project_path("data", "census")
-_, TRAIN_EDGES      = build_label_map(2013, census_dir=CENSUS_DIR)
-CLASS_LOG_CENTROIDS = class_log_centroids_from_edges(TRAIN_EDGES)
+CENSUS_DIR     = project_path("data", "census")
+_, TRAIN_EDGES = build_label_map(2013, census_dir=CENSUS_DIR)
 
 VIIRS_KEY = "Manifold/VIIRS" 
 SAIPE_KEY = "Manifold/SAIPE"
@@ -283,14 +281,14 @@ def _tabular_fit_extract(
     if class_metrics: 
         class_labels = np.sort(np.unique(y_tr))
         metrics      = metrics_from_probs(y_te, probs, class_labels)
-        true_pop     = _true_pop_for_fips(test_fips, 2020)
+        true_pop     = _true_pop_for_fips(test_fips, 2019)
         valid        = np.isfinite(true_pop) & (true_pop > 0)
         
         if valid.any(): 
             reg = mape_wape_from_probs(
                 probs=np.asarray(probs)[valid],
                 true_pop=true_pop[valid],
-                class_log_centroids=CLASS_LOG_CENTROIDS
+                edges=TRAIN_EDGES
             )
             metrics.update(reg)
         else: 
@@ -414,7 +412,7 @@ def _spatial_fit_extract(
     if class_metrics: 
         class_labels = np.sort(np.unique(train_y))
         metrics      = metrics_from_probs(test_y, probs, class_labels)
-        true_pop     = _true_pop_for_fips(test_fips, 2020)
+        true_pop     = _true_pop_for_fips(test_fips, 2019)
         valid        = np.isfinite(true_pop) & (true_pop > 0)
         
         if valid.any(): 

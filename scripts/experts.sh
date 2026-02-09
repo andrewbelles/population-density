@@ -14,17 +14,17 @@ counties="data/geography/county_shapefile/tl_2020_us_county.shp"
 
 declare -A SAIPE_CSV=(
   [2013]="data/saipe/saipe_2013.csv" 
-  [2020]="data/saipe/saipe_2020.csv" 
+  [2019]="data/saipe/saipe_2019.csv" 
 )
 
 declare -A USPS_GPKG=(
   [2013]="data/usps/usps_master_tracts_2013.gpkg"
-  [2020]="data/usps/usps_master_tracts_2020.gpkg" 
+  [2019]="data/usps/usps_master_tracts_2019.gpkg" 
 )
 
 declare -A VIIRS_TIF=(
   [2013]="data/viirs/viirs_2013_median_masked.tif"
-  [2020]="data/viirs/viirs_2020_median_masked.tif" 
+  [2019]="data/viirs/viirs_2019_median_masked.tif" 
 )
 
 check_file() {
@@ -37,13 +37,13 @@ check_file() {
 mkdir -p "data/datasets" "data/tensors" 
 
 check_file "$counties" 
-for y in 2013 2020; do 
+for y in 2013 2019; do 
   check_file "${SAIPE_CSV[$y]}"
   check_file "${USPS_GPKG[$y]}"
   check_file "${VIIRS_TIF[$y]}"
 done
 
-for y in 2013 2020; do
+for y in 2013 2019; do
   python preprocessing/saipe_scalar_dataset.py \
     --csv "${SAIPE_CSV[$y]}" \
     --year "$y" \

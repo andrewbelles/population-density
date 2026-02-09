@@ -809,16 +809,18 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             for batch in label_loader: 
                 labels = batch[1]
                 all_labels.append(np.asarray(labels).reshape(-1))
-            y_full = np.concatenate(all_labels) if all_labels else np.asarray([], dtype=np.int64)
+            y_full = (np.concatenate(all_labels) if all_labels 
+                      else np.asarray([], dtype=np.float32))
         else: 
             y_full = np.asarray(y).reshape(-1)
 
         self.classes_   = np.unique(y_full)
         self.n_classes_ = len(self.classes_)
 
-        y_idx              = np.searchsorted(self.classes_, y_full)
-        class_counts       = np.bincount(y_idx, minlength=self.n_classes_)
-        self.class_weights = compute_ens_weights(class_counts, self.ens)
+        y_rank, y_bucket   = soft_rank_and_bucket(y_full)
+        self.n_classes_    = max(2, int(np.ceil(float(np.nanmax(y_rank)))) + 1) 
+        self.classes_      = np.arange(self.n_classes_, dtype=np.int64)
+        self.class_weights = torch.ones(self.n_classes_, dtype=torch.float32)
 
         self.build_model() 
 
@@ -833,7 +835,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
 
         self.mix_loss_ = MixedLoss(self.loss_fn_)
 
-        loader, val_loader = self.split_loader(loader, y_full)
+        loader, val_loader = self.split_loader(loader, y_bucket)
 
         best_soft = self.run_phase(
             name="Manifold-Mixing",
@@ -845,7 +847,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
 
         if best_soft is not None: 
             best_hard = self.run_phase(
-                name="Hard-Labels",
+                name="Soft-Rank",
                 train_loader=loader,
                 val_loader=val_loader,
                 epochs=max(1, self.hard_epochs), 
@@ -1066,9 +1068,11 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
 
         inputs, labels, batch_indices = self.unpack_batch(batch)
 
-        y_np  = np.asarray(labels).reshape(-1)
-        y_idx = np.searchsorted(self.classes_, y_np)
-        yb    = torch.as_tensor(y_idx, dtype=torch.int64, device=self.device)
+        y_soft, _ = soft_rank_and_bucket(labels)
+        yb        = torch.as_tensor(y_soft, dtype=torch.float32, device=self.device)
+        up        = np.nextafter(float(self.n_classes_ - 1), 0.0)
+        yb        = yb.clamp(0.0, up)
+        yb_bucket = torch.floor(yb).to(torch.int64)
 
         if self.model_.training: 
             inputs = self.augment_inputs(inputs)
@@ -1077,7 +1081,9 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
             feats = self.forward_feats(inputs, batch_indices)
 
             if with_mixing: 
-                x, y_a, y_b, mix_lam = self.mixer_(feats, yb) 
+                x, idx_a, idx_b, mix_lam = self.mixer_(feats, yb_bucket, return_indices=True) 
+                y_a = yb[idx_a]
+                y_b = yb[idx_b]
             else: 
                 y_a, y_b, mix_lam = None, None, None
                 x = feats 
@@ -1326,27 +1332,25 @@ class TFTabular(BaseEstimator, ClassifierMixin):
     def fit(self, X, y): 
         print(f"[params] ens={self.ens}, batch_size={self.batch_size}")
         X = np.asarray(X, dtype=np.float32)
-        y = np.asarray(y, dtype=np.int64).reshape(-1)
+        y = np.asarray(y).reshape(-1)
 
-        self.classes_   = np.unique(y)
-        self.n_classes_ = len(self.classes_)
+        y_rank, y_bucket = soft_rank_and_bucket(y)
+        self.n_classes_  = max(2, int(np.ceil(np.nanmax(y_rank))) + 1) 
+        self.classes_    = np.arange(self.n_classes_, dtype=np.int64)
+        class_weights = torch.ones(self.n_classes_, dtype=torch.float32)
 
-        y_idx         = np.searchsorted(self.classes_, y)
-        class_counts  = np.bincount(y_idx, minlength=self.n_classes_)
-        class_weights = compute_ens_weights(class_counts, self.ens)
-
-        self.build_model(class_weights)
+        self.build_model(class_weights=class_weights)
 
         if self.eval_fraction and self.eval_fraction > 0: 
             splitter = StratifiedShuffleSplit(
                 n_splits=1, test_size=self.eval_fraction, random_state=self.random_state
             )
-            train_idx, val_idx = next(splitter.split(X, y))
-            X_tr, y_tr   = X[train_idx], y[train_idx]
-            X_val, y_val = X[val_idx], y[val_idx]
+            train_idx, val_idx = next(splitter.split(X, y_bucket))
+            X_tr, y_tr   = X[train_idx], y_rank[train_idx]
+            X_val, y_val = X[val_idx], y_rank[val_idx]
         else: 
-            X_tr, y_tr   = X, y 
-            X_val, y_val = X, y 
+            X_tr, y_tr   = X, y_rank 
+            X_val, y_val = X, y_rank
 
         train_ds = TensorDataset(torch.from_numpy(X_tr), torch.from_numpy(y_tr))
         val_ds   = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
@@ -1364,7 +1368,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
 
         if best_soft is not None: 
             best_hard = self.run_phase(
-                name="Hard-Labels",
+                name="Soft-Rank",
                 train_loader=train_loader,
                 val_loader=val_loader,
                 epochs=max(1, self.hard_epochs), 
@@ -1403,7 +1407,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
 
     def loss(self, X, y): 
         X = np.asarray(X, dtype=np.float32)
-        y = np.asarray(y, dtype=np.int64)
+        y = np.asarray(y, dtype=np.float32)
 
         loader = DataLoader(
             TensorDataset(torch.from_numpy(X), torch.from_numpy(y)),
@@ -1564,7 +1568,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
 
         self.loss_fn_ = HybridOrdinalLoss(
             n_classes=self.n_classes_,
-            class_weights=class_weights,
+            # class_weights=class_weights,
             alpha_rps=self.alpha_rps,
             beta_supcon=self.beta_supcon,
             temperature=self.supcon_temperature,
@@ -1586,9 +1590,15 @@ class TFTabular(BaseEstimator, ClassifierMixin):
 
     def process_batch(self, xb, yb, with_mixing: bool = True): 
         x_embed = self.model_.tokenizer(xb)
+        yb = yb.to(self.device, dtype=torch.float32).view(-1)
+        up = np.nextafter(float(self.n_classes_ - 1), 0.0)
+        yb = yb.clamp(0.0, up)
+        yb_bucket = torch.floor(yb).to(torch.int64)
 
         if with_mixing:
-            x, y_a, y_b, mix_lam = self.mixer_(x_embed, yb)
+            x, idx_a, idx_b, mix_lam = self.mixer_(x_embed, yb_bucket, return_indices=True)
+            y_a = yb[idx_a]
+            y_b = yb[idx_b]
         else: 
             x = x_embed 
 
@@ -1627,6 +1637,20 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         probs = torch.clamp(probs, min=1e-9)
         probs = probs / probs.sum(dim=1, keepdim=True)
         return probs 
+
+# --------------------------------------------------------
+# Helper functions 
+# --------------------------------------------------------
+
+def soft_rank_and_bucket(y):
+    arr = np.asarray(y).reshape(-1)
+    if np.issubdtype(arr.dtype, np.floating): 
+        rank = arr.astype(np.float32)
+    else: 
+        rank = arr.astype(np.int64).astype(np.float32)
+    rank = np.clip(rank, 0.0, None)
+    bucket = np.floor(rank).astype(np.int64)
+    return rank, bucket 
 
 # ---------------------------------------------------------
 # Factory Functions (backwards compatibility with CrossValidator)
@@ -1703,49 +1727,3 @@ def make_svm_classifier(
     **kwargs
 ): 
     return bind(SVMClassifier, probability=probability, **kwargs)
-
-def spatial_sfe_factory(
-    *,
-    collate_fn, 
-    compute_strategy,
-    fixed,
-    **params
-):
-    merged = dict(fixed)
-    merged.update(params) 
-    collate = merged.pop("collate_fn", collate_fn) 
-    return SpatialClassifier(
-        collate_fn=collate, 
-        compute_strategy=compute_strategy,
-        **merged
-    )
-
-def make_spatial_sfe(
-    *,
-    collate_fn=None,
-    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
-    **fixed 
-): 
-    return bind(
-        spatial_sfe_factory,
-        collate_fn=collate_fn,
-        compute_strategy=compute_strategy,
-        fixed=fixed
-    )
-
-def make_xgb_sfe(
-    n_estimators: int = 400, 
-    early_stopping_rounds: int = 200, 
-    eval_fraction: float = 0.2, 
-    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False), 
-    **kwargs
-):
-    return bind(
-        XGBOrdinalRegressor,
-        n_estimators=n_estimators,
-        early_stopping_rounds=early_stopping_rounds,
-        eval_fraction=eval_fraction,
-        n_jobs=compute_strategy.n_jobs, 
-        gpu=compute_strategy.gpu_id is not None,
-        **kwargs
-    )

@@ -15,7 +15,7 @@ MOBILITY_PATH          = project_path("data", "datasets", "travel_proxy.mat")
 SHAPEFILE              = project_path("data", "geography", "county_shapefile", 
                                       "tl_2020_us_county.shp")
 CONFIG_PATH            = project_path("testbench", "model_config.yaml")
-LABELS_PATH            = project_path("data", "datasets", "viirs_nchs_2023.mat")
+LABELS_PATH            = project_path("data", "datasets", "saipe_scalar_2019.mat")
 PROBA_PATH             = project_path("data", "results", "final_stacked_predictions.mat")
 PROBA_PASSTHROUGH_PATH = project_path("data", "results", "final_stacked_passthrough.mat")
 PROBA_DIR              = project_path("data", "stacking")

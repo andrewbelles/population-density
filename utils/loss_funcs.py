@@ -47,8 +47,7 @@ class WassersteinLoss(nn.Module):
 
 class CornLoss(nn.Module):
     '''
-    Conditional Ordinal Regression loss. More stable & efficient for ordinal regression than 
-    Wasserstein 
+    Conditional Ordinal Regression. Computes loss on soft targets specifically to recover regressed independent variable   
     '''
 
     def __init__(
@@ -71,36 +70,33 @@ class CornLoss(nn.Module):
             self.class_weights = None 
 
     def forward(self, logits, y, reduction="mean"): 
-        if logits.ndim != 2: 
-            raise ValueError(f"logits must be 2d, got shape {logits.shape}")
-        if logits.size(1) != self.n_classes - 1: 
-            raise ValueError(f"logits second dim {logits.size(1)} != n_classes - 1 "
-                             f"{self.n_classes -1}")
+        if y.ndim > 1: 
+            y = y.view(-1)
 
-        yb      = y.to(device=logits.device)
-        targets = self._ordinal_targets(yb, self.n_classes).to(dtype=logits.dtype)
+        rank    = y.to(device=logits.device, dtype=logits.dtype)
+        rank    = rank.clamp(0.0, float(self.n_classes - 1))
+        targets = self._soft_targets(rank, self.n_classes).to(logits.dtype)
+        y_idx   = torch.floor(y).long().clamp(0, self.n_classes - 1)
 
         loss    = torch.nn.functional.binary_cross_entropy_with_logits(
-            logits, targets, reduction="none"
-        )
-
+            logits, targets, reduction="none")
         if self.class_weights is not None: 
-            w    = self.class_weights.to(device=logits.device, dtype=logits.dtype)
-            loss = loss * w.gather(0, yb).unsqueeze(1)
+            loss = loss * self.class_weights.to(logits.device, logits.dtype).gather(
+                0, y_idx
+            ).unsqueeze(1)
 
-        per_sample = loss.mean(dim=1)
-
-        if reduction == "mean": 
-            return per_sample.mean() 
-        elif reduction == "none": 
-            return per_sample
-        else: 
-            raise ValueError(f"unknown reduction: {reduction}")
+        per = loss.mean(dim=1)
+        return per.mean() if reduction == "mean" else per 
 
     @staticmethod 
     def _ordinal_targets(y: torch.Tensor, n_classes: int) -> torch.Tensor: 
         thresholds = torch.arange(n_classes - 1, device=y.device).view(1, -1)
         return (y.view(-1, 1) > thresholds).to(dtype=torch.float32)
+
+    @staticmethod 
+    def _soft_targets(rank: torch.Tensor, n_classes: int) -> torch.Tensor: 
+        k = torch.arange(n_classes - 1, device=rank.device, dtype=rank.dtype).view(1, -1)
+        return torch.clamp(rank.view(-1, 1) - k, 0.0, 1.0)
 
 
 class SupConLoss(nn.Module): 
@@ -213,14 +209,22 @@ class HybridOrdinalLoss(nn.Module):
 
     def forward(self, logits, embeddings, labels, sample_weight: Optional[torch.Tensor] = None): 
 
+        if labels.ndim > 1: 
+            labels = labels.view(-1)
+
+        rank = labels.to(device=logits.device, dtype=logits.dtype)
+        rank = rank.clamp(0.0, float(self.n_classes_ - 1))
+        label_bucket = torch.floor(rank).to(torch.long).clamp(0, self.n_classes_ - 1)
+        targets = self.corn_fn_._soft_targets(rank, self.n_classes_).to(dtype=logits.dtype)
+        sup_labels = label_bucket 
+
         class_w = None 
         if self.class_weights is not None: 
-            class_w = self.class_weights.to(logits.device).gather(0, labels)
+            class_w = self.class_weights.to(logits.device).gather(0, label_bucket)
 
         sw = sample_weight.view(-1) if sample_weight is not None else None 
 
         probs_exceed = torch.sigmoid(logits)
-        targets      = self.corn_fn_._ordinal_targets(labels, self.n_classes_)
         rps_per      = torch.sum((probs_exceed - targets)**2, dim=1)
         K            = max(self.n_classes_ - 1, 1)
         rps_per     /= float(K) 
@@ -228,7 +232,7 @@ class HybridOrdinalLoss(nn.Module):
         corn_per     = self.corn_fn_(logits, labels, reduction="none")
 
         if self.beta > 0 and embeddings is not None: 
-            sup_per  = self.supcon_fn_(embeddings, labels, reduction="none") 
+            sup_per  = self.supcon_fn_(embeddings, sup_labels, reduction="none") 
         else: 
             sup_per  = torch.zeros_like(rps_per)
 

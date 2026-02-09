@@ -122,7 +122,7 @@ class TileLoader(Dataset):
 
     def __getitem__(self, idx: int): 
         n_tiles = int(self.num_tiles[idx])
-        label   = int(self.labels[idx])
+        label   = float(self.labels[idx])
 
         self.ensure_mmap()
         if self.mmap is None: 
@@ -243,7 +243,7 @@ class TileLoader(Dataset):
 
         return (
             np.asarray(fips, dtype="U5"),
-            np.asarray(labels, dtype=np.int64),
+            np.asarray(labels, dtype=np.float32),
             np.asarray(offsets, dtype=np.int64),
             np.asarray(counts, dtype=np.int64)
         )
@@ -463,7 +463,7 @@ class SpatialRowLoader(Dataset):
 @dataclass(frozen=True)
 class CountyTileStream: 
     fips: str 
-    label: int 
+    label: float  
     tiles: Iterable[np.ndarray]
 
 class TileStreamSource(Protocol): 
@@ -551,7 +551,7 @@ class BinaryTileWriter:
 
                 writer.writerow({
                     "fips": bag.fips, 
-                    "label": int(bag.label),
+                    "label": float(bag.label),
                     "byte_offset": byte_offset,
                     "num_tiles": n_written
                 })

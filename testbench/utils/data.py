@@ -69,12 +69,12 @@ PREFIXES = (
 BASE: dict[str, ConcatSpec] = {
     "VIIRS_MANIFOLD": {
         "name": "VIIRS_MANIFOLD",
-        "path": project_path("data", "datasets", "viirs_2020_pooled.mat"),
+        "path": project_path("data", "datasets", "viirs_2019_poole19mat"),
         "loader": load_compact_dataset
     },
-    "SAIPE_2020": {
+    "SAIPE_2019": {
         "name": "SAIPE", 
-        "path": project_path("data", "datasets", "saipe_scalar_2020.mat"),
+        "path": project_path("data", "datasets", "saipe_scalar_2019.mat"),
         "loader": load_compact_dataset
     },
     "SAIPE_2013": {
@@ -84,12 +84,12 @@ BASE: dict[str, ConcatSpec] = {
     },
     "SAIPE_MANIFOLD": {
         "name": "SAIPE_MANIFOLD",
-        "path": project_path("data", "datasets", "saipe_2020_pooled.mat"),
+        "path": project_path("data", "datasets", "saipe_2019_pooled.mat"),
         "loader": load_compact_dataset
     },
     "USPS_MANIFOLD": {
         "name": "USPS_MANIFOLD",
-        "path": project_path("data", "datasets", "usps_2020_pooled.mat"),
+        "path": project_path("data", "datasets", "usps_2019_pooled.mat"),
         "loader": load_compact_dataset
     },
 }
@@ -112,6 +112,9 @@ def dataset_specs(dataset_key: str, proba_path: str):
     return override_proba_path(specs, proba_path)
 
 def dataset_loader(specs):
+    if len(specs) == 1: 
+        s = specs[0]
+        return s["loader"](s["path"])
     return load_concat_datasets(
         specs=specs,
         labels_path=LABELS_PATH,

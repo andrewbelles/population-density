@@ -26,6 +26,7 @@ class BinConfig:
     min_samples_per_bin: int = 40 
     min_k: int = 5 
     max_k: int = 32
+    edge_margin: float = 0.5 
 
 class PopulationLabels: 
 
@@ -39,13 +40,13 @@ class PopulationLabels:
     # File to year mapping 
     FILE_BY_YEAR   = {
         2013: "co-est2020-alldata.csv", 
-        2020: "co-est2023-alldata.csv"
+        2019: "co-est2020-alldata.csv",
     }
 
     # Columns to check for stable binning per year 
     AVAILABLE_COLS = {
         2013: ("POPESTIMATE2013",), 
-        2020: ("POPESTIMATE2020",)
+        2019: ("POPESTIMATE2019",),
     } 
 
     def __init__(
@@ -95,6 +96,18 @@ class PopulationLabels:
 
         return {str(fid).zfill(5): int(lbl) for fid, lbl in zip(df.index, y)}
 
+    def to_soft_rank_map(self, fips=None) -> dict[str, float]: 
+        df = self.labels_ if fips is None else self.labels_.reindex(
+            pd.Index(self.normalize_fips(fips))
+        )
+        
+        if df is None: 
+            raise TypeError 
+        df = df[df["soft_rank"].notna()]
+        return {
+            str(fid).zfill(5): float(r) for fid, r in zip(df.index, df["soft_rank"].to_numpy())
+        }
+
     def fit(
         self, 
         *, 
@@ -113,7 +126,7 @@ class PopulationLabels:
                 raise ValueError("feature_fips had no overlap with census population")
 
         K_eff = K if K is not None else int(self.binning.K or self.suggest_K(len(vals)))
-        edges = self.fit_edges(vals, K_eff)
+        edges = self.fit_edges(vals, K_eff, edge_margin=self.binning.edge_margin)
 
         labels = population.copy() 
         labels["target_bin"] = np.searchsorted(
@@ -121,6 +134,8 @@ class PopulationLabels:
             labels["log_pop"].to_numpy(np.float64), 
             side="right"
         ).astype(np.int64)
+
+        labels["soft_rank"] = self.rank_from_edges(labels["log_pop"].to_numpy(np.float64), edges)
 
         self.labels_ = labels 
         self.edges_  = edges 
@@ -187,17 +202,39 @@ class PopulationLabels:
         return max(2, K)
 
     @staticmethod 
-    def fit_edges(log_pop: np.ndarray, K: int) -> np.ndarray: 
-
+    def fit_edges(log_pop: np.ndarray, K: int, edge_margin: float = 0.0) -> np.ndarray: 
         q     = np.linspace(0.0, 1.0, K + 1)
         edges = np.unique(np.quantile(log_pop, q))
         if edges.size < 3: 
             raise ValueError("degenerate quantile edges, reduce K or inspect distribution")
+        
+        if edge_margin > 0.0: 
+            e  = edges.copy() 
+            lo = max(e[1] - e[0], 1e-9)
+            hi = max(e[-1] - e[-2], 1e-9)
+            e[0]  = e[0] - edge_margin * lo 
+            e[-1] = e[-1] + edge_margin * hi 
+            edges = e
+
         return edges 
 
     @staticmethod
     def normalize_fips(values: Iterable[str]) -> list[str]: 
         return [str(v).strip().zfill(5) for v in values]
+
+    @staticmethod 
+    def rank_from_edges(log_pop: np.ndarray, edges: np.ndarray) -> np.ndarray: 
+        K   = edges.size - 1
+        idx = np.searchsorted(edges[1:-1], log_pop, side="right")
+        idx = np.clip(idx, 0, K - 1)
+        
+        left  = edges[idx]
+        right = edges[idx + 1]
+        frac  = (log_pop - left) / np.maximum(right - left, 1e-9)
+        frac  = np.clip(frac, 0.0, 1.0)
+
+        max_rank = np.nextafter(float(K), 0.0)
+        return np.clip(idx.astype(np.float64) + frac, 0.0, max_rank)
 
 # ---------------------------------------------------------
 # Leakage free convience function 
@@ -208,25 +245,25 @@ def build_label_map(
     *, 
     train_year: int = 2013, 
     census_dir: str | Path = project_path("data", "census"), 
-    train_edges: np.ndarray | None = None 
+    train_edges: np.ndarray | None = None
 ): 
 
-    if year == 2020: 
+    if year != train_year: 
         if train_edges is None: 
             train = PopulationLabels(year=train_year, census_dir=census_dir).fit()
             train_edges = train.edges_ 
             assert train_edges is not None 
 
-        pop_2020 = PopulationLabels(year=2020, census_dir=census_dir).load_population_table()
-        y_2020   = np.searchsorted(
-            train_edges[1:-1], pop_2020["log_pop"].to_numpy(np.float64), side="right"
-        ).astype(np.int64)
+        pop_target = PopulationLabels(year=year, census_dir=census_dir).load_population_table()
+        y_target   = PopulationLabels.rank_from_edges(
+            pop_target["log_pop"].to_numpy(np.float64), train_edges
+        )
 
         label_map = {
-            str(f).zfill(5): int(c)
-            for f, c in zip(pop_2020.index.to_numpy(), y_2020)
+            str(f).zfill(5): float(r)
+            for f, r in zip(pop_target.index.to_numpy(), y_target)
         }
         return label_map, train_edges 
     
     fitted = PopulationLabels(year=year, census_dir=census_dir).fit()
-    return fitted.to_label_map(), fitted.edges_ 
+    return fitted.to_soft_rank_map(), fitted.edges_ 

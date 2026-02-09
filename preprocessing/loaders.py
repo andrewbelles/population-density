@@ -963,7 +963,7 @@ def dynamic_tile_collate(batch):
     flat_inputs = torch.cat(tiles_list, dim=0)
     flat_inputs = flat_inputs.contiguous(memory_format=torch.channels_last)
 
-    labels      = torch.tensor(labels, dtype=torch.long)
+    labels      = torch.tensor(labels, dtype=torch.float32)
     sections    = torch.tensor(num_tiles_list, dtype=torch.long)
 
     batch_idx   = torch.repeat_interleave(
@@ -1005,7 +1005,7 @@ def load_spatial_mmap_manifest(
         should_validate_index=should_validate_index
     )
 
-    labels = np.asarray(ds.labels, dtype=np.int64)
+    labels = np.asarray(ds.labels, dtype=np.float32)
     fips   = np.asarray(ds.fips, dtype="U5")
 
     return {

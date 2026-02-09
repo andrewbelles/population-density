@@ -262,9 +262,9 @@ def test_reduce_all(
 ): 
     if embedding_paths is None: 
         embedding_paths = [
-            project_path("data", "datasets", "viirs_2023_pooled.mat"),
-            project_path("data", "datasets", "saipe_2023_pooled.mat"),
-            project_path("data", "datasets", "usps_2023_pooled.mat")
+            project_path("data", "datasets", "viirs_2019_pooled.mat"),
+            project_path("data", "datasets", "saipe_2019_pooled.mat"),
+            project_path("data", "datasets", "usps_2019_pooled.mat")
         ]
 
     if out_dir is None: 
