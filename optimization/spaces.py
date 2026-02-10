@@ -154,8 +154,8 @@ def define_hgnn_space(trial: optuna.Trial):
 
         "max_bag_frac": trial.suggest_float("max_bag_frac", 0.6, 0.95), 
 
-        "alpha_mae": trial.suggest_float("alpha_mae", 0.5, 4.0),
-        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.0), 
+        "alpha_mae": trial.suggest_float("alpha_mae", 2.0, 5.0),
+        "beta_supcon": trial.suggest_float("beta_supcon", 1.0, 4.0), 
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.7, 6.0, log=True),
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128, 256]), 
 
@@ -191,15 +191,15 @@ def define_usps_space(trial: optuna.Trial):
 
 def define_tabular_space(trial: optuna.Trial): 
     return {
-        "hidden_dim": trial.suggest_int("hidden_dim", 768, 1024, step=64), 
+        "hidden_dim": trial.suggest_int("hidden_dim", 512, 1024, step=128), 
         "depth": trial.suggest_int("depth", 12, 16), 
         "dropout": trial.suggest_float("dropout", 0.0, 0.3), 
 
         "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.6),
         "mix_mult": trial.suggest_categorical("mix_mult", [8]), 
 
-        "beta_supcon": trial.suggest_float("beta_supcon", 0.1, 1.5), 
-        "alpha_mae": trial.suggest_float("alpha_mae", 1.0, 10.0, log=True),
+        "alpha_mae": trial.suggest_float("alpha_mae", 2.0, 5.0),
+        "beta_supcon": trial.suggest_float("beta_supcon", 1.0, 4.0), 
         "supcon_temperature": trial.suggest_float("supcon_temperature", 0.05, 0.25), 
         "supcon_dim": trial.suggest_categorical("supcon_dim", [64, 128]),
 

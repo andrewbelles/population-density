@@ -85,7 +85,7 @@ class CornLoss(nn.Module):
                 0, y_idx
             ).unsqueeze(1)
 
-        per = loss.mean(dim=1)
+        per = loss.sum(dim=1)
         return per.mean() if reduction == "mean" else per 
 
     @staticmethod 
@@ -227,8 +227,7 @@ class HybridOrdinalLoss(nn.Module):
         probs_exceed = torch.sigmoid(logits)
         
         rank_hat     = probs_exceed.sum(dim=1)
-        denom        = float(max(self.n_classes_ - 1, 1))
-        mae_per      = torch.abs(rank_hat - rank) / denom 
+        mae_per      = torch.abs(rank_hat - rank) 
  
         corn_per     = self.corn_fn_(logits, labels, reduction="none")
 
