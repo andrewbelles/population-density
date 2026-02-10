@@ -31,7 +31,7 @@ def viirs_patch_features(x, patch_size=32):
 
     flat    = patches.view(patches.size(0), C, -1)
     p95     = torch.quantile(flat, 0.95, dim=2)
-    return p95[:, :2]
+    return p95
 
 def usps_patch_features(x, patch_size=32): 
 
@@ -130,7 +130,7 @@ def main():
 
     if args.mode == "viirs": 
         feature_fn  = viirs_patch_features 
-        in_channels = 2 
+        in_channels = 3 
     else: 
         feature_fn = usps_patch_features 
         in_channels = 4 

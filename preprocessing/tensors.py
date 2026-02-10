@@ -24,8 +24,6 @@ from torch.utils.data import Dataset, get_worker_info, Sampler
 
 from preprocessing.population_labels import build_label_map 
 
-from scipy.ndimage import uniform_filter
-
 from scipy.stats   import entropy 
 
 from rasterio.warp import (
@@ -747,6 +745,9 @@ class ViirsTensorDataset(SpatialTensorDataset):
         log_scale: bool = True, 
         max_counties: int | None = None, 
         force_tight_crop: bool = False, 
+        glcm_levels: int = 32, 
+        glcm_distance: int = 1, 
+        glcm_block: int = 32 
     ): 
         super().__init__(
             counties_path=counties_path,
@@ -759,11 +760,14 @@ class ViirsTensorDataset(SpatialTensorDataset):
         self.force_tight_crop  = bool(force_tight_crop)
         self.all_touched       = bool(all_touched)
         self.log_scale         = bool(log_scale)
+        self.glcm_levels       = glcm_levels 
+        self.glcm_distance     = glcm_distance 
+        self.glcm_block        = glcm_block
 
     @property
     def tile_shape(self) -> tuple[int, int, int]:
         ht, wt = self.tile_hw 
-        return (2, ht, wt)
+        return (3, ht, wt)
 
     @property 
     def dtype(self) -> np.dtype: 
@@ -805,14 +809,10 @@ class ViirsTensorDataset(SpatialTensorDataset):
                     data = data / 9.0 
 
                 # get local standard deviation across data 
-                win_size = 3 
-                mean     = uniform_filter(data, size=win_size, mode="reflect")
-                sq_mean  = uniform_filter(data**2, size=win_size, mode="reflect")
-                var      = sq_mean - mean**2 
-                var      = np.maximum(var, 0.0)
-                texture  = np.sqrt(var) # stdev 
-                tile     = np.stack([data, texture], axis=0)
 
+                q = self.quantize_glcm(data, valid_mask, self.glcm_levels)
+                glcm_contrast, glcm_entropy = self.glcm_block_maps(q, valid_mask)
+                tile = np.stack([data, glcm_contrast, glcm_entropy], axis=0)
                 tile[:, ~valid_mask] = 0.0 
 
                 if self.force_tight_crop:
@@ -830,6 +830,90 @@ class ViirsTensorDataset(SpatialTensorDataset):
                 count += 1 
                 if self.max_counties is not None and count >= self.max_counties: 
                     break 
+
+    def glcm_block_maps(self, q: NDArray, valid_mask: NDArray) -> tuple[NDArray, NDArray]: 
+        h, w = q.shape 
+        b    = self.glcm_block
+        
+        contrast_map = np.zeros((h, w), dtype=np.float32)
+        entropy_map  = np.zeros((h, w), dtype=np.float32)
+
+        for y0 in range(0, h, b): 
+            for x0 in range(0, w, b): 
+                y1, x1 = min(y0 + b, h), min(x0 + b, w)
+                qb     = q[y0:y1, x0:x1]
+                mb     = valid_mask[y0:y1, x0:x1]
+                c, e   = self.glcm_metrics_block(qb, mb, self.glcm_levels, self.glcm_distance)
+                contrast_map[y0:y1, x0:x1] = c 
+                entropy_map[y0:y1, x0:x1]  = e 
+
+        contrast_map[~valid_mask] = 0.0 
+        entropy_map[~valid_mask]  = 0.0 
+        return contrast_map, entropy_map
+
+    @staticmethod 
+    def glcm_metrics_block(
+        q_block: NDArray,
+        m_block: NDArray,
+        levels: int, 
+        distance: int 
+    ) -> tuple[float, float]: 
+        if q_block.size == 0 or not np.any(m_block): 
+            return 0.0, 0.0 
+
+
+        offsets = ((0, distance), (distance, 0), (distance, distance), (-distance, distance))
+        
+        P = np.zeros((levels, levels), dtype=np.float64)
+
+        h, w = q_block.shape 
+        for dy, dx in offsets: 
+            y0, y1 = max(0, -dy), min(h, h - dy)
+            x0, x1 = max(0, -dx), min(w, w - dx)
+            if y1 <= y0 or x1 <= x0: 
+                continue 
+
+            a  = q_block[y0:y1, x0:x1]
+            b  = q_block[y0+dy:y1+dy, x0+dx:x1+dx]
+            ma = m_block[y0:y1, x0:x1]
+            mb = m_block[y0+dy:y1+dy, x0+dx:x1+dx]
+            pm = ma & mb 
+            if not np.any(pm): 
+                continue 
+
+            idx = a[pm].astype(np.int64) * levels + b[pm].astype(np.int64)
+            H   = np.bincount(idx, minlength=levels**2).reshape(levels, levels)
+            P  += H + H.T  
+
+        s = P.sum() 
+        if s <= 0.0: 
+            return 0.0, 0.0 
+
+        P /= s 
+        
+        i = np.arange(levels, dtype=np.float64)[:, None]
+        j = np.arange(levels, dtype=np.float64)[None, :]
+
+        contrast_glcm  = float(((i - j)**2 * P).sum())
+        entropy_glcm   = float(-(P * np.log(P + 1e-9)).sum())
+        contrast_glcm /= float((levels - 1)**2 + 1e-9)
+        entropy_glcm  /= float(np.log(levels**2) + 1e-9)
+        return contrast_glcm, entropy_glcm
+
+
+    @staticmethod
+    def quantize_glcm(data: NDArray, valid_mask: NDArray, levels: int) -> NDArray: 
+        q    = np.zeros_like(data, dtype=np.int64)
+        vals = data[valid_mask]
+        if vals.size == 0: 
+            return q 
+        hi = float(np.quantile(vals, 0.995))
+        if hi <= 0.0: 
+            return q 
+        scaled = np.clip(data / hi, 0.0, 1.0)
+        q      = np.floor(scaled * (levels - 1) + 1e-9).astype(np.int16)
+        q[~valid_mask] = 0 
+        return q 
 
 # ---------------------------------------------------------
 # United States Postal Service vacant and active addresses.  

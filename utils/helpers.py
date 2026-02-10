@@ -7,6 +7,9 @@
 # 
 
 import os, re, yaml
+
+import pandas as pd 
+
 from pathlib import Path
 
 import numpy as np 
@@ -27,6 +30,9 @@ MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "o
 # ---------------------------------------------------------
 # Generic Helper Functions 
 # ---------------------------------------------------------
+
+def to_num(s: pd.Series) -> pd.Series: 
+    return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False), errors="coerce")
 
 def bind(fn, **kwargs):
     return partial(fn, **kwargs)
