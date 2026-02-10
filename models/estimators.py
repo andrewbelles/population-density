@@ -818,7 +818,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         self.n_classes_ = len(self.classes_)
 
         y_rank, y_bucket   = soft_rank_and_bucket(y_full)
-        self.n_classes_    = max(2, int(np.ceil(float(np.nanmax(y_rank)))) + 1) 
+        self.n_classes_    = max(2, int(np.floor(float(np.nanmax(y_rank)))) + 1) 
         self.classes_      = np.arange(self.n_classes_, dtype=np.int64)
         self.class_weights = torch.ones(self.n_classes_, dtype=torch.float32)
 
@@ -1335,7 +1335,7 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         y = np.asarray(y).reshape(-1)
 
         y_rank, y_bucket = soft_rank_and_bucket(y)
-        self.n_classes_  = max(2, int(np.ceil(np.nanmax(y_rank))) + 1) 
+        self.n_classes_  = max(2, int(np.floor(np.nanmax(y_rank))) + 1) 
         self.classes_    = np.arange(self.n_classes_, dtype=np.int64)
         class_weights = torch.ones(self.n_classes_, dtype=torch.float32)
 
