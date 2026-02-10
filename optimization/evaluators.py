@@ -431,8 +431,9 @@ def _iter_spatial_splits(
     config: CVConfig
 ): 
     y      = labels 
+    y_bucket = np.floor(np.clip(y, 0.0, None)).astype(np.int64)
     idx    = np.arange(len(y))
-    splits = config.get_splitter(task).split(idx, y)
+    splits = config.get_splitter(task).split(idx, y_bucket)
     return splits, None
 
 
@@ -524,7 +525,7 @@ def _spatial_eval_worker(
 
     data       = loader_func(filepath)
     dataset    = data["dataset"]
-    labels     = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+    labels     = np.asarray(data["labels"], dtype=np.float32).reshape(-1)
     collate_fn = data.get("collate_fn")
 
     # Clean up inputs to fold evaluation 
@@ -566,7 +567,7 @@ class SpatialEvaluator(OptunaEvaluator):
         
         self.data             = self.loader(filepath)
         self.dataset          = self.data["dataset"]
-        self.labels           = np.asarray(self.data["labels"], dtype=np.int64).reshape(-1)
+        self.labels           = np.asarray(self.data["labels"], dtype=np.float32).reshape(-1)
         self.coords           = self.data.get("coords")
         self.collate_fn       = self.data.get("collate_fn") 
         self.batch_size       = batch_size 
@@ -648,50 +649,6 @@ class SpatialEvaluator(OptunaEvaluator):
 
     def reduce_worker_results(self, results): 
         return float(np.mean(results))
-
-# ---------------------------------------------------------
-# XGB ordinal evaluator
-# ---------------------------------------------------------
-
-class XGBOrdinalEvaluator(OptunaEvaluator):
-    def __init__(
-        self,
-        filepath,
-        loader_func,
-        model_factory,
-        param_space,
-        config,
-        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
-    ):
-        self.filepath = filepath
-        self.loader = loader_func
-        self.factory = model_factory
-        self.param_space_fn = param_space
-        self.config = config
-        self.strategy = compute_strategy
-
-        data = self.loader(filepath)
-        self.X = np.asarray(data["features"], dtype=np.float32)
-        self.y = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
-
-    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
-        return self.param_space_fn(trial)
-
-    def evaluate(self, params: Dict[str, Any]) -> float:
-        splitter = self.config.get_splitter(CLASSIFICATION)
-        scores = []
-
-        for train_idx, test_idx in splitter.split(self.X, self.y):
-            model = self.factory(compute_strategy=self.strategy, **params)
-            if callable(model) and not hasattr(model, "fit"):
-                model = model()
-            if not hasattr(model, "fit"):
-                raise TypeError("model_factory must return a model with .fit()")
-
-            model.fit(self.X[train_idx], self.y[train_idx])
-            scores.append(float(model.loss(self.X[test_idx], self.y[test_idx])))
-
-        return float(np.mean(scores))
 
 # ---------------------------------------------------------
 # Correct-and-smooth evaluator
@@ -903,7 +860,7 @@ class TabularEvaluator(OptunaEvaluator):
         compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
     ):
         self.X = np.asarray(X, dtype=np.float32)
-        self.y = np.asarray(y, dtype=np.int64)
+        self.y = np.asarray(y, dtype=np.float32)
         self.param_space_fn   = param_space
         self.model_factory    = model_factory 
         self.random_state     = random_state
@@ -918,7 +875,9 @@ class TabularEvaluator(OptunaEvaluator):
             test_size=params.get("eval_fraction", 0.15),
             random_state=self.random_state
         )
-        train_idx, val_idx = next(splitter.split(self.X, self.y))
+        
+        y_bucket = np.floor(np.clip(self.y, 0.0, None)).astype(np.int64)
+        train_idx, val_idx = next(splitter.split(self.X, y_bucket))
 
         scaler = StandardScaler() 
         X_tr   = scaler.fit_transform(self.X[train_idx])

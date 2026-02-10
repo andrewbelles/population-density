@@ -361,12 +361,14 @@ class HypergraphBuilder:
         tile_size=256, 
         patch_size=32,
         thresh_low=LOGRADIANCE_GATE_LOW, 
-        thresh_high=LOGRADIANCE_GATE_HIGH
+        thresh_high=LOGRADIANCE_GATE_HIGH,
+        global_active_eps=1e-6 
     ):
-        self.tile_size   = tile_size 
-        self.patch_size  = patch_size 
-        self.thresh_low  = thresh_low
-        self.thresh_high = thresh_high
+        self.tile_size         = tile_size 
+        self.patch_size        = patch_size 
+        self.thresh_low        = thresh_low
+        self.thresh_high       = thresh_high
+        self.global_active_eps = global_active_eps
 
         # Should be eq 
         self.grid_h      = tile_size // patch_size 
@@ -375,7 +377,7 @@ class HypergraphBuilder:
 
         self._spatial_cache = {}
 
-    def build(self, stats, batch_size, idx=None): 
+    def build(self, stats, batch_size, idx=None, active_stats=None): 
         '''
         Build hypergraph per patch per tile. 
 
@@ -452,7 +454,16 @@ class HypergraphBuilder:
             semantic_hedges = torch.empty((0,), device=device, dtype=torch.long)
 
         # global hyperedge, all nodes per tile 
-        patch_global_nodes  = torch.arange(N, device=device)
+        gate = stats if active_stats is None else active_stats 
+        if gate.ndim == 1: 
+            is_active = gate.abs() > self.global_active_eps 
+        else: 
+            if gate.size(-1) >= 1: 
+                is_active = gate[:, 0].abs() > self.global_active_eps
+            else: 
+                is_active = gate.norm(p=2, dim=1) > self.global_active_eps 
+
+        patch_global_nodes  = torch.nonzero(is_active, as_tuple=False).squeeze(1)
         patch_global_hedges = (patch_global_nodes // K) * E_per_tile + (K + 3) 
 
         readout_nodes = torch.arange(N, N + B, device=device).repeat_interleave(4)

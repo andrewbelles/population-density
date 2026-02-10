@@ -214,6 +214,7 @@ class MILOrdinalHead(nn.Module):
         dropout: float = 0.15, 
         supcon_dim: int | None = None, # optional for detaching at inference 
         use_logit_scaler: bool = True, # platt/temperature scaling 
+        logit_scale_max: float = 30.0, 
         reduce_dim: int | None = None, 
         reduce_depth: int = 2, 
         reduce_dropout: float = 0.0
@@ -241,7 +242,7 @@ class MILOrdinalHead(nn.Module):
             self.logit_scale = nn.Parameter(torch.tensor(1.0))
         else: 
             self.register_parameter("logit_scale", None)
-
+        self.logit_scale_max = logit_scale_max 
         self.cut_anchor = nn.Parameter(torch.tensor(0.0))
         self.cut_deltas = nn.Parameter(torch.ones(n_classes - 2) * 0.35)
 
@@ -269,7 +270,8 @@ class MILOrdinalHead(nn.Module):
         feat_v = self.drop(self.act(self.fc(emb)))
         score  = self.out(feat_v)
         if self.logit_scale is not None: 
-            score = score * F.softplus(self.logit_scale)
+            scale = F.softplus(self.logit_scale).clamp(min=1e-6, max=self.logit_scale_max)
+            score = score * scale
         logits = score + cuts 
         proj   = self.proj(feats) if self.proj is not None else None 
         return emb, logits, proj 
@@ -431,6 +433,8 @@ class HyperGATStack(nn.Module):
 
         dims = [in_dim] + [hidden_dim] * n_layers
 
+        self.skip_proj = nn.ModuleList() 
+
         for i in range(n_layers): 
             self.layers.append(
                 MultiheadCascadedHyperGAT(
@@ -443,24 +447,22 @@ class HyperGATStack(nn.Module):
                 )
             ) 
             self.norms.append(nn.LayerNorm(hidden_dim))
+            if dims[i] == hidden_dim:
+                self.skip_proj.append(nn.Identity())
+            else: 
+                self.skip_proj.append(nn.Linear(dims[i], hidden_dim, bias=False))
 
-        self.out_dim = in_dim + (hidden_dim * n_layers)
+        self.out_dim = hidden_dim 
         
     def forward(self, x, node_types, H, edge_type): 
+        # resnet style stacking on GAT layers 
+        h = x 
+        for gat, ln, skip in zip(self.layers, self.norms, self.skip_proj): 
+            h_update, _ = gat(h, node_types, H, edge_type)
+            h = skip(h) + self.drop(h_update)
+            h = ln(h)
 
-        stats = [x]
-
-        for gat, ln in zip(self.layers, self.norms): 
-            h_in = stats[-1] 
-            h, _ = gat(h_in, node_types, H, edge_type)
-
-            if h.shape == h_in.shape:
-                h = h + h_in 
-
-            h = ln(self.drop(h))
-            stats.append(h)
-
-        return torch.cat(stats, dim=-1) 
+        return h 
 
 class MultiheadCascadedHyperGAT(nn.Module):
 
@@ -700,6 +702,10 @@ class HypergraphBackbone(nn.Module):
         score = self.encoder.patch_stat(patches, stat=self.patch_stat, q=self.patch_quantile)
         score = score.view(B, K, -1)
 
+        # compute raw score 
+        flat  = patches.view(B * K, C, -1)
+        raw   = torch.quantile(flat, q=self.patch_quantile, dim=2)[:, :score.shape[-1]] 
+
         if idx is None: 
             pos = self.pos_embed
         else: 
@@ -717,7 +723,8 @@ class HypergraphBackbone(nn.Module):
         node_type, _, edge_type, _, H = self.builder.build(
             score.view(-1, score.shape[-1]), 
             batch_size=B, 
-            idx=idx
+            idx=idx,
+            active_stats=raw 
         )
 
         node_out = self.gnn(all_feats, node_type, H, edge_type)
@@ -757,9 +764,6 @@ class TransformerProjector(nn.Module):
         self.tokenizer  = nn.Linear(in_dim, num_tokens * d_model, bias=True)
         self.token_proj = nn.Linear(in_dim, d_model, bias=True)
 
-        self.cls_token  = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos_embed  = nn.Parameter(torch.zeros(1, num_tokens + 1, d_model))
-
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -780,8 +784,6 @@ class TransformerProjector(nn.Module):
         self.out_proj = nn.Linear(d_model, out_dim, bias=True)
 
         nn.init.trunc_normal_(self.tokenizer.weight, std=0.02)
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, x): 
         if x.dim() == 3: 
@@ -790,16 +792,8 @@ class TransformerProjector(nn.Module):
             B = x.size(0)
             tokens = self.tokenizer(x).view(B, self.num_tokens, self.d_model)
 
-        B      = tokens.size(0)
-        cls    = self.cls_token.expand(B, -1, -1)
-        tokens = torch.cat([cls, tokens], dim=1)
-        
-        if tokens.size(1) > self.pos_embed.size(1): 
-            raise ValueError(f"token length {tokens.size(1)} exceeds pos_embed length " 
-                             f"{self.pos_embed.size(1)}")
-        tokens = tokens + self.pos_embed[:, :tokens.size(1), :]
         enc    = self.encoder(tokens)
-        pooled = enc[:, 0]
+        pooled = enc.mean(dim=1)
         return self.out_proj(pooled)
 
 

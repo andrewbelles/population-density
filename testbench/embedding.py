@@ -211,7 +211,7 @@ def test_saipe_opt(
     loader = make_dataset_loader(dataset_key, proba_path)[dataset_key] 
     data   = loader(data_path) if callable(loader) else loader 
     X      = np.asarray(data["features"], dtype=np.float32)
-    y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1) 
+    y      = np.asarray(data["labels"], dtype=np.float32).reshape(-1) 
 
     evaluator = TabularEvaluator(
         X, y,
@@ -357,7 +357,7 @@ def test_usps_opt(
 ):
     data   = load_compact_dataset(data_path)
     X      = np.asarray(data["features"], dtype=np.float32)
-    y      = np.asarray(data["labels"], dtype=np.int64).reshape(-1)
+    y      = np.asarray(data["labels"], dtype=np.float32).reshape(-1)
 
     evaluator = TabularEvaluator(
         X, y,

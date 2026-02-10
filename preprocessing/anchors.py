@@ -50,25 +50,46 @@ def usps_patch_features(x, patch_size=32):
 
     return p95 
 
-def compute_anchors(loader, n_samples=5e5, k=3, patch_size=32, device="cuda", feature_fn=None): 
+def compute_anchors(
+    loader, 
+    n_samples=5e5, 
+    k=3, 
+    patch_size=32, 
+    device="cuda", 
+    feature_fn=None,
+    min_norm=1e-6
+): 
     if feature_fn is None: 
         raise ValueError("feature_fn is required.")
 
     max_samples = n_samples * 2 
-
-    buffer = []
-    total  = 0 
+    buffer      = []
+    total_valid = 0
+    total_raw   = 0 
 
     for batch in loader: 
         xb = batch[0] if isinstance(batch, (list, tuple)) else batch 
         xb = xb.to(device)
 
-        feats  = feature_fn(xb, patch_size=patch_size).detach().cpu().numpy() 
-        buffer.append(feats)
-        total += feats.shape[0]
+        feats      = (feature_fn(xb, patch_size=patch_size)
+                      .detach()
+                      .cpu()
+                      .numpy()
+                      .astype(np.float32, copy=False)) 
+        
+        total_raw += feats.shape[0]
+        norms      = np.linalg.norm(feats, axis=1)
+        valid      = np.isfinite(norms) & (norms > float(min_norm))
+        if valid.any():
+            keep   = feats[valid]
+            buffer.append(keep)
+            total_valid += keep.shape[0]
 
-        if total >= max_samples: 
+        if total_valid >= max_samples: 
             break 
+
+    if not buffer: 
+        raise ValueError("No valid anchor features after zero filtering")
 
     data    = np.vstack(buffer)
     
@@ -77,14 +98,23 @@ def compute_anchors(loader, n_samples=5e5, k=3, patch_size=32, device="cuda", fe
     std  = data.std(axis=0)
     std  = np.maximum(std, 1e-6)
 
-    data = (data - mean) / std 
+    z    = (data - mean) / std 
 
-    idx     = np.random.choice(data.shape[0], min(n_samples, data.shape[0]), replace=False)
-    samples = data[idx]
+    take    = min(int(n_samples), z.shape[0])
+    idx     = np.random.choice(z.shape[0], take, replace=False)
+    samples = z[idx]
 
     kmeans  = KMeans(n_clusters=k, random_state=0)
     kmeans.fit(samples)
-    return kmeans.cluster_centers_, np.array([mean, std], dtype=np.float32)
+    anchors = kmeans.cluster_centers_.astype(np.float32)
+
+    order   = np.argsort(np.linalg.norm(anchors, axis=1))
+    anchors = anchors[order]
+
+    keep_ratio = float(total_valid) / max(total_raw, 1)
+    print(f"[anchors] kept {total_valid}/{total_raw} patches ({keep_ratio:.2%})")
+
+    return anchors, np.array([mean, std], dtype=np.float32)
 
 
 def main(): 
@@ -94,7 +124,8 @@ def main():
     parser.add_argument("--mode", choices=["viirs", "usps"], required=True)
     parser.add_argument("--patch-size", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--n-samples", type=int, default=5e5)
+    parser.add_argument("--n-samples", type=int, default=500_000) 
+    parser.add_argument("--min-norm", type=float, default=1e-6)
     args = parser.parse_args()
 
     if args.mode == "viirs": 
@@ -117,7 +148,8 @@ def main():
         n_samples=args.n_samples, 
         k=3,
         patch_size=args.patch_size,
-        feature_fn=feature_fn
+        feature_fn=feature_fn,
+        min_norm=args.min_norm
     )
 
     np.save(args.out, anchors)
