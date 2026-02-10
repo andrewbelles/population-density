@@ -54,6 +54,10 @@ class SaipeScalarDataset:
         "retirement_rate"
     ]
 
+    POVERTY_ALL_COL = "all_ages__poverty_percent_all_ages"
+    POVERTY_U18_COL = "age_0_17__poverty_percent_age_0_17"
+    POVERTY_517_COL = "age_5_17_in_families__poverty_percent_age_5_17_in_families"
+
     def __init__(
         self,
         csv_path: str | None = None, 
@@ -86,8 +90,8 @@ class SaipeScalarDataset:
 
         specs     = [
             s for s in specs
-            if s["group"] == "median_household_income"
-            or s["name"] == "all_ages__poverty_percent_all_ages"
+            if "ci90" not in s["name"] and "estimate" not in s["name"] 
+            and "count" not in s["name"]
         ]
 
         col_idx = [s["idx"] for s in specs]
@@ -123,12 +127,14 @@ class SaipeScalarDataset:
 
         incy_df = self._load_incy_rates()
         full_df = saipe_df.merge(incy_df, on="fips", how="left")
+        full_df = self._add_engineered_features(full_df)
+        full_df = full_df.replace([np.inf, -np.inf], np.nan)
         full_df = full_df.dropna().reset_index(drop=True)
 
         fips = full_df["fips"].to_numpy(dtype="U5")
         feature_cols = [c for c in full_df.columns if c != "fips"]
         X = full_df[feature_cols].to_numpy(dtype=np.float64)
-        y = np.array([self.labels_map[f] for f in fips], dtype=np.int64).reshape(-1, 1)
+        y = np.array([self.labels_map[f] for f in fips], dtype=np.float64).reshape(-1, 1)
         feature_names = np.asarray(feature_cols, dtype="U64")
 
         return {
@@ -137,6 +143,50 @@ class SaipeScalarDataset:
             "fips_codes": fips,
             "feature_names": feature_names
         }
+
+    def _add_engineered_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        required = [
+            self.POVERTY_ALL_COL,
+            self.POVERTY_U18_COL,
+            self.POVERTY_517_COL,
+            "wage_dependence_rate",
+            "dividend_rate",
+            "retirement_rate",
+        ]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(f"missing required columns for engineered SAIPE features: {missing}")
+
+        out = df.copy()
+        eps = 1e-6
+
+        p_all = out[self.POVERTY_ALL_COL].to_numpy(np.float64)
+        p_u18 = out[self.POVERTY_U18_COL].to_numpy(np.float64)
+        p_517 = out[self.POVERTY_517_COL].to_numpy(np.float64)
+
+        P = np.column_stack([p_all, p_u18, p_517]).astype(np.float64)
+        P_pos = np.clip(P, 1e-9, None)
+        Q = P_pos / np.maximum(P_pos.sum(axis=1, keepdims=True), eps)
+
+        out["pov_u18_minus_517_norm"] = (p_u18 - p_517) / (p_all + eps)
+        out["pov_threeway_entropy"] = -(Q * np.log(Q)).sum(axis=1)
+
+        nonwage = np.maximum(1.0 - out["wage_dependence_rate"].to_numpy(np.float64), eps)
+        out["irs_div_plus_ret_per_nonwage"] = (
+            out["dividend_rate"].to_numpy(np.float64)
+            + out["retirement_rate"].to_numpy(np.float64)
+        ) / nonwage
+
+        p_std = P.std(axis=1)
+        p_mean = P.mean(axis=1)
+        out["pov_cv"] = p_std / (p_mean + eps)
+        out["pov_gap_norm"] = np.abs(p_u18 - p_517) / (p_all + eps)
+
+        max_entropy = np.log(3.0)
+        out["pov_uncertainty"] = 0.5 * out["pov_cv"] + 0.5 * (
+            1.0 - out["pov_threeway_entropy"] / max_entropy
+        )
+        return out
 
     def _load_incy_rates(self) -> pd.DataFrame:
         year = 2019 if self.label_year != 2013 else 2013

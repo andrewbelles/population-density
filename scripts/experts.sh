@@ -49,7 +49,7 @@ for y in 2013 2019; do
     --year "$y" \
     --census-dir "$census" \
     --out "data/datasets/saipe_scalar_${y}.mat" \
-    --out-csv "data/datasets/saipe_scalar_${y}.csv"
+    --out-csv "data/csv/saipe_scalar_${y}.csv"
 
   python preprocessing/usps_scalar_dataset.py \
     --usps-gpkg "${USPS_GPKG[$y]}" \
@@ -57,7 +57,7 @@ for y in 2013 2019; do
     --census-dir "$census" \
     --counties-path "$counties" \
     --out-path "data/datasets/usps_scalar_${y}.mat" \
-    --csv-path "data/datasets/usps_scalar_${y}.csv"
+    --csv-path "data/csv/usps_scalar_${y}.csv"
 
   python preprocessing/tensors.py \
     --viirs \

@@ -747,7 +747,6 @@ class TransformerProjector(nn.Module):
         in_dim: int, 
         out_dim: int, 
         d_model: int = 64, 
-        num_tokens: int = 8, 
         n_heads: int = 4, 
         n_layers: int = 2, 
         dropout: float = 0.1, 
@@ -759,10 +758,10 @@ class TransformerProjector(nn.Module):
         self.in_dim     = in_dim 
         self.out_dim    = out_dim 
         self.d_model    = d_model 
-        self.num_tokens = num_tokens
+        self.num_tokens = in_dim  
 
-        self.tokenizer  = nn.Linear(in_dim, num_tokens * d_model, bias=True)
-        self.token_proj = nn.Linear(in_dim, d_model, bias=True)
+        self.feature_tokenizer = nn.Linear(1, d_model, bias=True)
+        self.feature_id_embed  = nn.Parameter(torch.zeros(1, in_dim, d_model))
 
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -783,17 +782,19 @@ class TransformerProjector(nn.Module):
         )
         self.out_proj = nn.Linear(d_model, out_dim, bias=True)
 
-        nn.init.trunc_normal_(self.tokenizer.weight, std=0.02)
+        nn.init.trunc_normal_(self.feature_id_embed, std=0.02)
 
     def forward(self, x): 
-        if x.dim() == 3: 
-            tokens = self.token_proj(x)
-        else: 
-            B = x.size(0)
-            tokens = self.tokenizer(x).view(B, self.num_tokens, self.d_model)
+        if x.dim() != 2: 
+            raise ValueError(f"expecteed (B, F), got {x.shape}")
+        if x.size(1) != self.in_dim: 
+            raise ValueError(f"feature dim mismatch: got {x.size(1)}, expected {self.in_dim}")
 
-        enc    = self.encoder(tokens)
-        pooled = enc.mean(dim=1)
+        tokens  = self.feature_tokenizer(x.unsqueeze(-1))
+        tokens += self.feature_id_embed
+
+        enc     = self.encoder(tokens)
+        pooled  = enc.mean(dim=1)
         return self.out_proj(pooled)
 
 

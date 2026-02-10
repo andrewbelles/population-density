@@ -63,7 +63,11 @@ class UspsScalarDataset:
             self.label_map, _ = build_label_map(2013, census_dir=census_dir)
         else: 
             _, edges          = build_label_map(2013, census_dir=census_dir)
-            self.label_map, _ = build_label_map(label_year, train_edges=edges, census_dir=census_dir)
+            self.label_map, _ = build_label_map(
+                label_year, 
+                train_edges=edges, 
+                census_dir=census_dir
+            )
         self.df            = self.build() 
 
     def save(self, out_path: str, csv_path: str | None = None): 
@@ -78,7 +82,7 @@ class UspsScalarDataset:
 
         savemat(out_path, {
             "features": self.df[feature_cols].to_numpy(dtype=np.float64),
-            "labels": self.df["label"].to_numpy(dtype=np.int64).reshape(-1, 1), 
+            "labels": self.df["label"].to_numpy(dtype=np.float64).reshape(-1, 1), 
             "feature_names": np.array(feature_cols, dtype="U"), 
             "fips_codes": self.df["fips"].to_numpy(dtype="U5"), 
             "n_counties": self.df.shape[0]
@@ -180,7 +184,7 @@ class UspsScalarDataset:
 
         df["label"] = df["fips"].map(self.label_map)
         df = df.dropna(subset=["label"])
-        df["label"] = df["label"].astype(int)
+        df["label"] = df["label"].astype(float)
 
         feature_cols = [f"usps_{c}" for c in self.CHANNELS]
         df = df[["fips", "label", *feature_cols]]

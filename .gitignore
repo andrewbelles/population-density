@@ -8,15 +8,11 @@ target/
 
 data/ 
 
-Cargo.lock
-
 *.so 
 *.o
 
 *.clangd 
 *.log 
 *.env 
-
-check_packs.py
 
 papers/

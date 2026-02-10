@@ -201,7 +201,6 @@ def define_tabular_space(trial: optuna.Trial):
         "supcon_dim": trial.suggest_categorical("supcon_dim", [128, 256]),
 
         "transformer_dim": trial.suggest_categorical("transformer_dim", [64, 128]),
-        "transformer_tokens": trial.suggest_categorical("transformer_tokens", [4, 8]),
         "transformer_heads": trial.suggest_categorical("transformer_heads", [4, 8]),
         "transformer_layers": trial.suggest_int("transformer_layers", 1, 3),
         "transformer_dropout": trial.suggest_float("transformer_dropout", 0.0, 0.15),
@@ -216,10 +215,10 @@ def define_tabular_space(trial: optuna.Trial):
         "reduce_dim": 256, 
         "eval_fraction": 0.2,
         "min_delta": 1e-4, 
-        "early_stopping_rounds": 20, 
+        "early_stopping_rounds": 50, 
         "batch_size": 256,
-        "soft_epochs": 300,
-        "hard_epochs": 150, 
+        "soft_epochs": 500,
+        "hard_epochs": 250, 
         "max_mix": None, 
         "anchor_power": 1.0 
     }

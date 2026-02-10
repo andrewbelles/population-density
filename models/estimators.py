@@ -733,8 +733,8 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         early_stopping_rounds: int = 15, 
         eval_fraction: float = 0.15, 
         min_delta: float = 1e-3, 
-        batch_size: int = 512, 
-        target_global_batch: int = 512, 
+        batch_size: int = 256, 
+        target_global_batch: int = 256, 
         shuffle: bool = True, 
         collate_fn=None, 
 
@@ -796,7 +796,7 @@ class SpatialHyperGAT(BaseEstimator, ClassifierMixin):
         self.patch_quantile = patch_quantile
 
     def fit(self, X, y=None): 
-        print(f"[ENS Beta] {self.ens}") 
+        print(f"[hyperGAT params] batch_size={self.batch_size}") 
         torch.manual_seed(self.random_state)
 
         loader          = self.ensure_loader(X, shuffle=self.shuffle)
@@ -1263,7 +1263,6 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         ens: float = 0.995, 
 
         transformer_dim: int,     
-        transformer_tokens: int, 
         transformer_heads: int = 4, 
         transformer_layers: int = 2,
         transformer_dropout: float = 0.1, 
@@ -1303,7 +1302,6 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         self.ens                      = ens
 
         self.transformer_dim          = transformer_dim 
-        self.transformer_tokens       = transformer_tokens
         self.transformer_heads        = transformer_heads 
         self.transformer_layers       = transformer_layers
         self.transformer_dropout      = transformer_dropout
@@ -1532,7 +1530,6 @@ class TFTabular(BaseEstimator, ClassifierMixin):
             in_dim=self.in_dim, 
             out_dim=self.transformer_dim,
             d_model=self.transformer_dim,
-            num_tokens=self.transformer_tokens,
             n_heads=self.transformer_heads,
             n_layers=self.transformer_layers,
             dropout=self.transformer_dropout,

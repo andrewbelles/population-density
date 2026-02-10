@@ -266,60 +266,58 @@ models:
     class_weight: balanced
   Manifold/VIIRS:
     patch_size: 32
-    embed_dim: 64
+    embed_dim: 128
     gnn_dim: 256
     gnn_layers: 3
     gnn_heads: 8
     fc_dim: 128
-    dropout: 0.49764000341998593
+    dropout: 0.29764000341998593
     attn_dropout: 0.1454554590554234
     max_bag_frac: 0.8890396983442015
-    alpha_mae: 2.465862332753677
+    alpha_mae: 5.465862332753677
     beta_supcon: 1.391295588294204
     supcon_temperature: 0.23692862364560804
     supcon_dim: 256
     lr: 1.867740674473713e-05
     weight_decay: 4.36359843744835e-06
   Manifold/SAIPE:
-    hidden_dim: 512
-    depth: 15
-    dropout: 0.1603907847207383
-    mix_alpha: 0.1454840927102477
+    hidden_dim: 384
+    depth: 11
+    dropout: 0.156
+    mix_alpha: 0.566
     mix_mult: 4
-    beta_supcon: 0.19908565050923122
-    alpha_mae: 9.053711495120458
-    supcon_temperature: 0.23532826829206296
-    supcon_dim: 128
+    beta_supcon: 0.767
+    alpha_mae: 2.918
+    supcon_temperature: 1.24
+    supcon_dim: 256
     transformer_dim: 64
-    transformer_tokens: 8
-    transformer_heads: 8
-    transformer_layers: 4
-    transformer_dropout: 0.006332476775095417
-    transformer_attn_dropout: 0.0505545972906838
-    reduce_depth: 3
-    reduce_dropout: 0.008423385773528587
-    lr: 0.0001443218421793436
-    weight_decay: 1.939605073877735e-06
+    transformer_heads: 4
+    transformer_layers: 3
+    transformer_dropout: 0.117
+    transformer_attn_dropout: 0.131
+    reduce_depth: 4
+    reduce_dropout: 0.120
+    lr: 8.682e-05
+    weight_decay: 2.196e-05
   USPS_MANIFOLD/Logistic:
     C: 0.003382286306527411
     class_weight: balanced
   Manifold/USPS:
-    hidden_dim: 512 
-    depth: 16
-    dropout: 0.04573884037466514
-    mix_alpha: 0.2702893664233766
+    hidden_dim: 384
+    depth: 11
+    dropout: 0.156
+    mix_alpha: 0.566
     mix_mult: 4
-    beta_supcon: 0.3034516557151667
-    alpha_mae: 9.660696669355671
-    supcon_temperature: 0.12419130720765689
-    supcon_dim: 128
-    transformer_dim: 128
-    transformer_tokens: 8
+    beta_supcon: 0.767
+    alpha_mae: 2.918
+    supcon_temperature: 1.24
+    supcon_dim: 256
+    transformer_dim: 64
     transformer_heads: 4
     transformer_layers: 3
-    transformer_dropout: 0.17955371670665143
-    transformer_attn_dropout: 0.13033822284867722
+    transformer_dropout: 0.117
+    transformer_attn_dropout: 0.131
     reduce_depth: 4
-    reduce_dropout: 0.02134090648790369
-    lr: 0.00040057248299002506
-    weight_decay: 0.0002596297219777291
+    reduce_dropout: 0.120
+    lr: 8.682e-05
+    weight_decay: 2.196e-05

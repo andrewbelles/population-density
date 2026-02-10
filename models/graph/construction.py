@@ -431,13 +431,20 @@ class HypergraphBuilder:
 
         E_per_tile     = K + 4
         spatial_hedges = (spatial_hedges // K) * E_per_tile + (spatial_hedges % K)
+        gate = stats if active_stats is None else active_stats 
+        if gate.ndim == 1: 
+            is_active = gate.abs() > self.global_active_eps 
+        else: 
+            is_active = gate.abs().amax(dim=1) > self.global_active_eps
+        is_active_2d = is_active.view(B, K)
         node_type_2d = patch_types.view(B, K)
+
         semantic_nodes_list  = []
         semantic_hedges_list = []
         
         # semantic hyperedge creation, one for each strata 
         for t in (0, 1, 2): 
-            mask = node_type_2d == t 
+            mask = (node_type_2d == t) & is_active_2d 
             if mask.any(): 
                 nodes = torch.nonzero(mask, as_tuple=False)
                 n     = nodes[:, 0] * K + nodes[:, 1]
@@ -454,15 +461,6 @@ class HypergraphBuilder:
             semantic_hedges = torch.empty((0,), device=device, dtype=torch.long)
 
         # global hyperedge, all nodes per tile 
-        gate = stats if active_stats is None else active_stats 
-        if gate.ndim == 1: 
-            is_active = gate.abs() > self.global_active_eps 
-        else: 
-            if gate.size(-1) >= 1: 
-                is_active = gate[:, 0].abs() > self.global_active_eps
-            else: 
-                is_active = gate.norm(p=2, dim=1) > self.global_active_eps 
-
         patch_global_nodes  = torch.nonzero(is_active, as_tuple=False).squeeze(1)
         patch_global_hedges = (patch_global_nodes // K) * E_per_tile + (K + 3) 
 
