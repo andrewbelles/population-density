@@ -411,6 +411,11 @@ class SSFEBase(BaseEstimator, ABC):
         s_sem = self.model_["proto"](z_sem) 
         s_st  = self.model_["proto"](z_st)
 
+        W = F.normalize(self.model_["proto"].weight, dim=1)
+
+        s_sem = torch.matmul(z_sem, W.T)
+        s_st  = torch.matmul(z_st,  W.T)
+
         with torch.no_grad(): 
             q_sem = self.sinkhorn_assign(s_sem, epsilon=epsilon, iters=iters)
             q_st  = self.sinkhorn_assign(s_st, epsilon=epsilon, iters=iters)
