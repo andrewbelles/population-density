@@ -40,6 +40,7 @@ from models.graph.construction import (
 )
 
 torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True 
 
 @dataclass 
 class SSFEBatch: 
@@ -119,7 +120,8 @@ class SSFEBase(BaseEstimator, ABC):
         self.n_prototypes          = n_prototypes
         self.proj_dim              = proj_dim
 
-        self.device = torch.device(device) if device else torch.device(
+        self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.device    = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
@@ -401,7 +403,7 @@ class SSFEBase(BaseEstimator, ABC):
         st_bag: torch.Tensor,
         *,
         epsilon=0.05,
-        iters=3
+        iters=2
     ) -> torch.Tensor:
         tau = self.cluster_temperature
 
@@ -410,11 +412,6 @@ class SSFEBase(BaseEstimator, ABC):
 
         s_sem = self.model_["proto"](z_sem) 
         s_st  = self.model_["proto"](z_st)
-
-        W = F.normalize(self.model_["proto"].weight, dim=1)
-
-        s_sem = torch.matmul(z_sem, W.T)
-        s_st  = torch.matmul(z_st,  W.T)
 
         with torch.no_grad(): 
             q_sem = self.sinkhorn_assign(s_sem, epsilon=epsilon, iters=iters)
@@ -464,12 +461,14 @@ class SSFEBase(BaseEstimator, ABC):
 
     def make_loader(self, dataset, shuffle: bool): 
         return DataLoader(
-        dataset, 
+            dataset, 
             batch_size=self.batch_size,
             shuffle=shuffle,
             collate_fn=self.collate_fn,
-            num_workers=0,
-            pin_memory=(self.device.type == "cuda")
+            num_workers=4,
+            pin_memory=(self.device.type == "cuda"),
+            prefetch_factor=4, 
+            persistent_workers=True
         ) 
 
     def split_loader(self, loader): 
@@ -491,9 +490,7 @@ class SSFEBase(BaseEstimator, ABC):
 
     def amp_ctx(self): 
         if self.device.type == "cuda": 
-            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-            return torch.autocast("cuda", dtype=dtype)
-
+            return torch.autocast("cuda", dtype=self.amp_dtype)
         return nullcontext()
 
 # ---------------------------------------------------------
@@ -575,10 +572,8 @@ class SpatialPatchPreprocessor(nn.Module):
         feat_maps    = self.encoder.encoder(patches_flat)
         embs         = self.encoder.projector(feat_maps).view(T, K, -1)
 
-        stats_z      = self.encoder.patch_stat(patches_flat).view(T, K, -1)
-
-        flat         = patches_flat.view(T * K, C, -1)
-        stats_raw    = torch.quantile(flat, q=0.95, dim=2)[:, :stats_z.shape[-1]].view(T, K, -1)
+        stats_z_f, stats_raw_f = self.encoder.patch_stat(patches_flat)
+        stats_z, stats_raw     = stats_z_f.view(T, K, -1), stats_raw_f.view(T, K, -1)
 
         sem_in       = torch.cat([embs, stats_z], dim=-1) 
 
