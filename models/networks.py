@@ -344,17 +344,14 @@ class LightweightBackbone(nn.Module):
         return out 
 
     def patch_stat(self, patches: torch.Tensor): 
-        N, C, _, _ = patches.shape 
-        flat       = patches.view(N, C, -1)
-        feats      = torch.quantile(flat, q=0.95, dim=2)
+        flat = patches.flatten(2).float() 
+        raw  = torch.quantile(flat, q=0.95, dim=2)
 
-        # z-score using precomputed anchor_stats
-        if self.patch_mean.numel() > 0: 
-            mean = self.patch_mean.to(feats.device)
-            std  = self.patch_std.to(feats.device).clamp_min(1e-6)
-            feats = (feats - mean) / std 
-
-        return feats 
+        c    = raw.shape[1]
+        mean = self.patch_mean[:c].view(1, -1)
+        std  = self.patch_std[:c].view(1, -1)
+        z    = (raw - mean) / std 
+        return z, raw 
 
     def unfold(self, tiles): 
         B, C, H, W = tiles.shape 
