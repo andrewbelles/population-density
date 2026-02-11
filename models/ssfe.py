@@ -2,7 +2,7 @@
 # 
 # ssfe.py  Andrew Belles  Feb 10th, 2026 
 # 
-# Supervised Feature Extractors for learning latent representations for deep component of 
+# Self-Supervised Feature Extractors for learning latent representations for deep component of 
 # model architecture (wide & deep)
 # 
 
@@ -191,9 +191,6 @@ class SSFEBase(BaseEstimator, ABC):
                 sem_node, sem_bag = self.forward_semantic(prep)
                 st_node, st_bag   = self.forward_structural(prep)
 
-                if self.device.type == "cuda": 
-                    sem_node, sem_bag = sem_node.clone(), sem_bag.clone() 
-
                 if view == "semantic": 
                     x = sem_bag if level == "bag" else sem_node 
                 elif view == "structural": 
@@ -245,11 +242,8 @@ class SSFEBase(BaseEstimator, ABC):
         self.model_["sem_proj"] = ProjectionHead(d_sem_bag, self.proj_dim).to(self.device)
         self.model_["st_proj"]  = ProjectionHead(d_st_bag, self.proj_dim).to(self.device)
 
-        self.model_["sem_proto"] = nn.Linear(
-            d_sem_bag, self.n_prototypes, bias=False
-        ).to(self.device)
-        self.model_["st_proto"]  = nn.Linear(
-            d_st_bag, self.n_prototypes, bias=False
+        self.model_["proto"]    = nn.Linear(
+            self.proj_dim, self.n_prototypes, bias=False
         ).to(self.device)
 
         self.model_["sem_recon"] = nn.Linear(d_sem_node, d_target).to(self.device)
@@ -378,11 +372,8 @@ class SSFEBase(BaseEstimator, ABC):
             sem_node, sem_bag = self.forward_semantic(prep)
             st_node, st_bag   = self.forward_structural(prep)
 
-            if self.device.type == "cuda": 
-                sem_node, sem_bag = sem_node.clone(), sem_bag.clone() 
-
             l_con = self.contrastive_loss(sem_bag, st_bag)
-            l_kl  = self.symmetric_cluster_kl(sem_bag, st_bag)
+            l_kl  = self.swapped_prediction_loss(sem_bag, st_bag)
             l_rec = self.two_view_reconstruction_loss(prep, sem_node, st_node)
             loss  = (self.w_contrast * l_con + self.w_cluster * l_kl + self.w_recon * l_rec)
             bsz   = sem_bag.shape[0]
@@ -404,19 +395,29 @@ class SSFEBase(BaseEstimator, ABC):
         labels = torch.arange(z_sem.shape[0], device=z_sem.device)
         return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
 
-    def symmetric_cluster_kl(
+    def swapped_prediction_loss(
         self,
         sem_bag: torch.Tensor, 
         st_bag: torch.Tensor,
+        *,
+        epsilon=0.05,
+        iters=3
     ) -> torch.Tensor:
+        tau = self.cluster_temperature
 
-        q_sem = F.softmax(self.model_["sem_proto"](sem_bag) / self.cluster_temperature, dim=1)
+        z_sem = F.normalize(self.model_["sem_proj"](sem_bag), dim=1) 
+        z_st  = F.normalize(self.model_["st_proj"](st_bag), dim=1)
 
-        q_st  = F.softmax(self.model_["st_proto"](st_bag) / self.cluster_temperature, dim=1)
+        s_sem = self.model_["proto"](z_sem) 
+        s_st  = self.model_["proto"](z_st)
 
-        a  = F.kl_div((q_sem + 1e-9).log(), q_st.detach(), reduction="batchmean")
-        b  = F.kl_div((q_st + 1e-9).log(), q_sem.detach(), reduction="batchmean")
-        return 0.5 * (a + b)
+        with torch.no_grad(): 
+            q_sem = self.sinkhorn_assign(s_sem, epsilon=epsilon, iters=iters)
+            q_st  = self.sinkhorn_assign(s_st, epsilon=epsilon, iters=iters)
+
+        l_sem = -(q_st * F.log_softmax(s_sem / tau, dim=1)).sum(dim=1).mean() 
+        l_st  = -(q_sem * F.log_softmax(s_st / tau, dim=1)).sum(dim=1).mean() 
+        return 0.5 * (l_sem + l_st)
 
     def two_view_reconstruction_loss(
         self,
@@ -430,6 +431,22 @@ class SSFEBase(BaseEstimator, ABC):
 
         rec_st  = self.model_["st_recon"](st_node)
         return 0.5 * (F.mse_loss(rec_sem, target) + F.mse_loss(rec_st, target))
+
+    @staticmethod
+    def sinkhorn_assign(scores, epsilon=0.05, iters=3):  
+        scores = scores - scores.max(dim=1, keepdim=True).values 
+        Q = torch.exp(scores / epsilon).t() 
+        K, B = Q.shape 
+        Q = Q / Q.sum().clamp_min(1e-9)
+
+        for _ in range(iters): 
+            Q = Q / Q.sum(dim=1, keepdim=True).clamp_min(1e-9) 
+            Q = Q / K 
+            Q = Q / Q.sum(dim=0, keepdim=True).clamp_min(1e-9) 
+            Q = Q / B  
+
+        Q = Q / Q.sum(dim=0, keepdim=True).clamp_min(1e-9)
+        return Q.t().detach()
     
     # -----------------------------------------------------
     # Loader Utils    
