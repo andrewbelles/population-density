@@ -7,9 +7,12 @@
 # 
 
 
-import gc, optuna, torch 
+import gc, optuna, torch
+from inspect import Attribute 
 
 import numpy as np 
+
+from numpy.typing              import NDArray
 
 from abc                       import (
     ABC, 
@@ -25,8 +28,6 @@ from typing                    import (
     Callable, 
     Dict 
 )
-
-from numpy.typing              import NDArray
 
 from sklearn.metrics           import (
     accuracy_score, 
@@ -49,7 +50,6 @@ from optimization.engine       import (
 )
 
 from analysis.cross_validation import (
-    CLASSIFICATION,
     CrossValidator,
     CVConfig,
     TaskSpec,
@@ -122,6 +122,126 @@ def select_metric_value(metrics, task, metric):
             return metrics["r2"]
 
     raise ValueError("no suitable metric found")
+
+# ---------------------------------------------------------
+# Evaluator for Self-Supervised Feature Extractor 
+# ---------------------------------------------------------
+
+class SSFEEvaluator(OptunaEvaluator): 
+
+    def __init__(
+        self,
+        filepath: str,
+        loader_func: Callable, 
+        model_factory: Callable, 
+        param_space: Callable[[optuna.Trial], Dict[str, Any]],
+        *,
+        random_state: int = 0, 
+        n_runs: int = 2, 
+        max_samples: int | None = None, 
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
+    ):
+        self.filepath         = filepath
+        self.loader           = loader_func
+        self.factory          = model_factory
+        self.param_space_fn   = param_space
+        self.random_state     = random_state
+        self.n_runs           = max(1, int(n_runs))
+        self.max_samples      = max_samples
+        self.compute_strategy = compute_strategy
+        self.cache_           = None
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        return self.param_space_fn(trial)
+
+    def evaluate(self, params: Dict[str, Any], trial: optuna.Trial | None = None) -> float:
+        X, collate_fn = self.load_data_once() 
+        scores        = []
+
+        for run_idx in range(self.n_runs): 
+            X_run = self.subset_if_needed(X, seed=self.random_state + run_idx)
+            model = self.build_model(
+                params=params,
+                collate_fn=collate_fn,
+                run_seed=self.random_state + run_idx 
+            )
+
+            try: 
+                model.fit(X_run)
+                score = self.score(model)
+            finally: 
+                del model 
+                _cleanup_cuda()
+
+            scores.append(float(score))
+
+            if trial is not None: 
+                trial.report(float(np.mean(scores)), step=run_idx)
+                if trial.should_prune(): 
+                    raise optuna.TrialPruned() 
+
+        return float(np.mean(scores))
+
+    def load_data_once(self): 
+        if self.cache_ is None: 
+            raw = self.loader(self.filepath)
+            self.cache_ = self.unwrap_data(raw)
+        return self.cache_ 
+
+    def unwrap_data(self, raw): 
+        # spatial/image loader 
+        if isinstance(raw, dict) and "dataset" in raw: 
+            return raw["dataset"], raw.get("collate_fn")
+        # tabular loader 
+        if isinstance(raw, dict) and "features" in raw: 
+            return np.asarray(raw["features"], dtype=np.float32), raw.get("collate_fn")
+        # direct dataset
+        if isinstance(raw, np.ndarray): 
+            return np.asarray(raw, dtype=np.float32), None 
+        return raw, None 
+
+    def subset_if_needed(self, X, seed: int): 
+        if self.max_samples is None: 
+            return X 
+        n = len(X)
+        if n <= self.max_samples: 
+            return X 
+
+        rng = np.random.default_rng(seed)
+        idx = np.sort(rng.choice(n, size=self.max_samples, replace=False))
+
+        if isinstance(X, np.ndarray): 
+            return X[idx]
+        return Subset(X, idx.tolist())
+
+    def build_model(
+        self,
+        *,
+        params: Dict[str, Any],
+        collate_fn,
+        run_seed: int
+    ): 
+        kwargs = dict(params)
+        kwargs.setdefault("random_state", run_seed)
+        kwargs.setdefault("compute_strategy", self.compute_strategy)
+        if collate_fn is not None: 
+            kwargs.setdefault("collate_fn", collate_fn)
+
+        model = self.factory(**kwargs)
+        if callable(model) and not hasattr(model, "fit"): 
+            model = model() 
+
+        if not hasattr(model, "fit"): 
+            raise AttributeError("SSFE model must implement fit()")
+        if not hasattr(model, "validate"): 
+            raise AttributeError("SSFE model must implement validate()")
+        return model 
+
+    @staticmethod
+    def score(model) -> float: 
+        if not hasattr(model, "best_val_score_"): 
+            raise AttributeError("model must retain best validation score")
+        return float(model.best_val_score_)
 
 # ---------------------------------------------------------
 # Evaluator for Standard Models (xgb, rf, logistic, svm, etc) 

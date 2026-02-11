@@ -14,17 +14,11 @@ import numpy as np
 
 from models.estimators import (
     TFTabular, 
-    SpatialHyperGAT
 )
 
 from utils.helpers import load_yaml_config 
 
 from analysis.cross_validation import CVConfig
-
-from models.graph.construction import (
-    LOGRADIANCE_GATE_LOW,
-    LOGRADIANCE_GATE_HIGH,
-)
 
 from utils.helpers   import bind 
 
@@ -83,63 +77,6 @@ def normalize_spatial_params(params, *, random_state: int, collate_fn):
     params.setdefault("eval_fraction", 0.2)
     params.setdefault("min_delta", 1e-4)
     return params 
-
-def spatial_gat_factory(
-    *,
-    collate_fn,
-    compute_strategy,
-    fixed,
-    in_channels=None,
-    **params
-): 
-    merged = dict(fixed)
-    merged.update(params)
-
-    if in_channels is not None: 
-        merged.setdefault("in_channels", in_channels)
-
-    scale = merged.pop("threshold_scale", 1.0)
-    merged.setdefault("thresh_low", LOGRADIANCE_GATE_LOW * scale)
-    merged.setdefault("thresh_high", LOGRADIANCE_GATE_HIGH * scale)
-
-    collate = merged.pop("collate_fn", collate_fn)
-    return SpatialHyperGAT(
-        collate_fn=collate,
-        compute_strategy=compute_strategy,
-        **merged
-    )
-
-def make_spatial_gat(
-    *,
-    collate_fn=None,
-    compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
-    **fixed
-): 
-    return bind(
-        spatial_gat_factory,
-        collate_fn=collate_fn,
-        compute_strategy=compute_strategy,
-        fixed=fixed 
-    )
-
-def _spatial_factory(
-    factory, 
-    in_ch,
-    **kwargs
-): 
-    return factory(
-        in_channels=in_ch,
-        **kwargs 
-    )
-
-def with_spatial_channels(factory, spatial_data, **kwargs): 
-    in_ch = spatial_data.get("in_channels")
-    return partial(
-        _spatial_factory,
-        factory=factory,
-        in_ch=in_ch,
-        **kwargs 
-    )
 
 def make_residual_tabular(**fixed):
     def _factory(**params): 

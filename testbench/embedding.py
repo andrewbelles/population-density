@@ -6,6 +6,7 @@
 # 
 # 
 
+from typing_extensions import evaluate_forward_ref
 from numpy.typing import NDArray
 
 import argparse, io
@@ -38,13 +39,12 @@ from testbench.utils.data      import (
 
 from optimization.evaluators   import (
     TabularEvaluator,
-    SpatialEvaluator
+    SSFEEvaluator
 )
 
 from optimization.spaces       import (
     define_tabular_space,
-    define_hgnn_space,
-    define_usps_space
+    define_spatial_ssfe_space
 )
 
 from optimization.engine       import (
@@ -52,10 +52,11 @@ from optimization.engine       import (
     EngineConfig
 )
 
+from models.ssfe               import SpatialSSFE
+
 from testbench.utils.config    import (
     cv_config,
     load_model_params,
-    make_spatial_gat,
     make_residual_tabular,
     load_node_anchors
 )
@@ -103,25 +104,27 @@ USPS_ANCHORS  = project_path("data", "anchors", "usps.npy")
 # ---------------------------------------------------------
 
 def _row_score(name: str, score: float): 
-    return {"Name": name, "Corn + RPS": format_metric(score)}
+    return {"Name": name, "SSFE Loss": format_metric(score)}
 
 def _spatial_opt(
     *,
     root_dir: str, 
     model_key: str, 
-    tile_shape: tuple[int, int, int] = (1, 256, 256),
-    node_anchors: list[list[float]] | None = None, 
-    anchor_stats: NDArray | None = None,  
-    param_space=None, 
+    tile_shape: tuple[int, int, int] = (3, 256, 256),
+    node_anchors: list[list[float]], 
+    anchor_stats: NDArray,  
+    param_space=define_spatial_ssfe_space, 
     factory_overrides=None, 
     max_bag_size: int = 64, 
     sample_frac: float | None = None, 
     trials: int = 50, 
-    folds: int = 2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
 ): 
+
+    anchors = np.asarray(node_anchors, dtype=np.float32)
+    stats   = np.asarray(anchor_stats, dtype=np.float32)
 
     spatial = load_spatial_mmap_manifest(
         root_dir, 
@@ -130,6 +133,7 @@ def _spatial_opt(
         sample_frac=sample_frac,
         random_state=random_state
     )
+    in_channels = int(spatial["in_channels"])
 
     loader  = make_mmap_loader(
         tile_shape=tile_shape,
@@ -138,25 +142,29 @@ def _spatial_opt(
         random_state=random_state
     )
 
-    overrides = dict(factory_overrides or {})
-    if node_anchors is not None and anchor_stats is not None: 
-        overrides["node_anchors"] = node_anchors
-        overrides["anchor_stats"] = anchor_stats 
+    fixed = dict(factory_overrides or {})
+    fixed.update({
+        "in_channels": in_channels,
+        "tile_size": tile_shape[1],
+        "node_anchors": anchors.tolist(), 
+        "anchor_stats": stats.tolist() 
+    })
 
-    factory = make_spatial_gat(
-        compute_strategy=strategy,
-        in_channels=spatial["in_channels"],
-        **overrides 
-    )
+    def ssfe_factory(*, compute_strategy=None, collate_fn=None, **params): 
+        merged = dict(fixed)
+        merged.update(params)
+        if collate_fn is not None: 
+            merged.setdefault("collate_fn", collate_fn)
+        return SpatialSSFE(**merged)
 
-    evaluator = SpatialEvaluator(
+    evaluator = SSFEEvaluator(
         filepath=root_dir,
         loader_func=loader,
-        model_factory=factory,
-        param_space=param_space or define_hgnn_space,
-        compute_strategy=strategy,
-        task=OPT_TASK,
-        config=cv_config(folds, random_state)
+        model_factory=ssfe_factory,
+        param_space=param_space,
+        random_state=random_state,
+        n_runs=2,
+        compute_strategy=strategy
     )
 
     prior_params = None 
@@ -165,17 +173,12 @@ def _spatial_opt(
     except Exception: 
         prior_params = None 
 
-
-    devices = strategy.visible_devices()
     config  = EngineConfig(
         n_trials=trials,
         direction="minimize",
         random_state=random_state,
         sampler_type="multivariate-tpe",
-        mp_enabled=True if devices and len(devices) > 1 else False,
-        devices=devices,
-        pruner_type=None,
-        pruner_warmup_steps=5,
+        mp_enabled=False,
         enqueue_trials=[prior_params] if prior_params else None,
     )
 
@@ -188,7 +191,7 @@ def _spatial_opt(
     save_model_config(config_path, model_key, best_params)
 
     return {
-        "header": ["Name", "Corn + RPS"],
+        "header": ["Name", "SSFE Loss"],
         "row": _row_score(model_key, best_value),
         "params": best_params
     }
@@ -322,10 +325,9 @@ def test_viirs_opt(
     *,
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
-    tile_shape: tuple[int, int, int] = (2, 256, 256), 
+    tile_shape: tuple[int, int, int] = (3, 256, 256), 
     viirs_anchors: str = VIIRS_ANCHORS,
     trials: int = 50, 
-    folds: int = 2, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
@@ -338,8 +340,7 @@ def test_viirs_opt(
         model_key=model_key,
         tile_shape=tile_shape, 
         trials=trials,
-        folds=folds,
-        param_space=define_hgnn_space,
+        param_space=define_spatial_ssfe_space,
         node_anchors=node_anchors,
         anchor_stats=anchor_stats,
         random_state=random_state,

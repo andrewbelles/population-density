@@ -26,16 +26,11 @@ import torchvision.models as tvm
 
 from torchvision.models.mobilenet import MobileNet_V3_Small_Weights 
 
-from torch_scatter import scatter_add, scatter_softmax 
-
-from models.graph.construction import (
-    HypergraphBuilder,
-    LOGRADIANCE_GATE_LOW,
-    LOGRADIANCE_GATE_HIGH,
-    MultichannelHypergraphBuilder
+from torch_scatter import (
+    scatter_add, 
+    scatter_softmax, 
+    scatter_mean 
 )
-
-from utils.loss_funcs import LogitScaler
 
 class GatedAttentionPooling(nn.Module): 
 
@@ -292,10 +287,7 @@ class LightweightBackbone(nn.Module):
         in_channels=1,
         embed_dim=64, 
         patch_size=32,
-        stat="viirs",
-        patch_quantile=0.95,
         anchor_stats: list[float] | None = None,
-        flat: bool = False, 
     ): 
         super().__init__()
         
@@ -307,46 +299,32 @@ class LightweightBackbone(nn.Module):
         with torch.no_grad(): 
             self.grayscale.weight.fill_(1.0 / 3.0)
 
-        if flat:
-            self.encoder = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1), 
-                nn.Conv2d(in_channels, 64, kernel_size=1), 
-                nn.GELU(),
-                nn.Conv2d(64, 128, kernel_size=1),
-                nn.GELU(),
-                nn.Conv2d(128, embed_dim, kernel_size=1)
-            )
-            self.projector = nn.Flatten()
-        else: 
-            mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
-            encoder   = mobilenet.features 
+        mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
+        encoder   = mobilenet.features 
 
-            orig_conv = encoder[0][0]
-            new_conv  = nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=orig_conv.out_channels,
-                kernel_size=orig_conv.kernel_size,
-                stride=orig_conv.stride, 
-                padding=orig_conv.padding, 
-                bias=False 
-            )
+        orig_conv = encoder[0][0]
+        new_conv  = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=orig_conv.out_channels,
+            kernel_size=orig_conv.kernel_size,
+            stride=orig_conv.stride, 
+            padding=orig_conv.padding, 
+            bias=False 
+        )
 
-            with torch.no_grad(): 
-                new_conv.weight.copy_(orig_conv.weight.sum(dim=1, keepdim=True))
-            encoder[0][0] = new_conv 
+        with torch.no_grad(): 
+            new_conv.weight.copy_(orig_conv.weight.sum(dim=1, keepdim=True))
+        encoder[0][0] = new_conv 
 
-            self.encoder   = encoder[:4] # truncate encoder to 4 blocks 
+        self.encoder   = encoder[:4] # truncate encoder to 4 blocks 
 
-            self.projector = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(24, embed_dim),
-                nn.LayerNorm(embed_dim),
-                nn.GELU() 
-            ) 
-
-        self.stat           = stat 
-        self.patch_quantile = patch_quantile
+        self.projector = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(24, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU() 
+        ) 
 
         if anchor_stats is not None: 
             mean = torch.as_tensor(anchor_stats[0], dtype=torch.float32) 
@@ -359,28 +337,16 @@ class LightweightBackbone(nn.Module):
 
     def forward(self, tiles): 
         patches = self.unfold(tiles)
-        score   = self.patch_stat(patches, stat=self.stat, q=self.patch_quantile)
-
-        # x      = self.grayscale(patches)
-        feats  = self.encoder(patches)
-        embs   = self.projector(feats)
-
-        out    = torch.cat([embs, score], dim=1)
+        score   = self.patch_stat(patches)
+        feats   = self.encoder(patches)
+        embs    = self.projector(feats)
+        out     = torch.cat([embs, score], dim=1)
         return out 
 
-    def patch_stat(self, patches: torch.Tensor, *, stat: str = "viirs", q: float = 0.95): 
-
+    def patch_stat(self, patches: torch.Tensor): 
         N, C, _, _ = patches.shape 
         flat       = patches.view(N, C, -1)
-
-        if stat == "viirs" or stat == "usps": 
-            feats = torch.quantile(flat, q, dim=2) 
-        elif stat == "p95": 
-            feats = torch.quantile(flat, q, dim=1)
-        elif stat == "max": 
-            feats = flat.max(dim=1).values
-        else:
-            raise ValueError(f"unknown patch stat: {stat}")
+        feats      = torch.quantile(flat, q=0.95, dim=2)
 
         # z-score using precomputed anchor_stats
         if self.patch_mean.numel() > 0: 
@@ -389,11 +355,6 @@ class LightweightBackbone(nn.Module):
             feats = (feats - mean) / std 
 
         return feats 
-
-    @staticmethod 
-    def p95_patch(patches): 
-        flat = patches.flatten(start_dim=1)
-        return torch.quantile(flat, q=0.95, dim=1)
 
     def unfold(self, tiles): 
         B, C, H, W = tiles.shape 
@@ -586,153 +547,6 @@ class CascadedHyperGAT(nn.Module):
         return node_feat, edge_feat 
 
 # ---------------------------------------------------------
-# Attached Backbone connecting HyperGAT to LightweightBackbone 
-# ---------------------------------------------------------
-
-class HypergraphBackbone(nn.Module): 
-
-    def __init__(
-        self, 
-        in_channels=1, 
-        tile_size=256,
-        patch_size=32,
-        embed_dim=64,
-        gnn_dim=128,
-        gnn_layers=1,
-        gnn_heads=1,
-        max_bag_frac=0.75, 
-        attn_dropout=0.0,
-        dropout=0.0,
-        patch_stat="p95",
-        patch_quantile=0.95,
-        thresh_low=LOGRADIANCE_GATE_LOW,
-        thresh_high=LOGRADIANCE_GATE_HIGH,             # ignored for > 1 channels 
-        node_anchors: list[list[float]] | None = None, # 1 channel -> None, 1 > must pass 
-        anchor_stats: list[float] | None = None        # [mean, std] used to z-score anchors 
-    ): 
-        super().__init__()
-       
-        is_flat = True if patch_stat == "usps" else False 
-
-        self.encoder = LightweightBackbone(
-            in_channels=in_channels,
-            embed_dim=embed_dim, 
-            patch_size=patch_size,
-            stat=patch_stat,
-            patch_quantile=patch_quantile, 
-            anchor_stats=anchor_stats,
-            flat=is_flat 
-        )
-
-        if node_anchors is not None: 
-            anchors = torch.tensor(node_anchors, dtype=torch.float32)
-            if anchors.shape[0] != 3: 
-                raise ValueError("Must provide exactly three anchors per channel")
-            if anchors.shape[1] != in_channels: 
-                raise ValueError(f"Anchors dim {anchors.shape[1]} != in_channels {in_channels}")
-
-            self.builder = MultichannelHypergraphBuilder(
-                anchors=anchors,
-                tile_size=tile_size,
-                patch_size=patch_size
-            )
-        else: 
-            self.builder = HypergraphBuilder(
-                tile_size=tile_size,
-                patch_size=patch_size,
-                thresh_low=thresh_low,
-                thresh_high=thresh_high
-            )
-
-        readout_dim = embed_dim + in_channels # token per channel 
-
-        self.gnn     = HyperGATStack(
-            in_dim=readout_dim, 
-            hidden_dim=gnn_dim, 
-            n_layers=gnn_layers,
-            n_heads=gnn_heads,
-            attn_dropout=attn_dropout,
-            dropout=dropout,
-            n_node_types=4   # type 0,1,2 & global 
-        )
-
-        self.out_dim        = self.gnn.out_dim 
-        self.max_bag_frac   = max_bag_frac
-        self.patch_stat     = patch_stat
-        self.patch_quantile = patch_quantile
-
-        # position embeddings 
-        self.num_patches  = (tile_size // patch_size)**2 
-        self.pos_embed    = nn.Parameter(torch.randn(1, self.num_patches, embed_dim))
-        self.global_token = nn.Parameter(torch.randn(1, 1, readout_dim)) 
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        nn.init.trunc_normal_(self.global_token, std=0.02)
-
-    def forward(self, tiles): 
-        B = tiles.shape[0]
-        P = self.encoder.patch_size 
-
-        patches = self.encoder.unfold(tiles)
-        L = patches.shape[0] // B 
-        C = patches.shape[1]
-        patches = patches.view(B, L, C, P, P)
-
-        if self.training and self.max_bag_frac < 1.0: 
-            K = max(1, int(L * self.max_bag_frac))
-            idx = torch.stack(
-                [torch.randperm(L, device=tiles.device)[:K] for _ in range(B)],
-                dim=0
-            )
-        else: 
-            idx = None 
-
-        if idx is not None: 
-            patches = patches.gather(
-                1, idx[:, :, None, None, None].expand(-1, -1, C, P, P)
-            )
-            K = patches.shape[1]
-            patches = patches.view(B * K, C, P, P)
-        else: 
-            K = L  
-            patches = patches.view(B * L, C, P, P)
-
-        feats = self.encoder.encoder(patches)
-        embs  = self.encoder.projector(feats).view(B, K, -1)
-
-        score = self.encoder.patch_stat(patches, stat=self.patch_stat, q=self.patch_quantile)
-        score = score.view(B, K, -1)
-
-        # compute raw score 
-        flat  = patches.view(B * K, C, -1)
-        raw   = torch.quantile(flat, q=self.patch_quantile, dim=2)[:, :score.shape[-1]] 
-
-        if idx is None: 
-            pos = self.pos_embed
-        else: 
-            pos = self.pos_embed.squeeze(0)[idx]
-
-        embs = embs + pos 
-
-        patch_feats = torch.cat([embs, score], dim=2)
-        patch_feats = patch_feats.view(B * K, -1)
-
-        readout_tokens = self.global_token.expand(B, -1, -1).reshape(B, -1)
-
-        all_feats = torch.cat([patch_feats, readout_tokens], dim=0)
-
-        node_type, _, edge_type, _, H = self.builder.build(
-            score.view(-1, score.shape[-1]), 
-            batch_size=B, 
-            idx=idx,
-            active_stats=raw 
-        )
-
-        node_out = self.gnn(all_feats, node_type, H, edge_type)
-
-        readout_out = node_out[-B:]
-        return readout_out 
-
-# ---------------------------------------------------------
 # Tabular MLP Modules 
 # ---------------------------------------------------------
 
@@ -890,9 +704,7 @@ class PreNormResBlock(nn.Module):
 
 class ResidualMLP(nn.Module): 
     '''
-    Residual Backbone for Tabular data 
-
-    Uses PreNorm Residual Blocks 
+    Residual Backbone for Tabular data and tabular semantic embeddings  
     '''
 
     def __init__(
@@ -908,7 +720,6 @@ class ResidualMLP(nn.Module):
         self.hidden_dim = hidden_dim
         self.depth      = depth 
         self.out_dim    = hidden_dim if out_dim is None else out_dim
-
 
         self.proj   = nn.Linear(in_dim, hidden_dim)
         self.blocks = nn.Sequential(*[
@@ -926,3 +737,48 @@ class ResidualMLP(nn.Module):
         x = self.blocks(x)
         x = self.norm(x)
         return self.head(x)
+
+# ---------------------------------------------------------
+# Semantic MLP models for SSFE 
+# ---------------------------------------------------------
+
+class SemanticMLP(nn.Module): 
+    '''
+    Shallow semantic projector for SpatialSSFE
+    '''
+
+    def __init__(
+        self,
+        in_dim: int, 
+        hidden_dim: int,
+        out_dim: int, 
+        dropout: float, 
+    ): 
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(in_dim), 
+            nn.Linear(in_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(), 
+            nn.Linear(hidden_dim, out_dim)
+        )
+
+        self.out_dim = out_dim
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        batch_indices: torch.Tensor, 
+        batch_size: int 
+    ): 
+        if x.ndim != 2: 
+            raise ValueError(f"expected (N, d), got {tuple(x.shape)})")
+
+        node  = self.net(x)
+        bag   = node.new_zeros((batch_size, node.size(1)))
+        count = node.new_zeros((batch_size, 1))
+        bag.index_add_(0, batch_indices, node)
+        count.index_add_(0, batch_indices, node.new_ones((batch_indices.numel(), 1)))
+        bag  /= count.clamp_min(1.0)
+        return node, bag 

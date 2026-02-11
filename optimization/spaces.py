@@ -174,6 +174,44 @@ def define_hgnn_space(trial: optuna.Trial):
         "min_delta": 1e-4,
     }
 
+def define_spatial_ssfe_space(trial: optuna.Trial): 
+    return {
+        "embed_dim": trial.suggest_categorical("embed_dim", [64, 128]),
+        "max_bag_frac": trial.suggest_float("max_bag_frac", 0.5, 1.0),
+
+        # semantic branch
+        "semantic_hidden_dim": trial.suggest_int("semantic_hidden_dim", 128, 512, step=128),
+        "semantic_out_dim": trial.suggest_categorical("semantic_out_dim", [64, 128, 256]),
+        "semantic_dropout": trial.suggest_float("semantic_dropout", 0.0, 0.2),
+
+         # structural branch
+        "gnn_dim": trial.suggest_categorical("gnn_dim", [128, 256]),
+        "gnn_layers": trial.suggest_int("gnn_layers", 1, 3), 
+        "gnn_heads": trial.suggest_categorical("gnn_heads", [4, 8]), 
+        "dropout": trial.suggest_float("dropout", 0.0, 0.2),
+        "attn_dropout": trial.suggest_float("attn_dropout", 0.0, 0.2),
+        "global_active_eps": trial.suggest_float("global_active_eps", 1e-6, 1e-3, log=True),
+
+        # ssfe loss + optimization
+        "w_contrast": trial.suggest_float("w_contrast", 1.0, 2.0),
+        "w_cluster": trial.suggest_float("w_cluster", 0.75, 2.0),
+        "w_recon": trial.suggest_float("w_recon", 0.5, 2.0),
+        "contrast_temperature": trial.suggest_float("contrast_temperature", 0.05, 0.5, log=True),
+        "cluster_temperature": trial.suggest_float("cluster_temperature", 0.05, 0.5, log=True),
+        "n_prototypes": trial.suggest_categorical("n_prototypes", [16, 32, 64]),
+        "proj_dim": trial.suggest_categorical("proj_dim", [64, 128]),
+
+        "lr": trial.suggest_float("lr", 1e-5, 5e-4, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256]),
+
+        "epochs": 400, 
+        "patch_size": 32, 
+        "early_stopping_rounds": 25, 
+        "eval_fraction": 0.20,
+        "min_delta": 1e-4 
+    }
+
 def define_usps_space(trial: optuna.Trial): 
     params = define_hgnn_space(trial)
     params.pop("threshold_scale", None)
