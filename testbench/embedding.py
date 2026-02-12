@@ -111,34 +111,22 @@ def _spatial_opt(
     root_dir: str, 
     model_key: str, 
     tile_shape: tuple[int, int, int] = (3, 256, 256),
-    node_anchors: list[list[float]], 
-    anchor_stats: NDArray,  
     param_space=define_spatial_ssfe_space, 
     factory_overrides=None, 
-    max_bag_size: int = 64, 
-    sample_frac: float | None = None, 
     trials: int = 50, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
 ): 
-
-    anchors = np.asarray(node_anchors, dtype=np.float32)
-    stats   = np.asarray(anchor_stats, dtype=np.float32)
-
     spatial = load_spatial_mmap_manifest(
         root_dir, 
         tile_shape=tile_shape,
-        max_bag_size=max_bag_size,
-        sample_frac=sample_frac,
         random_state=random_state
     )
     in_channels = int(spatial["in_channels"])
 
     loader  = make_mmap_loader(
         tile_shape=tile_shape,
-        max_bag_size=max_bag_size,
-        sample_frac=sample_frac,
         random_state=random_state
     )
 
@@ -146,8 +134,6 @@ def _spatial_opt(
     fixed.update({
         "in_channels": in_channels,
         "tile_size": tile_shape[1],
-        "node_anchors": anchors.tolist(), 
-        "anchor_stats": stats.tolist() 
     })
 
     def ssfe_factory(*, compute_strategy=None, collate_fn=None, **params): 
@@ -326,14 +312,11 @@ def test_viirs_opt(
     data_path: str = VIIRS_ROOT, 
     model_key: str = VIIRS_KEY,
     tile_shape: tuple[int, int, int] = (3, 256, 256), 
-    viirs_anchors: str = VIIRS_ANCHORS,
     trials: int = 50, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH,
     **_
 ):
-
-    node_anchors, anchor_stats = load_node_anchors(viirs_anchors)
 
     return _spatial_opt(
         root_dir=data_path,
@@ -341,8 +324,6 @@ def test_viirs_opt(
         tile_shape=tile_shape, 
         trials=trials,
         param_space=define_spatial_ssfe_space,
-        node_anchors=node_anchors,
-        anchor_stats=anchor_stats,
         random_state=random_state,
         config_path=config_path
     )

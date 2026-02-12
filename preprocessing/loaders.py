@@ -952,41 +952,46 @@ SpatialDatasetLoader = Callable[[str], SpatialDatasetDict]
 
 def dynamic_tile_collate(batch): 
 
-    tiles_list, labels, num_tiles_list = [], [], []
+    tiles_list, stats_list, labels, num_tiles_list = [], [], [], []
 
-    for tiles, label, _ in batch: 
-        t = torch.from_numpy(np.array(tiles, copy=True))
+    for item in batch: 
+        tiles, stats, label = item[:3]
+
+        t = torch.from_numpy(np.array(tiles, dtype=np.float32).copy())
+        s = torch.from_numpy(np.array(stats, dtype=np.float64).copy())
+
+        if s.ndim != 3: 
+            raise ValueError(f"expected stats shape (T, L, D), got {tuple(s.shape)}")
+        if s.shape[0] != t.shape[0]: 
+            raise ValueError("tile/stats count mismatch in collate")
+
         tiles_list.append(t)
+        stats_list.append(s)
         labels.append(label)
         num_tiles_list.append(t.shape[0])
 
-    flat_inputs = torch.cat(tiles_list, dim=0)
-    flat_inputs = flat_inputs.contiguous(memory_format=torch.channels_last)
+    flat_inputs = torch.cat(tiles_list, dim=0).contiguous(memory_format=torch.channels_last)
+    flat_stats  = torch.cat(stats_list, dim=0).contiguous()
 
     labels      = torch.tensor(labels, dtype=torch.float32)
     sections    = torch.tensor(num_tiles_list, dtype=torch.long)
+    batch_idx   = torch.repeat_interleave(torch.arange(len(batch)), sections)
 
-    batch_idx   = torch.repeat_interleave(
-        torch.arange(len(batch)),
-        sections 
-    )
-
-    return flat_inputs, labels, batch_idx 
+    return flat_inputs, labels, batch_idx, flat_stats
 
 def load_spatial_mmap_manifest(
     root_dir: str, 
     *,
     tile_shape: tuple[int, int, int], 
-    max_bag_size: int, 
-    sample_frac: float | None = None, 
+    patch_size: int = 32, 
     random_state: int = 0, 
-    shuffle_tiles: bool = True, 
-    pad_value: float = 0.0, 
-    should_validate_index: bool = False
+    should_validate_index: bool = False,
+    **_ 
 ) -> SpatialDatasetDict:
-    root      = Path(root_dir)
-    index_csv = root / "index.csv"
-    bin_path  = root / "dataset.bin"
+    root       = Path(root_dir)
+    index_csv  = root / "index.csv"
+    bin_path   = root / "dataset.bin"
+    stats_path = root / "stats.bin" 
 
     if not index_csv.exists() or not bin_path.exists(): 
         raise FileNotFoundError(f"missing dataset.bin/index.csv in {root}")
@@ -994,12 +999,10 @@ def load_spatial_mmap_manifest(
     ds = TileLoader(
         index_csv=str(index_csv),
         bin_path=str(bin_path),
+        stats_bin_path=str(stats_path),
         tile_shape=tile_shape,
-        max_bag_size=max_bag_size,
-        sample_frac=sample_frac,
+        patch_size=patch_size,
         random_state=random_state,
-        shuffle_tiles=shuffle_tiles,
-        pad_value=pad_value,
         return_fips=True,
         return_num_tiles=False,
         should_validate_index=should_validate_index
@@ -1021,21 +1024,17 @@ def mmap_loader(
     path,
     *,
     tile_shape,
-    max_bag_size,
-    sample_frac=None,
+    patch_size=32, 
     random_state=0,
     shuffle_tiles=True,
-    pad_value=0.0,
     should_validate_index=False
 ):
     return load_spatial_mmap_manifest(
         path,
         tile_shape=tile_shape,
-        max_bag_size=max_bag_size,
-        sample_frac=sample_frac,
+        patch_size=patch_size, 
         random_state=random_state,
         shuffle_tiles=shuffle_tiles,
-        pad_value=pad_value,
         should_validate_index=should_validate_index
     )
 
