@@ -1,22 +1,18 @@
-# Population Density Prediction
+# Population Regression via Wide & Deep MoE 
 
-County-level population regression using a two-stage, hierarchical mixture of experts model, with label propagation and smoothing. 
-
-The first stage targets the NCHS 6-class urban-rural classification scheme using multi-modal geospatial features. 
+Wide and Deep architecture that aims to unify extensive counts highly correlated with population and intrinsic rates/texture of satellite imaging and more esoteric data sources. The Deep portion of the architecture implements a variety of self-supervised feature extractors which learn embeddings that are then fused via a transformer based residual MLP network. 
 
 ## Current Focus 
 
-- Improving performance of expert models on scalar datasets (NLCD, SAIPE)
-- Shifting satellite based data into spatial, and frequency based imaging for use in CNN (VIIRS)
-- Correct-and-Smooth improvement through learned graph topologies. 
+- Developing self-supervised feature extractors to extract high quality representations for use in early fusion.
+- Looking to add Infrared satellite tuned to two different frequencies (Vegation and Concrete) as expert modalities. 
 
 ## Data Processing Pipeline
 
 Dataset compilers live in `preprocessing/` and emit `.mat` files under `data/`:
-- VIIRS nighttime lights into images for use in convolutional neural networks.
-- TIGER road topology statistics.
-- NLCD land cover configuration metrics.
-- SAIPE socioeconomic (specifically poverty) information. 
+- VIIRS nighttime lights processed via novel strategy for self-supervised learning on satellite based tensor datasets
+- SAIPE and IRS intensive/rate based socioeconomic information. 
+- USPS derived rates about changes in business and residential addresses. 
 
 See `preprocessing/README.md` for the per‑dataset build steps.
 
@@ -24,21 +20,19 @@ See `preprocessing/README.md` for the per‑dataset build steps.
 
 Core tools:
 - `analysis/cross_validation.py` for repeated CV with fold‑safe scaling.
-- `analysis/hyperparameter.py` for Optuna optimization and nested CV.
-- `testbench/stacking.py` for the full stacking + C+S pipeline.
+- `optimization/` for Optuna optimization and nested CV.
 
-For the analysis of the full pipeline: 
-```bash
-nix-shell
-python testbench/stacking.py --tests pipeline --cross both
-```
+This repository uses a nix shell for dependencies and build consistency. Tests are located in `testbench/` with the tests that align most with the repositories current directions being location in:
+- `testbench/eval.py` 
+- `testbench/embedding.py`
 
 ## Repository Layout
 
-- `analysis/`: CV harness, Optuna, graph metrics, diagnostics.
+- `analysis/`: CV harness and diagnostic tooling.
 - `preprocessing/`: dataset compilation and loaders.
 - `models/`: estimators, metric learning, graph utilities, post‑processing.
 - `testbench/`: end-to-end testing and visualization. 
 - `scripts/`: data fetch and parsing scripts.
 - `utils/`: shared helpers (paths  metrics, interfaces).
+- `optimization/`: Configuration and optimization contracts for Optuna based evaluation. 
 - `data/`: datasets and outputs. 

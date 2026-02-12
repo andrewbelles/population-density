@@ -34,6 +34,7 @@ from torch.utils.data import (
     DataLoader, 
     random_split
 )
+from torch_sparse import SparseTensor
 
 from models.networks import (
     HyperGATStack, 
@@ -162,14 +163,6 @@ class SSFEBase(BaseEstimator, ABC):
     def forward_structural(self, prep: SSFEBatch) -> tuple[torch.Tensor, torch.Tensor]: ... 
 
     @abstractmethod 
-    def graph_hook(
-        self, *, stage: Literal["init", "epoch_start"], 
-        train_loader: DataLoader | None = None, 
-        prep: SSFEBatch | None = None, 
-        epoch: int | None = None
-    ): ...
-
-    @abstractmethod 
     def initialize_anchor_state(self, train_loader: DataLoader): ... 
 
     # -----------------------------------------------------
@@ -177,6 +170,7 @@ class SSFEBase(BaseEstimator, ABC):
     # -----------------------------------------------------
     
     def fit(self, X, y=None): 
+        print(self)
         torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
 
@@ -252,8 +246,6 @@ class SSFEBase(BaseEstimator, ABC):
         self.model_["semantic"]   = semantic 
         self.model_["structural"] = structural 
 
-        self.graph_hook(stage="init", train_loader=train_loader, prep=prep, epoch=0)
-
         with torch.no_grad(): 
             sem_node, sem_bag = self.forward_semantic(prep)
             st_node, st_bag   = self.forward_structural(prep)
@@ -304,7 +296,6 @@ class SSFEBase(BaseEstimator, ABC):
         t0         = time.perf_counter()
 
         for ep in range(epochs): 
-            self.graph_hook(stage="epoch_start", train_loader=train_loader, prep=None, epoch=ep)
             train_loss          = self.train_epoch(train_loader)
             val_loss, val_parts = self.validate(val_loader)
 
@@ -364,7 +355,6 @@ class SSFEBase(BaseEstimator, ABC):
             return None, {}
 
         self.model_.eval()
-        total = 0.0 
         con   = 0.0 
         clu   = 0.0 
         rec   = 0.0 
@@ -372,16 +362,17 @@ class SSFEBase(BaseEstimator, ABC):
 
         with torch.no_grad(): 
             for batch in loader: 
-                loss, l_con, l_kl, l_rec, bsz = self.process_batch(batch)
+                _, l_con, l_kl, l_rec, bsz = self.process_batch(batch)
 
-                total += float(loss.item())  * bsz 
                 con   += float(l_con.item()) * bsz 
                 clu   += float(l_kl.item())  * bsz 
                 rec   += float(l_rec.item()) * bsz
                 count += bsz 
 
         denom = max(1, count)
-        return total / denom, {
+        total = (con + clu + rec) / denom  
+
+        return total, {
             "contrast": con / denom, 
             "cluster": clu / denom, 
             "recon": rec / denom
@@ -571,7 +562,6 @@ class SpatialPatchPreprocessor(nn.Module):
         tile_size: int = 256, 
         patch_size: int = 32, 
         embed_dim: int, 
-        max_bag_frac: float,
         anchor_stats: list[float], 
     ): 
         super().__init__()
@@ -586,7 +576,6 @@ class SpatialPatchPreprocessor(nn.Module):
             raise ValueError("negative std from anchor_stats")
 
         self.patch_size   = patch_size 
-        self.max_bag_frac = max_bag_frac
 
         self.encoder      = LightweightBackbone(
             in_channels=in_channels,
@@ -601,7 +590,7 @@ class SpatialPatchPreprocessor(nn.Module):
         self,
         tiles: torch.Tensor,
         stats: torch.Tensor, 
-        tile_batch_idx: torch.Tensor | None = None 
+        tile_batch_idx: torch.Tensor | None = None,
     ) -> SpatialPatchBatch: 
         if tiles.ndim != 4: 
             raise ValueError(f"expected (T, C, H, W), got {tuple(tiles.shape)}")
@@ -615,7 +604,9 @@ class SpatialPatchPreprocessor(nn.Module):
         L = patches.shape[0] // T 
         patches = patches.view(T, L, C, P, P)
 
-        stats_raw    = stats[..., :C].to(device=tiles.device, dtype=torch.float32, non_blocking=True)
+        stats_raw    = stats[..., :C].to(
+            device=tiles.device, dtype=torch.float32, non_blocking=True
+        )
 
         K   = L 
         idx = None 
@@ -624,8 +615,10 @@ class SpatialPatchPreprocessor(nn.Module):
         feat_maps    = self.encoder.encoder(patches_flat)
         embs         = self.encoder.projector(feat_maps).view(T, K, -1)
 
-        mean         = self.encoder.patch_mean[:C].view(1, 1, C).to(device=tiles.device, dtype=torch.float32)
-        std          = self.encoder.patch_std[:C].view(1, 1, C).to(device=tiles.device, dtype=torch.float32)
+        mean         = self.encoder.patch_mean[:C].view(1, 1, C).to(
+            device=tiles.device, dtype=torch.float32)
+        std          = self.encoder.patch_std[:C].view(1, 1, C).to(
+            device=tiles.device, dtype=torch.float32)
         stats_z      = (stats_raw - mean) / std 
 
         sem_in       = torch.cat([embs, stats_z], dim=-1) 
@@ -638,6 +631,9 @@ class SpatialPatchPreprocessor(nn.Module):
         patch_batch_idx = torch.arange(T, device=tiles.device).repeat_interleave(K)
         if tile_batch_idx is None: 
             tile_batch_idx = torch.arange(T, device=tiles.device)
+        else: 
+            tile_batch_idx = tile_batch_idx.to(
+                device=tiles.device, dtype=torch.long, non_blocking=True)
 
         return SpatialPatchBatch(
             repr_target=repr_target,
@@ -708,85 +704,27 @@ class SpatialStructuralEmbedder(nn.Module):
         self.bag_norm  = nn.LayerNorm(gnn_dim)
         self.out_dim   = gnn_dim 
 
-        self.use_cached_graph = False 
-        self.graph_cache_: OrderedDict[str, HypergraphMetadata] = OrderedDict() 
-
     def forward(self, prep: SpatialPatchBatch) -> tuple[torch.Tensor, torch.Tensor]: 
+        if prep.stats_z is None: 
+            raise ValueError("must have transformed stats")
+
         x_nodes = prep.semantic_input
         N, B    = x_nodes.shape[0], prep.n_tiles 
 
         readout = self.readout_token.expand(B, -1, -1).reshape(B, -1).to(x_nodes.device)
         x_all   = torch.cat([x_nodes, readout], dim=0)
 
-        meta    = self.resolve_graph_meta(prep)
+        meta    = self.graph.build(
+            prep.stats_z, 
+            batch_size=prep.n_tiles,
+            active_stats=prep.stats_raw,
+            idx=prep.patch_idx
+        )
 
         h_all   = self.gnn(x_all, meta.node_type, meta.H, meta.edge_type)
         h_node  = self.node_norm(h_all[:N])
         h_bag   = self.bag_norm(h_all[meta.readout_node_ids])
         return h_node, h_bag 
-
-    @torch.no_grad() 
-    def cached_graph(self, prep: SpatialPatchBatch): 
-        key  = self.graph_key(prep) 
-        meta = self.build_graph_meta(prep)
-        self.cache_put(key, meta)
-
-    def resolve_graph_meta(self, prep: SpatialPatchBatch) -> HypergraphMetadata: 
-        if not self.use_cached_graph:
-            return self.build_graph_meta(prep)
-
-        key = self.graph_key(prep)
-        if key in self.graph_cache_: 
-            meta = self.graph_cache_.pop(key)
-            self.graph_cache_[key] = meta 
-            return meta 
-
-        meta = self.build_graph_meta(prep)
-        self.cache_put(key, meta)
-        return meta 
-
-    def cache_put(self, key: str, meta: HypergraphMetadata): 
-        self.graph_cache_[key] = meta 
-        if len(self.graph_cache_) > 4096: 
-            self.graph_cache_.popitem(last=False)
-    
-    def set_cached_graph_mode(self, enabled: bool): 
-        self.use_cached_graph = enabled 
-        if not enabled: 
-            self.graph_cache_.clear() 
-
-    def clear_cached_graph(self): 
-        self.graph_cache_.clear() 
-
-    def graph_key(self, prep:SpatialPatchBatch) -> str: 
-        h = hashlib.blake2b(digest_size=16)
-        h.update(np.asarray([prep.n_tiles, prep.n_patches_per_tile], dtype=np.int32).tobytes())
-            
-        if prep.patch_idx is None: 
-            h.update(b"patch_idx:none")
-        else: 
-            idx = prep.patch_idx.detach().to("cpu", dtype=torch.int16).numpy() 
-            h.update(idx.tobytes())
-
-        if prep.stats_raw is None: 
-            h.update(b"stats:none")
-        else: 
-            flat = prep.stats_raw.detach().reshape(-1)
-            step = max(1, flat.numel() // 4096) 
-            sample = flat[::step][:4096].to(torch.float32).cpu().numpy() 
-            h.update(sample.tobytes())
-
-        return h.hexdigest() 
-
-    def build_graph_meta(self, prep: SpatialPatchBatch) -> HypergraphMetadata: 
-        if prep.stats_z is None or prep.stats_raw is None: 
-            raise ValueError("stats_z and stats_raw are required")
-        return self.graph.build(
-            prep.stats_z,
-            batch_size=prep.n_tiles,
-            idx=prep.patch_idx,
-            active_stats=prep.stats_raw
-        )
 
 # ---------------------------------------------------------
 # Spatial Self-Supervised Feature Extractor 
@@ -813,7 +751,6 @@ class SpatialSSFE(SSFEBase):
         anchor_n_samples: int = 500_000, 
         anchor_min_norm: float = 1e-6, 
         embed_dim: int, 
-        max_bag_frac: float, 
 
         # semantic branch 
         semantic_hidden_dim: int, 
@@ -873,7 +810,6 @@ class SpatialSSFE(SSFEBase):
         self.tile_size           = tile_size
         self.patch_size          = patch_size
         self.embed_dim           = embed_dim
-        self.max_bag_frac        = max_bag_frac
 
         self.semantic_hidden_dim = semantic_hidden_dim
         self.semantic_out_dim    = semantic_out_dim
@@ -892,34 +828,6 @@ class SpatialSSFE(SSFEBase):
         self.node_anchors: list[list[float]] | None = None 
         self.anchor_stats: list[float] | None       = None 
 
-    def graph_hook(
-        self, 
-        *, 
-        stage: Literal["init", "epoch_start"], 
-        train_loader: DataLoader | None = None, 
-        prep: SSFEBatch | None = None, 
-        epoch: int | None = None
-    ):
-        _ = train_loader, epoch 
-        if "structural" not in self.model_: 
-            return 
-
-        structural = self.model_["structural"]
-        if not isinstance(structural, SpatialStructuralEmbedder): 
-            return 
-
-        if stage == "init": 
-            structural.set_cached_graph_mode(self.cache_graph_once)
-            if self.cache_graph_once: 
-                if not isinstance(prep, SpatialPatchBatch): 
-                    raise TypeError("SpatialSSFE graph init requires SpatialPatchBatch")
-                structural.cached_graph(prep)
-                self.graph_initialized_ = True 
-            return 
-
-        elif stage == "epoch_start": 
-            return 
-
     def build_preprocess(self) -> nn.Module | None:
         if self.anchor_stats is None: 
             raise ValueError("must call initialize_anchor_state()")
@@ -929,7 +837,6 @@ class SpatialSSFE(SSFEBase):
             tile_size=self.tile_size,
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
-            max_bag_frac=self.max_bag_frac,
             anchor_stats=self.anchor_stats
         )
 
@@ -971,12 +878,15 @@ class SpatialSSFE(SSFEBase):
         if not isinstance(batch, (list, tuple)) or len(batch) < 4: 
             raise ValueError("expected spatial batch as (tiles, labels, tile_batch_idx)")
 
-        tiles = batch[0].to(self.device, non_blocking=True)
+        tiles          = batch[0].to(self.device, non_blocking=True)
         tile_batch_idx = batch[2].to(self.device, non_blocking=True)
-        stats = batch[3].to(self.device, non_blocking=True)
+        stats          = batch[3].to(self.device, non_blocking=True)
 
-        prep = self.model_["preprocess"](tiles, stats=stats, tile_batch_idx=tile_batch_idx)
-        return prep 
+        return self.model_["preprocess"](
+            tiles, 
+            stats=stats, 
+            tile_batch_idx=tile_batch_idx,
+        )
 
     def forward_semantic(self, prep: SSFEBatch) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(prep, SpatialPatchBatch):

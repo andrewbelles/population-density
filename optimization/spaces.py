@@ -177,10 +177,9 @@ def define_hgnn_space(trial: optuna.Trial):
 def define_spatial_ssfe_space(trial: optuna.Trial): 
     return {
         "embed_dim": trial.suggest_categorical("embed_dim", [64, 128]),
-        "max_bag_frac": trial.suggest_float("max_bag_frac", 0.5, 1.0),
 
         # semantic branch
-        "semantic_hidden_dim": trial.suggest_int("semantic_hidden_dim", 128, 512, step=128),
+        "semantic_hidden_dim": trial.suggest_categorical("semantic_hidden_dim", [128, 256, 512]),
         "semantic_out_dim": trial.suggest_categorical("semantic_out_dim", [64, 128, 256]),
         "semantic_dropout": trial.suggest_float("semantic_dropout", 0.0, 0.2),
 
@@ -203,8 +202,8 @@ def define_spatial_ssfe_space(trial: optuna.Trial):
 
         "lr": trial.suggest_float("lr", 1e-5, 5e-4, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256]),
 
+        "batch_size": 64, 
         "epochs": 400, 
         "patch_size": 32, 
         "early_stopping_rounds": 25, 

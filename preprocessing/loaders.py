@@ -955,10 +955,10 @@ def dynamic_tile_collate(batch):
     tiles_list, stats_list, labels, num_tiles_list = [], [], [], []
 
     for item in batch: 
-        tiles, stats, label = item[:3]
+        tiles, stats, label, = item[:3]
 
-        t = torch.from_numpy(np.array(tiles, dtype=np.float32).copy())
-        s = torch.from_numpy(np.array(stats, dtype=np.float64).copy())
+        t   = torch.from_numpy(np.array(tiles, dtype=np.float32).copy())
+        s   = torch.from_numpy(np.array(stats, dtype=np.float64).copy())
 
         if s.ndim != 3: 
             raise ValueError(f"expected stats shape (T, L, D), got {tuple(s.shape)}")
@@ -977,7 +977,7 @@ def dynamic_tile_collate(batch):
     sections    = torch.tensor(num_tiles_list, dtype=torch.long)
     batch_idx   = torch.repeat_interleave(torch.arange(len(batch)), sections)
 
-    return flat_inputs, labels, batch_idx, flat_stats
+    return flat_inputs, labels, batch_idx, flat_stats 
 
 def load_spatial_mmap_manifest(
     root_dir: str, 

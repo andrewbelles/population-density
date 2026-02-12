@@ -167,6 +167,11 @@ class TileLoader(Dataset):
         stats       = (self.stats_mmap[stats_start:stats_end]
                        .reshape(n_tiles, self.num_patches_per_tile, self.stats_dim))
 
+        if tiles.shape[0] > 1: 
+            perm  = self.get_rng().permutation(tiles.shape[0])
+            tiles = tiles[perm]
+            stats = stats[perm]
+
         return self.format_output(tiles, stats, label, idx, n_tiles)
 
     def close(self): 
