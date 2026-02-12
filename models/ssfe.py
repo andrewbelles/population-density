@@ -6,7 +6,7 @@
 # model architecture (wide & deep)
 # 
 
-import torch, time, copy, sys, hashlib 
+import torch, time, copy, sys
 
 import torch.nn as nn 
 
@@ -26,15 +26,10 @@ from sklearn.base import BaseEstimator
 
 from sklearn.cluster import KMeans
 
-from typing import Literal 
-
-from collections import OrderedDict
-
 from torch.utils.data import (
     DataLoader, 
     random_split
 )
-from torch_sparse import SparseTensor
 
 from models.networks import (
     HyperGATStack, 
@@ -43,8 +38,6 @@ from models.networks import (
 )
 
 from models.graph.construction import (
-    Hypergraph,
-    HypergraphMetadata,
     SpatialHypergraph
 )
 
@@ -108,7 +101,8 @@ class SSFEBase(BaseEstimator, ABC):
         cluster_temperature: float,
         n_prototypes: int, 
         proj_dim: int, 
-        device: str | None = None
+        device: str | None = None,
+        compile_model: bool = True
     ): 
         self.epochs                = epochs
         self.lr                    = lr
@@ -140,6 +134,9 @@ class SSFEBase(BaseEstimator, ABC):
         self.best_val_score_ = np.inf 
         self.is_fitted_      = False 
 
+        self.compiled_       = False 
+        self.compile_model   = compile_model
+
     # -----------------------------------------------------
     # Child Hooks 
     # -----------------------------------------------------
@@ -170,6 +167,7 @@ class SSFEBase(BaseEstimator, ABC):
     # -----------------------------------------------------
     
     def fit(self, X, y=None): 
+        _ = y
         print(self)
         torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
@@ -265,6 +263,8 @@ class SSFEBase(BaseEstimator, ABC):
 
         self.model_["sem_recon"] = nn.Linear(d_sem_node, d_target).to(self.device)
         self.model_["st_recon"]  = nn.Linear(d_st_node, d_target).to(self.device)
+
+        self.compile_modules()
 
         self.opt_ = torch.optim.AdamW(
             self.model_.parameters(), 
@@ -468,6 +468,32 @@ class SSFEBase(BaseEstimator, ABC):
     # Loader Utils    
     # -----------------------------------------------------
 
+    def compile_modules(self): 
+        if self.compiled_ or not self.compile_model: 
+            return 
+        if self.device.type != "cuda" or not hasattr(torch, "compile"): 
+            return 
+
+        if "preprocess" in self.model_ and hasattr(self.model_["preprocess"], "encoder"): 
+            self.model_["preprocess"].encoder = self.try_compile_module(
+                    self.model_["preprocess"].encoder, "preprocess.encoder"
+            ) 
+
+        self.compiled_ = True 
+        print("[compile] modules compiled", file=sys.stderr)
+
+    def try_compile_module(self, module: nn.Module, name: str) -> nn.Module: 
+        try: 
+            return torch.compile(
+                module, 
+                mode="reduce-overhead",
+                fullgraph=False,
+                dynamic=True 
+            )
+        except Exception as e: 
+            print(f"[compile:skip] {name}: {e}", file=sys.stderr)
+            return module 
+
     def ensure_loader(self, X, shuffle: bool = False): 
         if isinstance(X, DataLoader):
             return X 
@@ -479,10 +505,8 @@ class SSFEBase(BaseEstimator, ABC):
             batch_size=self.batch_size,
             shuffle=shuffle,
             collate_fn=self.collate_fn,
-            num_workers=4,
+            num_workers=0,
             pin_memory=(self.device.type == "cuda"),
-            prefetch_factor=4, 
-            persistent_workers=True
         ) 
 
     def split_loader(self, loader): 
@@ -515,7 +539,7 @@ class SSFEBase(BaseEstimator, ABC):
         k: int, 
         random_state: int, 
     ) -> tuple[np.ndarray, np.ndarray]: 
-        x = np.asarray(features, dtype=np.float64)
+        x = np.asarray(features, dtype=np.float32)
         if x.ndim != 2 or x.shape[0] == 0: 
             raise ValueError(f"expected non-empty 2d feats, got {x.shape}")
 
@@ -532,10 +556,10 @@ class SSFEBase(BaseEstimator, ABC):
         km = KMeans(n_clusters=int(k), random_state=random_state)
         km.fit(samples)
 
-        anchors = km.cluster_centers_.astype(np.float64, copy=False)
+        anchors = km.cluster_centers_.astype(np.float32, copy=False)
         order   = np.argsort(np.linalg.norm(anchors, axis=1))
         anchors = anchors[order]
-        stats   = np.asarray([mean, std], dtype=np.float64)
+        stats   = np.asarray([mean, std], dtype=np.float32)
         return anchors, stats 
 
 # ---------------------------------------------------------
@@ -598,22 +622,15 @@ class SpatialPatchPreprocessor(nn.Module):
             raise ValueError(f"expected stats (T, L, D), got {tuple(stats.shape)}")
 
         T, C, _, _ = tiles.shape
-        P = self.patch_size 
-
-        patches = self.encoder.unfold(tiles)
-        L = patches.shape[0] // T 
-        patches = patches.view(T, L, C, P, P)
+        
+        embs = self.encoder(tiles)
+        K    = stats.shape[1]
+        embs = embs.view(T, K, -1)
+        idx  = None 
 
         stats_raw    = stats[..., :C].to(
             device=tiles.device, dtype=torch.float32, non_blocking=True
         )
-
-        K   = L 
-        idx = None 
-
-        patches_flat = patches.reshape(T * K, C, P, P)
-        feat_maps    = self.encoder.encoder(patches_flat)
-        embs         = self.encoder.projector(feat_maps).view(T, K, -1)
 
         mean         = self.encoder.patch_mean[:C].view(1, 1, C).to(
             device=tiles.device, dtype=torch.float32)
@@ -721,7 +738,8 @@ class SpatialStructuralEmbedder(nn.Module):
             idx=prep.patch_idx
         )
 
-        h_all   = self.gnn(x_all, meta.node_type, meta.H, meta.edge_type)
+        node_idx, edge_idx = meta.incidence_index
+        h_all   = self.gnn(x_all, meta.node_type, meta.edge_type, node_idx, edge_idx)
         h_node  = self.node_norm(h_all[:N])
         h_bag   = self.bag_norm(h_all[meta.readout_node_ids])
         return h_node, h_bag 
@@ -878,7 +896,8 @@ class SpatialSSFE(SSFEBase):
         if not isinstance(batch, (list, tuple)) or len(batch) < 4: 
             raise ValueError("expected spatial batch as (tiles, labels, tile_batch_idx)")
 
-        tiles          = batch[0].to(self.device, non_blocking=True)
+        tiles          = batch[0].to(self.device, non_blocking=True, 
+                                     memory_format=torch.channels_last)
         tile_batch_idx = batch[2].to(self.device, non_blocking=True)
         stats          = batch[3].to(self.device, non_blocking=True)
 

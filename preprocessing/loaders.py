@@ -958,7 +958,7 @@ def dynamic_tile_collate(batch):
         tiles, stats, label, = item[:3]
 
         t   = torch.from_numpy(np.array(tiles, dtype=np.float32).copy())
-        s   = torch.from_numpy(np.array(stats, dtype=np.float64).copy())
+        s   = torch.from_numpy(np.array(stats, dtype=np.float32).copy())
 
         if s.ndim != 3: 
             raise ValueError(f"expected stats shape (T, L, D), got {tuple(s.shape)}")

@@ -192,12 +192,12 @@ def define_spatial_ssfe_space(trial: optuna.Trial):
         "global_active_eps": trial.suggest_float("global_active_eps", 1e-6, 1e-3, log=True),
 
         # ssfe loss + optimization
-        "w_contrast": trial.suggest_float("w_contrast", 1.0, 2.0),
-        "w_cluster": trial.suggest_float("w_cluster", 0.75, 2.0),
-        "w_recon": trial.suggest_float("w_recon", 0.5, 2.0),
+        "w_contrast": 1.5,#trial.suggest_float("w_contrast", 1.0, 2.0),
+        "w_cluster": 0.9,#trial.suggest_float("w_cluster", 0.75, 2.0),
+        "w_recon": 0.9,#trial.suggest_float("w_recon", 0.5, 2.0),
         "contrast_temperature": trial.suggest_float("contrast_temperature", 0.05, 0.5, log=True),
         "cluster_temperature": trial.suggest_float("cluster_temperature", 0.05, 0.5, log=True),
-        "n_prototypes": trial.suggest_categorical("n_prototypes", [16, 32, 64]),
+        "n_prototypes": 16,#trial.suggest_categorical("n_prototypes", [16, 32, 64]),
         "proj_dim": trial.suggest_categorical("proj_dim", [64, 128]),
 
         "lr": trial.suggest_float("lr", 1e-5, 5e-4, log=True),

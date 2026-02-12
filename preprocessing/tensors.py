@@ -57,7 +57,7 @@ def tile_patch_stats(tiles: np.ndarray, patch_size: int = 32) -> np.ndarray:
 
     gh, gw = h // p, w // p 
     patches = tiles.reshape(c, gh, p, gw, p).transpose(1, 3, 0, 2, 4).reshape(gh * gw, c, p * p)
-    return np.quantile(patches, 0.95, axis=-1).astype(np.float64)
+    return np.quantile(patches, 0.95, axis=-1).astype(np.float32)
 
 # --------------------------------------------------------- 
 # Tiled MMap Loader 
@@ -87,7 +87,7 @@ class TileLoader(Dataset):
         tile_shape: tuple[int, int, int], 
         patch_size: int = 32, 
         dtype=np.float32,
-        stats_dtype=np.float64,
+        stats_dtype=np.float32,
         random_state: int = 0, 
         return_fips: bool = False, 
         return_num_tiles: bool = False, 
@@ -166,11 +166,6 @@ class TileLoader(Dataset):
         stats_end   = stats_start + n_tiles * self.stats_elems_per_tile 
         stats       = (self.stats_mmap[stats_start:stats_end]
                        .reshape(n_tiles, self.num_patches_per_tile, self.stats_dim))
-
-        if tiles.shape[0] > 1: 
-            perm  = self.get_rng().permutation(tiles.shape[0])
-            tiles = tiles[perm]
-            stats = stats[perm]
 
         return self.format_output(tiles, stats, label, idx, n_tiles)
 
@@ -516,7 +511,7 @@ class BinaryTileWriter:
         out_index_path: str, 
         patch_size: int = 32, 
         empty_threshold: float = 1.0, # fraction of zeros in mask
-        stats_dtype=np.float64 
+        stats_dtype=np.float32 
     ): 
         self.source          = source 
         self.out_bin_path    = out_bin_path 
@@ -904,7 +899,7 @@ class ViirsTensorDataset(SpatialTensorDataset):
 
         offsets = ((0, distance), (distance, 0), (distance, distance), (-distance, distance))
         
-        P = np.zeros((levels, levels), dtype=np.float64)
+        P = np.zeros((levels, levels), dtype=np.float32)
 
         h, w = q_block.shape 
         for dy, dx in offsets: 
@@ -931,8 +926,8 @@ class ViirsTensorDataset(SpatialTensorDataset):
 
         P /= s 
         
-        i = np.arange(levels, dtype=np.float64)[:, None]
-        j = np.arange(levels, dtype=np.float64)[None, :]
+        i = np.arange(levels, dtype=np.float32)[:, None]
+        j = np.arange(levels, dtype=np.float32)[None, :]
 
         contrast_glcm  = float(((i - j)**2 * P).sum())
         entropy_glcm   = float(-(P * np.log(P + 1e-9)).sum())

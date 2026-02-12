@@ -294,11 +294,6 @@ class LightweightBackbone(nn.Module):
         self.patch_size = patch_size 
         self.embed_dim  = embed_dim
 
-        self.grayscale  = nn.Conv2d(in_channels, 3, kernel_size=1, bias=False)
-
-        with torch.no_grad(): 
-            self.grayscale.weight.fill_(1.0 / 3.0)
-
         mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
         encoder   = mobilenet.features 
 
@@ -313,18 +308,30 @@ class LightweightBackbone(nn.Module):
         )
 
         with torch.no_grad(): 
-            new_conv.weight.copy_(orig_conv.weight.sum(dim=1, keepdim=True))
-        encoder[0][0] = new_conv 
+            if in_channels == 1: 
+                w  = orig_conv.weight.sum(dim=1, keepdim=True)
+            elif in_channels == 3: 
+                w = orig_conv.weight 
+            else: 
+                base = orig_conv.weight.mean(dim=1, keepdim=True)
+                w    = base.repeat(1, in_channels, 1, 1)
+            new_conv.weight.copy_(w)
 
+        encoder[0][0]  = new_conv 
         self.encoder   = encoder[:4] # truncate encoder to 4 blocks 
+
+        with torch.no_grad(): 
+            probe   = torch.zeros(1, in_channels, 
+                                  max(32, self.patch_size), max(32, self.patch_size))
+            feat_ch = int(self.encoder(probe).shape[1])
 
         self.projector = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(24, embed_dim),
-            nn.LayerNorm(embed_dim),
+            nn.Flatten(1),
+            nn.Linear(feat_ch, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
             nn.GELU() 
-        ) 
+        )
 
         if anchor_stats is not None: 
             mean = torch.as_tensor(anchor_stats[0], dtype=torch.float32) 
@@ -335,36 +342,24 @@ class LightweightBackbone(nn.Module):
         self.register_buffer("patch_mean", mean)
         self.register_buffer("patch_std", std)
 
-    def forward(self, tiles): 
+    def forward(self, tiles: torch.Tensor) -> torch.Tensor: 
+        if tiles.ndim != 4: 
+            raise ValueError(f"expected (B, C, H, W), got {tuple(tiles.shape)}")
+
         patches = self.unfold(tiles)
-        score   = self.patch_stat(patches)
         feats   = self.encoder(patches)
         embs    = self.projector(feats)
-        out     = torch.cat([embs, score], dim=1)
-        return out 
-
-    def patch_stat(self, patches: torch.Tensor): 
-        flat = patches.flatten(2).float() 
-        raw  = torch.quantile(flat, q=0.95, dim=2)
-
-        c    = raw.shape[1]
-        mean = self.patch_mean[:c].view(1, -1)
-        std  = self.patch_std[:c].view(1, -1)
-        z    = (raw - mean) / std 
-        return z, raw 
+        return embs
 
     def unfold(self, tiles): 
         B, C, H, W = tiles.shape 
         P          = self.patch_size 
-
         if H % P != 0 or W % P != 0: 
             raise ValueError(f"Tile size must be divisible by patch_size={P}. Got=(){H},{W})")
 
-        unfold  = nn.Unfold(kernel_size=P, stride=P)
-        patches = unfold(tiles)
+        patches = F.unfold(tiles, kernel_size=P, stride=P)
         L       = patches.shape[-1]
-        patches = patches.transpose(1, 2).reshape(B * L, C, P, P)
-        return patches 
+        return patches.transpose(1, 2).reshape(B * L, C, P, P) 
 
 # ---------------------------------------------------------
 # Cascaded Attention Hyper Graph Attention Network 
@@ -412,11 +407,11 @@ class HyperGATStack(nn.Module):
 
         self.out_dim = hidden_dim 
         
-    def forward(self, x, node_types, H, edge_type): 
+    def forward(self, x, node_types, edge_type, node_idx, edge_idx): 
         # resnet style stacking on GAT layers 
         h = x 
         for gat, ln, skip in zip(self.layers, self.norms, self.skip_proj): 
-            h_update, _ = gat(h, node_types, H, edge_type)
+            h_update, _ = gat(h, node_types, edge_type, node_idx, edge_idx)
             h = skip(h) + self.drop(h_update)
             h = ln(h)
 
@@ -458,11 +453,11 @@ class MultiheadCascadedHyperGAT(nn.Module):
         ])
         self.attn_dropout = nn.Dropout(attn_dropout) if attn_dropout > 0.0 else nn.Identity() 
 
-    def forward(self, x, node_types, H, edge_type): 
+    def forward(self, x, node_types, edge_type, node_idx, edge_idx): 
         node_outs = []
         edge_outs = []
         for head in self.heads: 
-            node_feat, edge_feat = head(x, node_types, H, edge_type)
+            node_feat, edge_feat = head(x, node_types, edge_type, node_idx, edge_idx)
             node_outs.append(node_feat)
             edge_outs.append(edge_feat)
         node_out = torch.cat(node_outs, dim=1)
@@ -505,15 +500,13 @@ class CascadedHyperGAT(nn.Module):
         # hyperedge context per spatial, semantic, global 
         self.edge_context = nn.Embedding(n_edge_types, out_dim)
 
-    def forward(self, x, node_types, H, edge_type): 
+    def forward(self, x, node_types, edge_type, node_idx, edge_idx): 
         '''
         Caller Provides:
         - x (N, in_dim),
         - node_types: (N,)
-        - H (SparseTensor for Hypergraph incidence matrix)
         - edge_type (num_edges,) hyperedge type id (0=spatial,1=semantic,2=global)
         '''
-        node_idx, edge_idx, _ = H.coo() 
         num_edges             = edge_type.shape[0]
 
         # type level attention 
@@ -777,5 +770,5 @@ class SemanticMLP(nn.Module):
         count = node.new_zeros((batch_size, 1))
         bag.index_add_(0, batch_indices, node)
         count.index_add_(0, batch_indices, node.new_ones((batch_indices.numel(), 1)))
-        bag  /= count.clamp_min(1.0)
+        bag   = bag / count.clamp_min(1.0)
         return node, bag 

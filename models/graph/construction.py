@@ -6,13 +6,12 @@
 # 
 
 from abc import ABC, abstractmethod
+
 from dataclasses import dataclass
-from operator import add
+
 import torch 
 
 import torch.nn.functional as F 
-
-from torch_sparse import SparseTensor
 
 from typing import Callable, Optional 
 
@@ -363,7 +362,6 @@ class HypergraphMetadata:
     incidence_index: torch.Tensor 
     edge_type: torch.Tensor 
     edge_batch: torch.Tensor 
-    H: SparseTensor 
     group_ids: torch.Tensor 
     readout_node_ids: torch.Tensor | None 
 
@@ -374,7 +372,7 @@ class Hypergraph(ABC):
     - validates stats 
     - computes active mask 
     - builds semantic/global/readout incidences 
-    - assembles metadata and final SparseTensor
+    - assembles metadata
 
     The child class implements: 
     - node typing policy 
@@ -459,23 +457,14 @@ class Hypergraph(ABC):
         readout_type_id = self.n_semantic_types
         readout_types   = torch.full((B,), readout_type_id, dtype=torch.long, device=self.device)
         all_node_types  = torch.cat([node_type, readout_types], dim=0)
-        n_nodes_total   = N + B 
 
         incidence_index = torch.stack([all_nodes, all_hedges], dim=0)
-
-        H = SparseTensor(
-            row=all_nodes,
-            col=all_hedges,
-            value=torch.ones_like(all_nodes, dtype=torch.float32),
-            sparse_sizes=(n_nodes_total, n_edges_total)
-        )
 
         return HypergraphMetadata(
             node_type=all_node_types,
             incidence_index=incidence_index,
             edge_type=edge_type,
             edge_batch=edge_batch,
-            H=H,
             group_ids=group_ids,
             readout_node_ids=readout_ids
         )
