@@ -38,13 +38,12 @@ from testbench.utils.data      import (
 )
 
 from optimization.evaluators   import (
-    TabularEvaluator,
     SSFEEvaluator
 )
 
 from optimization.spaces       import (
-    define_tabular_space,
-    define_spatial_ssfe_space
+    define_spatial_ssfe_space,
+    define_tabular_ssfe_space
 )
 
 from optimization.engine       import (
@@ -52,12 +51,14 @@ from optimization.engine       import (
     EngineConfig
 )
 
-from models.ssfe               import SpatialSSFE
+from models.ssfe               import (
+    SpatialSSFE, 
+    TabularSSFE
+)
 
 from testbench.utils.config    import (
     cv_config,
     load_model_params,
-    make_residual_tabular,
     load_node_anchors
 )
 
@@ -182,6 +183,75 @@ def _spatial_opt(
         "params": best_params
     }
 
+def _tabular_ssfe_opt(
+    *,
+    load_data_fn,
+    data_path: str, 
+    model_key: str, 
+    param_space=define_tabular_ssfe_space,
+    factory_overrides=None,
+    trials: int = 50, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH, 
+    **_ 
+): 
+
+    data   = load_data_fn(data_path) 
+    X      = np.asarray(data["features"], dtype=np.float32)
+    in_dim = int(X.shape[1])
+
+    fixed = dict(factory_overrides or {})
+    fixed.update({"in_dim": in_dim})
+
+    def loader_func(_filepath): 
+        return {"features": X}
+
+    def ssfe_factory(*, compute_strategy=None, collate_fn=None, **params): 
+        _ = compute_strategy 
+        merged = dict(fixed)
+        merged.update(params)
+        if collate_fn is not None: 
+            merged.setdefault("collate_fn", collate_fn)
+        return TabularSSFE(**merged)
+
+    evaluator = SSFEEvaluator(
+        filepath=data_path,
+        loader_func=loader_func,
+        model_factory=ssfe_factory,
+        param_space=param_space,
+        random_state=random_state,
+        n_runs=1,
+        compute_strategy=strategy 
+    )
+
+    prior_params = None 
+    try: 
+        prior_params = load_model_params(config_path, model_key)
+    except Exception: 
+        prior_params = None 
+
+    config  = EngineConfig(
+        n_trials=trials,
+        direction="minimize",
+        random_state=random_state,
+        sampler_type="multivariate-tpe",
+        enqueue_trials=[prior_params] if prior_params else None,
+    )
+
+    best_params, best_value, _ = run_optimization(
+        name=model_key,
+        evaluator=evaluator,
+        config=config
+    )
+
+    save_model_config(config_path, model_key, best_params)
+
+    return {
+        "header": ["Name", "SSFE Loss"], 
+        "row": _row_score(model_key, best_value), 
+        "params": best_params
+    }
+
 # ---------------------------------------------------------
 # Tests Entry Point 
 # ---------------------------------------------------------
@@ -198,46 +268,20 @@ def test_saipe_opt(
     **_
 ): 
     loader = make_dataset_loader(dataset_key, proba_path)[dataset_key] 
-    data   = loader(data_path) if callable(loader) else loader 
-    X      = np.asarray(data["features"], dtype=np.float32)
-    y      = np.asarray(data["labels"], dtype=np.float32).reshape(-1) 
 
-    evaluator = TabularEvaluator(
-        X, y,
-        define_tabular_space,
-        model_factory=make_residual_tabular(),
+    def load_data(path): 
+        return loader(path) if callable(loader) else loader 
+
+    return _tabular_ssfe_opt(
+        load_data_fn=load_data, 
+        data_path=data_path,
+        model_key=model_key,
+        trials=trials,
         random_state=random_state,
-        compute_strategy=strategy
+        config_path=config_path
     )
 
-    prior_params = None 
-    try: 
-        prior_params = load_model_params(config_path, model_key)
-    except Exception: 
-        prior_params = None 
 
-    config  = EngineConfig(
-        n_trials=trials,
-        direction="minimize",
-        random_state=random_state,
-        sampler_type="multivariate-tpe",
-        enqueue_trials=[prior_params] if prior_params else None,
-        devices=strategy.visible_devices()
-    )
-
-    best_params, best_value, _ = run_optimization(
-        name=model_key,
-        evaluator=evaluator,
-        config=config
-    )
-
-    save_model_config(config_path, model_key, best_params)
-
-    return {
-        "header": ["Name", "Corn + RPS"],
-        "row": _row_score(model_key, best_value),
-        "params": best_params 
-    }
 
 def test_reduce_all( 
     *,
@@ -337,46 +381,14 @@ def test_usps_opt(
     config_path: str = CONFIG_PATH, 
     **_
 ):
-    data   = load_compact_dataset(data_path)
-    X      = np.asarray(data["features"], dtype=np.float32)
-    y      = np.asarray(data["labels"], dtype=np.float32).reshape(-1)
-
-    evaluator = TabularEvaluator(
-        X, y,
-        define_tabular_space,
-        model_factory=make_residual_tabular(),
+    return _tabular_ssfe_opt(
+        load_data_fn=load_compact_dataset, 
+        data_path=data_path,
+        model_key=model_key,
+        trials=trials,
         random_state=random_state,
-        compute_strategy=strategy
+        config_path=config_path
     )
-
-    prior_params = None
-    try:
-        prior_params = load_model_params(config_path, model_key)
-    except Exception:
-        prior_params = None
-
-    config  = EngineConfig(
-        n_trials=trials,
-        direction="minimize",
-        random_state=random_state,
-        sampler_type="multivariate-tpe",
-        enqueue_trials=[prior_params] if prior_params else None,
-        devices=strategy.visible_devices()
-    )
-
-    best_params, best_value, _ = run_optimization(
-        name=model_key,
-        evaluator=evaluator,
-        config=config
-    )
-
-    save_model_config(config_path, model_key, best_params)
-
-    return {
-        "header": ["Name", "Corn + RPS"],
-        "row": _row_score(model_key, best_value),
-        "params": best_params
-    }
 
 # ---------------------------------------------------------
 # Tests Entry Point 

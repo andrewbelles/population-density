@@ -174,6 +174,18 @@ def define_hgnn_space(trial: optuna.Trial):
         "min_delta": 1e-4,
     }
 
+def define_usps_space(trial: optuna.Trial): 
+    params = define_hgnn_space(trial)
+    params.pop("threshold_scale", None)
+
+    params["patch_stat"]     = "usps"
+    params["patch_quantile"] = 1.0
+    return params 
+
+# ---------------------------------------------------------
+# SSFE Models   
+# ---------------------------------------------------------
+
 def define_spatial_ssfe_space(trial: optuna.Trial): 
     return {
         "embed_dim": trial.suggest_categorical("embed_dim", [64, 128]),
@@ -211,13 +223,49 @@ def define_spatial_ssfe_space(trial: optuna.Trial):
         "min_delta": 1e-4 
     }
 
-def define_usps_space(trial: optuna.Trial): 
-    params = define_hgnn_space(trial)
-    params.pop("threshold_scale", None)
+def define_tabular_ssfe_space(trial: optuna.Trial):
+    return {
+        "embed_dim": trial.suggest_categorical("embed_dim", [64, 128]),
 
-    params["patch_stat"]     = "usps"
-    params["patch_quantile"] = 1.0
-    return params 
+        # semantic branch
+        "semantic_out_dim": trial.suggest_categorical("semantic_out_dim", [64, 128, 256]),
+        "transformer_dim": trial.suggest_categorical("transformer_dim", [64, 128]),
+        "transformer_heads": trial.suggest_categorical("transformer_heads", [4, 8]),
+        "transformer_layers": trial.suggest_int("transformer_layers", 1, 3),
+        "transformer_attn_dropout": trial.suggest_float("transformer_attn_dropout", 0.0, 0.2),
+        "semantic_proj_dim": trial.suggest_categorical("semantic_proj_dim", [64, 128, 256]),
+        "semantic_hidden_dim": trial.suggest_categorical("semantic_hidden_dim", [128, 256, 512]),
+        "semantic_depth": trial.suggest_int("semantic_depth", 1, 4),
+        "semantic_dropout": trial.suggest_float("semantic_dropout", 0.0, 0.2),
+
+        # structural branch
+        "tabular_knn": trial.suggest_categorical("tabular_knn", [8, 16, 24]),
+        "gnn_dim": trial.suggest_categorical("gnn_dim", [128, 256]),
+        "gnn_layers": trial.suggest_int("gnn_layers", 1, 3),
+        "gnn_heads": trial.suggest_categorical("gnn_heads", [4, 8]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.2),
+        "attn_dropout": trial.suggest_float("attn_dropout", 0.0, 0.2),
+        "global_active_eps": trial.suggest_float("global_active_eps", 1e-6, 1e-3, log=True),
+
+        # loss + optimization
+        "w_contrast": 1.5,
+        "w_cluster": 0.9,
+        "w_recon": 0.9,
+        "contrast_temperature": trial.suggest_float("contrast_temperature", 0.05, 0.5, log=True),
+        "cluster_temperature": trial.suggest_float("cluster_temperature", 0.05, 0.5, log=True),
+        "n_prototypes": 16,
+        "proj_dim": trial.suggest_categorical("proj_dim", [64, 128]),
+
+        "lr": trial.suggest_float("lr", 1e-5, 5e-4, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True),
+
+        "batch_size": 64,
+        "epochs": 400,
+        "early_stopping_rounds": 25,
+        "eval_fraction": 0.20,
+        "min_delta": 1e-4,
+    }
+
 
 # ---------------------------------------------------------
 # MLP Projector  

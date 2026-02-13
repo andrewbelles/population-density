@@ -275,11 +275,141 @@ class MILOrdinalHead(nn.Module):
 # Lightweight CNN backbone for CASM-MIL model  
 # ---------------------------------------------------------
 
+class SEBlock(nn.Module): 
+    '''
+    Squeeze-Excitation block for use in CNN models 
+    '''
+    def __init__(
+        self,
+        channels: int, 
+        reduction: int = 8, 
+        min_hidden: int = 16
+    ): 
+        super().__init__()
+        hidden = max(channels // reduction, min_hidden)
+
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc   = nn.Sequential(
+            nn.Linear(channels, hidden, bias=True),
+            nn.GELU(),
+            nn.Linear(hidden, channels, bias=True),
+            nn.Sigmoid() 
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor: 
+        b, c, _, _ = x.shape 
+        y = self.pool(x).flatten(1)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+class SEResBlock(nn.Module): 
+    '''
+    Combination Squeeze-Excitation and Residual Block for use in CNN models 
+    '''
+
+    def __init__(
+        self,
+        in_ch: int, 
+        out_ch: int, 
+        *,
+        stride: int = 1, 
+        se_reduction: int = 8, 
+        dropout: float
+    ): 
+        super().__init__()
+        
+        if stride != 1 or in_ch != out_ch: 
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False), 
+                nn.BatchNorm2d(out_ch)
+            )
+        else: 
+            self.skip = nn.Identity()
+
+        self.act = nn.GELU() 
+
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False), 
+            nn.BatchNorm2d(out_ch),
+            nn.GELU(), 
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False), 
+            nn.BatchNorm2d(out_ch),
+            SEBlock(out_ch, reduction=se_reduction), 
+            nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(), 
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        id  = self.skip(x)
+        out = self.net(x)
+        return self.act(out + id)
+
+class TinyDenseSE(nn.Module): 
+    '''
+    Patch encoder meant for 32x32 patches -> embedding vectors in LightweightBackbone 
+
+    Uses chained SE + Residual blocks
+    '''
+
+    def __init__(
+        self,
+        *,
+        in_channels: int, 
+        embed_dim: int, 
+        base_channels: int = 32, 
+        se_reduction: int = 8,
+        block_dropout: float = 0.0
+    ): 
+        super().__init__() 
+        
+        C = [base_channels * (2**i) for i in range(3)] 
+
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, C[0], kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(C[0]),
+            nn.GELU() 
+        )
+
+
+        self.net = nn.Sequential(
+            SEResBlock(C[0], C[0], stride=1, se_reduction=se_reduction, dropout=block_dropout), 
+            SEResBlock(C[0], C[1], stride=2, se_reduction=se_reduction, dropout=block_dropout), 
+            SEResBlock(C[1], C[1], stride=1, se_reduction=se_reduction, dropout=block_dropout), 
+            SEResBlock(C[1], C[2], stride=2, se_reduction=se_reduction, dropout=block_dropout), 
+            SEResBlock(C[2], C[2], stride=1, se_reduction=se_reduction, dropout=block_dropout), 
+        )
+
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(1),
+            nn.Linear(C[2], embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+
+        self.apply(self.init_weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor: 
+        x = self.stem(x)
+        x = self.net(x)
+        return self.head(x)
+
+    @staticmethod 
+    def init_weights(m): 
+        if isinstance(m, nn.Conv2d): 
+            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+        elif isinstance(m, nn.BatchNorm2d): 
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear): 
+            nn.init.trunc_normal_(m.weight, std=0.02) 
+            if m.bias is not None: 
+                nn.init.zeros_(m.bias)
+
 class LightweightBackbone(nn.Module): 
 
     '''
-    Lightweight adaptation of ResNet architecture with 4 residual layers. 
-    Imports MobileNet_V3 weights adapted for grayscale as weight initialization 
+    Lightweight CNN model meant to extract features from small patches of images for downstream 
+    usage in self-supervised learning. Leverages residual blocks as well as squeeze-excitation
+    blocks.
     '''
 
     def __init__(
@@ -288,49 +418,21 @@ class LightweightBackbone(nn.Module):
         embed_dim=64, 
         patch_size=32,
         anchor_stats: list[float] | None = None,
+        *,
+        base_channels: int = 32, 
+        se_reduction: int = 8, 
+        block_dropout: float = 0.0 
     ): 
         super().__init__()
         
         self.patch_size = patch_size 
         self.embed_dim  = embed_dim
-
-        mobilenet = tvm.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
-        encoder   = mobilenet.features 
-
-        orig_conv = encoder[0][0]
-        new_conv  = nn.Conv2d(
+        self.encoder    = TinyDenseSE(
             in_channels=in_channels,
-            out_channels=orig_conv.out_channels,
-            kernel_size=orig_conv.kernel_size,
-            stride=orig_conv.stride, 
-            padding=orig_conv.padding, 
-            bias=False 
-        )
-
-        with torch.no_grad(): 
-            if in_channels == 1: 
-                w  = orig_conv.weight.sum(dim=1, keepdim=True)
-            elif in_channels == 3: 
-                w = orig_conv.weight 
-            else: 
-                base = orig_conv.weight.mean(dim=1, keepdim=True)
-                w    = base.repeat(1, in_channels, 1, 1)
-            new_conv.weight.copy_(w)
-
-        encoder[0][0]  = new_conv 
-        self.encoder   = encoder[:4] # truncate encoder to 4 blocks 
-
-        with torch.no_grad(): 
-            probe   = torch.zeros(1, in_channels, 
-                                  max(32, self.patch_size), max(32, self.patch_size))
-            feat_ch = int(self.encoder(probe).shape[1])
-
-        self.projector = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(1),
-            nn.Linear(feat_ch, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.GELU() 
+            embed_dim=embed_dim,
+            base_channels=base_channels,
+            se_reduction=se_reduction,
+            block_dropout=block_dropout
         )
 
         if anchor_stats is not None: 
@@ -347,13 +449,12 @@ class LightweightBackbone(nn.Module):
             raise ValueError(f"expected (B, C, H, W), got {tuple(tiles.shape)}")
 
         patches = self.unfold(tiles)
-        feats   = self.encoder(patches)
-        embs    = self.projector(feats)
+        embs    = self.encoder(patches)
         return embs
 
     def unfold(self, tiles): 
         B, C, H, W = tiles.shape 
-        P          = self.patch_size 
+        P = self.patch_size 
         if H % P != 0 or W % P != 0: 
             raise ValueError(f"Tile size must be divisible by patch_size={P}. Got=(){H},{W})")
 

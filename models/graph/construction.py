@@ -393,7 +393,7 @@ class Hypergraph(ABC):
 
         if anchors.ndim != 2 or anchors.shape[0] != 3: 
             raise ValueError(f"anchors must be (3, D), got {tuple(anchors.shape)}")
-        self.anchors = anchors 
+        self.anchors = anchors.to(self.device) 
 
     # -----------------------------------------------------
     # Public API   
