@@ -313,7 +313,7 @@ class SEResBlock(nn.Module):
         out_ch: int, 
         *,
         stride: int = 1, 
-        se_reduction: int = 8, 
+        se_reduction: int = 16, 
         dropout: float
     ): 
         super().__init__()
@@ -355,33 +355,31 @@ class TinyDenseSE(nn.Module):
         *,
         in_channels: int, 
         embed_dim: int, 
-        base_channels: int = 32, 
-        se_reduction: int = 8,
+        base_channels: int = 16, 
+        se_reduction: int = 16,
         block_dropout: float = 0.0
     ): 
         super().__init__() 
-        
-        C = [base_channels * (2**i) for i in range(3)] 
+
+        c1, c2, c3 = base_channels, base_channels * 2, base_channels * 3
 
         self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, C[0], kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(C[0]),
+            nn.Conv2d(in_channels, c1, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
             nn.GELU() 
         )
 
 
-        self.net = nn.Sequential(
-            SEResBlock(C[0], C[0], stride=1, se_reduction=se_reduction, dropout=block_dropout), 
-            SEResBlock(C[0], C[1], stride=2, se_reduction=se_reduction, dropout=block_dropout), 
-            SEResBlock(C[1], C[1], stride=1, se_reduction=se_reduction, dropout=block_dropout), 
-            SEResBlock(C[1], C[2], stride=2, se_reduction=se_reduction, dropout=block_dropout), 
-            SEResBlock(C[2], C[2], stride=1, se_reduction=se_reduction, dropout=block_dropout), 
+        self.blocks = nn.Sequential(
+            SEResBlock(c1, c1, stride=1, se_reduction=se_reduction, dropout=block_dropout), 
+            SEResBlock(c1, c2, stride=2, se_reduction=se_reduction, dropout=block_dropout), 
+            SEResBlock(c2, c3, stride=2, se_reduction=se_reduction, dropout=block_dropout), 
         )
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(1),
-            nn.Linear(C[2], embed_dim),
+            nn.Linear(c3, embed_dim),
             nn.LayerNorm(embed_dim)
         )
 
@@ -389,7 +387,7 @@ class TinyDenseSE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor: 
         x = self.stem(x)
-        x = self.net(x)
+        x = self.blocks(x)
         return self.head(x)
 
     @staticmethod 
@@ -419,8 +417,8 @@ class LightweightBackbone(nn.Module):
         patch_size=32,
         anchor_stats: list[float] | None = None,
         *,
-        base_channels: int = 32, 
-        se_reduction: int = 8, 
+        base_channels: int = 16, 
+        se_reduction: int = 16, 
         block_dropout: float = 0.0 
     ): 
         super().__init__()

@@ -1071,6 +1071,9 @@ class SpatialSSFE(SSFEBase):
             dtype=np.float32
         ).reshape(-1, self.in_channels)
 
+    def initialize_structural_state(self, train_loader: DataLoader):
+        return super().initialize_structural_state(train_loader)
+
 # --------------------------------------------------------- 
 # Tabular SSFE Modules 
 # --------------------------------------------------------- 
