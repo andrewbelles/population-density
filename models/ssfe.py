@@ -785,15 +785,16 @@ class SpatialPatchPreprocessor(nn.Module):
         if t == 0 or k < 2: 
             return embs 
 
-        tile_mask = torch.rand((t, ), device=embs.device) < p 
-        if not (tile_mask.any()): 
+        sel = torch.nonzero(torch.rand((t, ), device=embs.device) < p, as_tuple=False).squeeze(1)
+        if sel.numel() == 0: 
             return embs 
 
-        perm = torch.argsort(torch.rand((t, k), device=embs.device), dim=1)
-        shuffled = torch.gather(embs, dim=1, index=perm.unsqueeze(-1).expand(-1, -1, d)) 
+        picked = embs.index_select(0, sel)
+        perm = torch.argsort(torch.rand((sel.numel(), k), device=embs.device), dim=1)
+        shuffled = torch.gather(picked, dim=1, index=perm.unsqueeze(-1).expand(-1, -1, d)) 
 
         out = embs.clone() 
-        out[tile_mask] = shuffled[tile_mask]
+        out.index_copy_(0, sel, shuffled)
         return out 
 
 

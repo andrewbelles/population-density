@@ -291,7 +291,7 @@ class SEBlock(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc   = nn.Sequential(
             nn.Linear(channels, hidden, bias=True),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Linear(hidden, channels, bias=True),
             nn.Sigmoid() 
         )
@@ -331,7 +331,7 @@ class SEResBlock(nn.Module):
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False), 
             nn.BatchNorm2d(out_ch),
-            nn.GELU(), 
+            nn.ReLU(), 
             nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False), 
             nn.BatchNorm2d(out_ch),
             SEBlock(out_ch, reduction=se_reduction), 
@@ -364,9 +364,9 @@ class TinyDenseSE(nn.Module):
         c1, c2, c3 = base_channels, base_channels * 2, base_channels * 3
 
         self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, c1, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(in_channels, c1, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(c1),
-            nn.GELU() 
+            nn.ReLU() 
         )
 
 
