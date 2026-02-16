@@ -72,66 +72,50 @@ models:
     w_recon: 0.9
     weight_decay: 1.0278118224157019e-05
   Manifold/USPS:
-    embed_dim: 128
-    semantic_out_dim: 128
+    embed_dim: 64
+    semantic_out_dim: 64
     transformer_dim: 128
     transformer_heads: 4
-    transformer_layers: 3
-    transformer_attn_dropout: 0.0705735005856277
+    transformer_layers: 2
+    transformer_attn_dropout: 0.05193447326264852
     semantic_proj_dim: 64
     semantic_hidden_dim: 512
     semantic_depth: 3
-    semantic_dropout: 0.05396594328070074
-    tabular_knn: 16
-    gnn_dim: 256
-    gnn_layers: 1
-    gnn_heads: 4
-    dropout: 0.005856839107435157
-    attn_dropout: 0.13601382929333905
-    global_active_eps: 5.765833652753372e-06
-    contrast_temperature: 0.06347471728845229
-    cluster_temperature: 0.07976464253917301
+    semantic_dropout: 0.028828932502998384
+    tabular_knn: 24
+    gnn_dim: 128
+    gnn_layers: 2
+    gnn_heads: 8
+    dropout: 0.09608510046041782
+    attn_dropout: 0.13507028535527818
+    global_active_eps: 7.19546948885205e-06
+    contrast_temperature: 0.05877126672072478
+    cluster_temperature: 0.1920315341596832
     proj_dim: 128
-    lr: 0.00022495220740157595
-    weight_decay: 6.1304778929598415e-06
-    n_prototypes: 16
-    w_contrast: 1.5
-    w_cluster: 0.9
-    w_recon: 0.9
-    batch_size: 64
-    epochs: 400
-    early_stopping_rounds: 25
-    eval_fraction: 0.2
-    min_delta: 0.0001
+    lr: 0.0004657464842420003
+    weight_decay: 9.937138784957865e-05
+    n_prototypes: 16 
   Manifold/SAIPE:
     embed_dim: 64
     semantic_out_dim: 64
     transformer_dim: 128
     transformer_heads: 8
-    transformer_layers: 2
-    transformer_attn_dropout: 0.012829499269756873
+    transformer_layers: 3
+    transformer_attn_dropout: 0.00010870325353787812
     semantic_proj_dim: 64
     semantic_hidden_dim: 512
-    semantic_depth: 4
-    semantic_dropout: 0.06371379049026474
+    semantic_depth: 1
+    semantic_dropout: 0.025922333432017657
     tabular_knn: 24
-    gnn_dim: 128
-    gnn_layers: 2
+    gnn_dim: 256
+    gnn_layers: 3
     gnn_heads: 8
-    dropout: 0.0009390952385094132
-    attn_dropout: 0.13601382929333905
-    global_active_eps: 6.456897906217102e-06
-    contrast_temperature: 0.2717465420642991
-    cluster_temperature: 0.4583091727601093
-    proj_dim: 128
-    lr: 0.00010135880520523338
-    weight_decay: 5.20901631137038e-06
-    n_prototypes: 16
-    w_contrast: 1.5
-    w_cluster: 0.9
-    w_recon: 0.9
-    batch_size: 64
-    epochs: 400
-    early_stopping_rounds: 25
-    eval_fraction: 0.2
-    min_delta: 0.0001
+    dropout: 0.03759318805711227
+    attn_dropout: 0.07323821328447148
+    global_active_eps: 1.5533912813588434e-05
+    contrast_temperature: 0.18294864626716478
+    cluster_temperature: 0.4474761639454574
+    proj_dim: 64
+    lr: 0.00048601134629409144
+    weight_decay: 8.192520081656103e-07
+    n_prototypes: 16 
