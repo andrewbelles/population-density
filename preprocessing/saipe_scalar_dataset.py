@@ -12,13 +12,13 @@ import numpy as np
 
 import pandas as pd 
 
-from pathlib       import Path 
+from pathlib              import Path 
 
-from scipy.io      import savemat 
+from scipy.io             import savemat 
 
-from utils.helpers import project_path
+from utils.helpers        import project_path
 
-from preprocessing.population_labels import build_label_map
+from preprocessing.labels import build_label_map
 
 
 class SaipeScalarDataset: 

@@ -22,7 +22,7 @@ from utils.helpers import (
     to_num
 )
 
-from preprocessing.population_labels import build_label_map
+from preprocessing.labels import build_label_map
 
 
 YEAR_SPECS = {

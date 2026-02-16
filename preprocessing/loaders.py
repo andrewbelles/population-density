@@ -14,13 +14,14 @@ import pandas as pd
 
 from numpy.typing import NDArray
 
-from typing import Callable, Sequence, TypedDict, List, Any 
+from typing import Callable, Optional, Sequence, TypedDict, List, Any 
 
 from dataclasses import dataclass
 
 from pathlib import Path
 
 from scipy.io import loadmat
+from torch.utils.data import Dataset
 
 from utils.helpers import (
     bind,
@@ -1039,84 +1040,80 @@ def mmap_loader(
     )
 
 # ---------------------------------------------------------
-# Fusion Dataset Loaders 
+# Fusion Dataset Definition  
 # ---------------------------------------------------------
 
-def load_embedding_artifact(path: str, *, require_train_meta: bool = True) -> dict: 
-    '''
-    Loads embeddings extracted from full 2013 training dataset for propagating training 
-    set forward in model without having to fit expert models per epoch. 
-    '''
+class FusionDataset(Dataset): 
+
+    def __init__(
+        self,
+        experts: dict[str, torch.Tensor], 
+        wide_x: torch.Tensor, 
+        y_rank: torch.Tensor, 
+        sample_weight: Optional[torch.Tensor] = None 
+    ): 
+        self.experts       = experts 
+        self.wide_x        = wide_x 
+        self.y_rank        = y_rank 
+        self.sample_weight = sample_weight
+
+    def __len__(self) -> int: 
+        return int(self.y_rank.shape[0])
+
+    def __getitem__(self, idx: int): 
+        xb = {k: v[idx] for k, v in self.experts.items()}
+        wb = self.wide_x[idx]
+        yb = self.y_rank[idx]
+        if self.sample_weight is None: 
+            sw = torch.tensor(1.0, dtype=self.y_rank.dtype)
+        else: 
+            sw = self.sample_weight[idx]
+        return xb, wb, yb, sw
+
+class WideDeepInputs(TypedDict): 
+    experts: dict[str, NDArray[np.float32]]
+    wide: NDArray[np.float32]
+    y_rank: NDArray[np.float32]
+    coords: NDArray[np.float32]
+    sample_ids: NDArray[np.str_]
+    expert_dims: dict[str, int]
+    wide_in_dim: int 
+
+def canon_fips_vec(x) -> NDArray[np.str_]: 
+    arr = np.asarray(x).reshape(-1)
+    out = []
+    for v in arr:
+        s = str(v).strip() 
+        if s.isdigit():
+            s = s.zfill(5)
+        out.append(s)
+    return np.asarray(out, dtype="U5")
+
+def load_rank_source(
+    path: str, 
+    *, 
+    rank_key: str
+) -> tuple[NDArray[np.str_], NDArray[np.float32]]:
 
     mat = loadmat(path)
-    X   = np.asarray(mat["features"], dtype=np.float32)
-    y   = np.asarray(mat["labels"]).reshape(-1).astype(np.int64)
+    if "fips_codes" not in mat: 
+        raise ValueError(f"{path} missing fips_codes.")
+    if rank_key not in mat and "labels" not in mat: 
+        raise ValueError(f"{path} missing {rank_key} and labels.")
 
-    key = "fips_codes" if "fips_codes" in mat else "sample_ids" 
-    if key not in mat: 
-        raise ValueError(f"{path}: missing fips_codes/sample_ids")
+    fips = canon_fips_vec(_mat_str_vector(mat["fips_codes"]))
+    key  = rank_key if rank_key in mat else "labels" 
+    y    = np.asarray(mat[key], dtype=np.float32).reshape(-1)
 
-    fips = _mat_str_vector(mat[key]).astype("U5")
+    if fips.shape[0] != y.shape[0]: 
+        raise ValueError(f"{path} rank/fips mismatch.")
+    return fips, y
 
-    src_idx = np.asarray(
-        mat.get("source_indices", np.arange(X.shape[0]))
-    ).reshape(-1).astype(np.int64)
-    
-    tr_idx  = mat.get("fit_train_indices")
-    tr_fips = mat.get("fit_train_fips")
-
-    if require_train_meta and (tr_idx is None or tr_fips is None): 
-        raise ValueError(f"{path}: missing fit_train_indices/fit_train_fips")
-
-    tr_idx  = np.asarray(tr_idx).reshape(-1).astype(np.int64) if tr_idx is not None else None  
-    tr_fips = _mat_str_vector(tr_fips).astype("U5")           if tr_fips is not None else None  
-
-    return {
-        "features": X, 
-        "labels": y, 
-        "sample_ids": fips, 
-        "source_indices": src_idx, 
-        "fit_train_indices": tr_idx, 
-        "fit_train_fips": tr_fips
-    }
-
-def load_fusion(
-    saipe_path: str, 
-    usps_path: str, 
-    viirs_path: str,
+def load_wide_deep_inputs(
     *,
-    train_only: bool = True 
-) -> dict: 
-
-    S = load_embedding_artifact(saipe_path)
-    U = load_embedding_artifact(usps_path)
-    V = load_embedding_artifact(viirs_path)
-
-    if train_only: 
-        for A in (S, U, V): 
-            m = np.isin(A["sample_ids"], A["fit_train_fips"])
-            A["features"]       = A["features"][m]
-            A["labels"]         = A["labels"][m]
-            A["sample_ids"]     = A["sample_ids"][m]
-            A["source_indices"] = A["source_indices"][m]
-
-    common = [f for f in S["sample_ids"] if f in set(U["sample_ids"]) and 
-              f in set(V["sample_ids"])]
-    if not common: 
-        raise ValueError("no common fips across manifolds")
-
-    S_fips = align_on_fips(common, S["sample_ids"])
-    U_fips = align_on_fips(common, U["sample_ids"])
-    V_fips = align_on_fips(common, V["sample_ids"])
-    y      = S["labels"][S_fips]
-    if not (np.array_equal(y, U["labels"][U_fips]) and np.array_equal(y, V["labels"][V_fips])):
-        raise ValueError("label mismatch after FIPS alignment")
-
-    return {
-        "saipe": S["features"][S_fips], 
-        "usps":  U["features"][U_fips],
-        "viirs": V["features"][V_fips],
-        "labels": y,
-        "sample_ids": np.asarray(common, dtype="U5"), 
-        "source_indices": S["source_indices"][S_fips]
-    }
+    expert_paths: dict[str, str],
+    wide_path: str,
+    rank_path: str,
+    coords_path: Optional[str] = None, 
+    rank_key: str = "soft_rank"
+) -> WideDeepInputs: ...
