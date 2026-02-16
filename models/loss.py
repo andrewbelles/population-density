@@ -679,7 +679,8 @@ class FusionGaussianMixin:
 
         alpha_d = tau_d / tau 
         alpha_w = tau_w / tau 
-        mu      = alpha_d * mu_d + alpha_w * mu_w  
+
+        mu      = alpha_d.detach() * mu_d + alpha_w.detach() * mu_w 
         var     = (1.0 / tau).clamp_min(self.var_floor)
         log_var = torch.log(var) 
 

@@ -682,6 +682,9 @@ class PhaseStats:
     loss: float 
     ordinal: float 
     uncertainty: float 
+    ridge: float = 0.0 
+    deep_aux: float = 0.0 
+    wide_aux: float = 0.0 
 
 class HierarchicalFusionModel(BaseEstimator, RegressorMixin): 
 
@@ -791,6 +794,9 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         self.min_delta                = min_delta
         self.random_state             = random_state
 
+        self.aux_deep_weight = 0.25 
+        self.aux_wide_weight = 0.25 
+
         self.device     = self.resolve_device(compute_strategy.device)
 
     # -----------------------------------------------------
@@ -841,6 +847,21 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         tr_idx, va_idx = self.split_indices(y_rank)
 
+        self.expert_scalers_ = {}
+        for name, mat in experts.items(): 
+            sc = StandardScaler()
+            sc.fit(mat[tr_idx])
+            experts[name] = sc.transform(mat).astype(np.float32, copy=False)
+            self.expert_scalers_[name] = sc
+
+        if wide.ndim == 1: 
+            wide = wide.reshape(-1, 1)
+
+        self.wide_scaler_ = StandardScaler() 
+        self.wide_scaler_.fit(wide[tr_idx])
+
+        wide = self.wide_scaler_.transform(wide).astype(np.float32, copy=False)
+
         sw = np.ones(y_rank.shape[0], dtype=np.float32)
         if coords is None: 
             raise ValueError("coords are required for sample weight")
@@ -858,6 +879,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
             va_idx, shuffle=False, drop_last=False)
 
         self.build_model() 
+        self.initialize_wide(wide[tr_idx], y_rank[tr_idx], sw_tr)
 
         best_soft = self.run_phase(
             name="Soft-Labels",
@@ -1067,6 +1089,47 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
     # Instantiation 
     # -----------------------------------------------------
 
+    def initialize_wide(self, x_train, y_train, sw_train): 
+        x = np.asarray(x_train, dtype=np.float64)
+        y = np.asarray(y_train, dtype=np.float64).reshape(-1)
+        w = np.asarray(sw_train, dtype=np.float64).reshape(-1) 
+
+        n, d = x.shape 
+
+        xb = np.concatenate([np.ones((n, 1), dtype=np.float64), x], axis=1)
+
+        sqrt_w = np.sqrt(np.clip(w, 1e-8, None))[:, None]
+        xw = xb * sqrt_w
+        yw = y * sqrt_w[:, 0]
+
+        lam = float(self.wide_l2_alpha)
+        I = np.eye(d + 1, dtype=np.float64)
+        I[0, 0] = 0.0  # no bias penalty
+
+        A = xw.T @ xw + lam * I
+        b = xw.T @ yw
+        try:
+            theta = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            theta = np.linalg.pinv(A) @ b
+
+        bias = float(theta[0])
+        coef = theta[1:]
+
+        pred = x @ coef + bias
+        resid = y - pred
+        var = float(np.average(resid * resid, weights=np.clip(w, 1e-8, None)))
+        init_lv = float(np.log(max(var, self.var_floor)))
+        init_lv = float(np.clip(init_lv, self.log_var_min, self.log_var_max))
+
+        with torch.no_grad():
+            self.wide_.linear.weight.copy_(
+                torch.from_numpy(coef.reshape(1, -1)).to(self.device, dtype=torch.float32)
+            )
+            if self.wide_.linear.bias is not None:
+                self.wide_.linear.bias.fill_(bias)
+            self.wide_.log_var_param.fill_(init_lv)
+
     def build_model(self): 
         self.deep_ = DeepFusionMLP(
             expert_dims=self.expert_dims,
@@ -1170,6 +1233,17 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         experts = {k: np.asarray(v, dtype=np.float32) for k, v in X["experts"].items()}
         wide    = np.asarray(X["wide"], dtype=np.float32)
         n       = wide.shape[0]
+        if wide.ndim == 1: 
+            wide = wide.reshape(-1, 1)
+
+        if hasattr(self, "expert_scalers_"): 
+            experts = {
+                k: self.expert_scalers_[k].transform(v).astype(np.float32, copy=False)
+                for k, v in experts.items()
+            }
+
+        if hasattr(self, "wide_scaler_"):
+            wide = self.wide_scaler_.transform(wide).astype(np.float32, copy=False)
 
         experts_t = {k: torch.from_numpy(v).float() for k, v in experts.items()}
         wide_t    = torch.from_numpy(wide).float() 

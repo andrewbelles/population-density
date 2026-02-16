@@ -1137,6 +1137,9 @@ class ProbabilisticRankHead(nn.Module):
         self.mu_head = nn.Linear(d, 1)
         self.lv_head = nn.Linear(d, 1)
 
+        nn.init.zeros_(self.lv_head.weight)
+        nn.init.constant_(self.lv_head.bias, 5.0)
+
     def forward(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: 
         z  = self.trunk(h)
         mu = self.mu_head(z).squeeze(-1)
