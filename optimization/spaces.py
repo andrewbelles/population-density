@@ -305,6 +305,9 @@ def define_fusion_joint_space(trial: optuna.Trial):
     p.update(define_deep_moe_space(trial))
     p.update(define_wide_rreg_space(trial))
 
+    # Force high smoothing w/o fucking search up 
+    grad_ema = 1.0 - trial.suggest_float("grad_ema_one_minus", 1e-3, 2e-1, log=True)
+
     p.update({
         "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.8), 
         "mix_mult": trial.suggest_categorical("mix_mult", [2, 4]), 
@@ -313,6 +316,17 @@ def define_fusion_joint_space(trial: optuna.Trial):
         "lr_deep": trial.suggest_float("lr_deep", 1e-5, 5e-4, log=True),
         "lr_wide": trial.suggest_float("lr_wide", 1e-5, 5e-4, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True),
+
+        "grad_beta": trial.suggest_float("grad_beta", 0.2, 0.9),
+        "grad_ema": grad_ema,
+        "grad_min_scale": trial.suggest_float("grad_min_scale", 0.35, 0.9),
+        "grad_max_scale": trial.suggest_float("grad_max_scale", 1.5, 3.5),
+        "grad_warmup_epochs": trial.suggest_int("grad_warmup_epochs", 0, 40),
+
+        "aux_deep_weight": trial.suggest_float("aux_deep_weight", 3e-2, 5e-1, log=True),
+        "aux_wide_weight": trial.suggest_float("aux_wide_weight", 3e-2, 5e-1, log=True),
+        "aux_hard_scale": trial.suggest_float("aux_hard_scale", 0.1, 0.7),
+        "aux_decay_power": trial.suggest_float("aux_decay_power", 0.5, 3.0),
         
         "batch_size": trial.suggest_categorical("batch_size", [64, 128]),
 

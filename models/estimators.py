@@ -34,9 +34,13 @@ from sklearn.ensemble        import (
     RandomForestClassifier 
 )
 
-from sklearn.svm             import SVC
+from sklearn.svm             import (
+    SVC
+) 
 
-from sklearn.linear_model    import LogisticRegression 
+from sklearn.linear_model    import (
+    LogisticRegression 
+)
 
 from xgboost                 import (
     XGBClassifier, 
@@ -85,6 +89,8 @@ from preprocessing.loaders   import (
 from utils.helpers           import (
     bind 
 )
+
+log2 = float(np.log(2.0))
 
 # ---------------------------------------------------------
 # Regressors 
@@ -733,6 +739,18 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         kes_config: Optional[KESConfig] = None, 
 
+        grad_beta: float, 
+        grad_ema: float, 
+        grad_min_scale: float = 0.5, 
+        grad_max_scale: float = 2.0, 
+        grad_warmup_epochs: int = 10, 
+
+        aux_deep_weight: float, 
+        aux_wide_weight: float, 
+        aux_hard_scale: float, 
+        aux_decay_power: float, 
+        aux_warmup_epochs: int = 10, 
+
         soft_epochs: int = 300, 
         hard_epochs: int = 200, 
         batch_size: int = 256, 
@@ -783,6 +801,18 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         self.kes_config               = kes_config
 
+        self.grad_beta                = grad_beta 
+        self.grad_ema                 = grad_ema 
+        self.grad_min_scale           = grad_min_scale
+        self.grad_max_scale           = grad_max_scale
+        self.grad_warmup_epochs       = grad_warmup_epochs
+
+        self.aux_deep_weight          = aux_deep_weight
+        self.aux_wide_weight          = aux_wide_weight
+        self.aux_hard_scale           = aux_hard_scale
+        self.aux_decay_power          = aux_decay_power
+        self.aux_warmup_epochs        = aux_warmup_epochs
+
         self.soft_epochs              = soft_epochs
         self.hard_epochs              = hard_epochs
         self.batch_size               = batch_size 
@@ -793,9 +823,6 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         self.early_stopping_rounds    = early_stopping_rounds
         self.min_delta                = min_delta
         self.random_state             = random_state
-
-        self.aux_deep_weight = 0.25 
-        self.aux_wide_weight = 0.25 
 
         self.device     = self.resolve_device(compute_strategy.device)
 
@@ -847,9 +874,14 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         tr_idx, va_idx = self.split_indices(y_rank)
 
-        self.expert_scalers_ = {}
+        self.grad_step_     = 0 
+        self.deep_grad_ema_ = None 
+        self.wide_grad_ema_ = None  
+        self.phase_epoch_   = 0                         
+    
+        self.expert_scalers_ = {}   
         for name, mat in experts.items(): 
-            sc = StandardScaler()
+            sc = StandardScaler()   
             sc.fit(mat[tr_idx])
             experts[name] = sc.transform(mat).astype(np.float32, copy=False)
             self.expert_scalers_[name] = sc
@@ -933,8 +965,10 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         patience   = 0 
         t0         = time.perf_counter()
     
-        for ep in range(epochs): 
-            _ = self.train_epoch(train_loader, mixing=mixing)
+        for ep in range(epochs):
+            self.phase_epoch_ = ep 
+            aux_scale = self.aux_epoch_scale(ep=ep, epochs=epochs, mixing=mixing)
+            _ = self.train_epoch(train_loader, mixing=mixing, aux_scale=aux_scale)
             val   = self.validate(val_loader)  
             score = val.ordinal + val.uncertainty 
 
@@ -964,7 +998,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         return best_state 
 
-    def train_epoch(self, loader: DataLoader, *, mixing: bool) -> PhaseStats:
+    def train_epoch(self, loader: DataLoader, *, mixing: bool, aux_scale: float) -> PhaseStats:
         self.deep_.train() 
         self.wide_.train() 
 
@@ -978,11 +1012,16 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
             loss, ord_raw, unc_raw = self.process_batch(
                 experts_b, wide_b, yb, swb,
                 with_mixing=mixing,
+                with_aux=True, 
+                aux_scale=aux_scale 
             )
 
             self.opt_.zero_grad(set_to_none=True)
             loss.backward()
+            if self.grad_step_ >= self.grad_warmup_epochs: 
+                _ = self.balance_branch_grads()
             self.opt_.step() 
+            self.grad_step_ += 1
 
             bsz      = yb.size(0) 
             total   += loss.item() * bsz 
@@ -1010,6 +1049,8 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
                 loss, ord_raw, unc_raw = self.process_batch(
                     experts_b, wide_b, yb, None,
                     with_mixing=False,
+                    with_aux=False,
+                    aux_scale=0.0
                 )
 
                 bsz      = yb.size(0) 
@@ -1032,7 +1073,9 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         yb: torch.Tensor, 
         swb: torch.Tensor,
         *,
-        with_mixing: bool = False 
+        with_mixing: bool = False,
+        with_aux: bool = True, 
+        aux_scale: float = 0.0, 
     ) -> tuple[torch.Tensor, float, float]: 
 
         if with_mixing: 
@@ -1079,6 +1122,33 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         comp  = self.mix_loss_fn_(**context) if with_mixing else self.loss_fn_(**context)
         ridge = self.ridge_scale * self.wide_.ridge_penalty()
         total = comp.total + ridge
+
+        if with_aux and aux_scale > 0.0: 
+            if self.aux_deep_weight > 0.0: 
+                deep_context = dict(context)
+                lv_d = deep_out["log_var_deep"] + log2 
+                deep_context.update({
+                    "mu_deep": deep_out["mu_deep"],
+                    "log_var_deep": lv_d,
+                    "mu_wide": deep_out["mu_deep"],
+                    "log_var_wide": lv_d,
+                })
+                deep_comp = (self.mix_loss_fn_(**deep_context) if with_mixing else 
+                             self.loss_fn_(**deep_context))
+                total     = total + (aux_scale * self.aux_deep_weight) * deep_comp.total
+
+            if self.aux_wide_weight > 0.0: 
+                wide_context = dict(context)
+                lv_w = wide_out["log_var_wide"] + log2 
+                wide_context.update({
+                    "mu_deep": wide_out["mu_wide"],
+                    "log_var_deep": lv_w,
+                    "mu_wide": wide_out["mu_wide"],
+                    "log_var_wide": lv_w,
+                })
+                wide_comp = (self.mix_loss_fn_(**wide_context) if with_mixing else 
+                             self.loss_fn_(**wide_context))
+                total     = total + (aux_scale * self.aux_wide_weight) * wide_comp.total
 
         ord_raw = float(comp.raw["ordinal"].detach().item())
         unc_raw = float(comp.raw["uncertainty"].detach().item())
@@ -1298,6 +1368,67 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         if device is not None: 
             return torch.device(device)
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def grad_norm(self, module: nn.Module) -> float: 
+        sq = 0.0 
+        for p in module.parameters(): 
+            if p.grad is None: 
+                continue 
+            g = p.grad.detach() 
+            sq += float(torch.sum(g * g).item())
+        return float(np.sqrt(max(sq, 0.0)))
+
+    def scale_grads(self, module: nn.Module, scale: float): 
+        s = float(scale) 
+        if s == 1.0: 
+            return 
+        for p in module.parameters(): 
+            if p.grad is not None: 
+                p.grad.mul_(s)
+
+    def balance_branch_grads(self) -> dict[str, float]: 
+        g_deep = self.grad_norm(self.deep_)
+        g_wide = self.grad_norm(self.wide_)
+
+        if g_deep <= 0.0 or g_wide <= 0.0: 
+            return {"g_deep": g_deep, "g_wide": g_wide, "s_deep": 1.0, "s_wide": 1.0}
+
+        if self.deep_grad_ema_ is None or self.wide_grad_ema_ is None: 
+            self.deep_grad_ema_ = g_deep 
+            self.wide_grad_ema_ = g_wide 
+
+        m = float(self.grad_ema)
+        self.deep_grad_ema_ = m * self.deep_grad_ema_ + (1.0 - m) * g_deep
+        self.wide_grad_ema_ = m * self.wide_grad_ema_ + (1.0 - m) * g_wide
+
+        target = float(np.sqrt(max(self.deep_grad_ema_ * self.wide_grad_ema_, 1e-9)))
+        beta   = float(self.grad_beta)
+
+        s_deep = (target / max(self.deep_grad_ema_, 1e-9))**beta 
+        s_wide = (target / max(self.wide_grad_ema_, 1e-9))**beta 
+
+        s_deep = float(np.clip(s_deep, self.grad_min_scale, self.grad_max_scale))
+        s_wide = float(np.clip(s_wide, self.grad_min_scale, self.grad_max_scale))
+
+        self.scale_grads(self.deep_, s_deep)
+        self.scale_grads(self.wide_, s_wide)
+
+        return {"g_deep": g_deep, "g_wide": g_wide, "s_deep": s_deep, "s_wide": s_wide}
+
+    def aux_epoch_scale(self, *, ep: int, epochs: int, mixing: bool) -> float: 
+        if self.aux_deep_weight <= 0.0 and self.aux_wide_weight <= 0.0: 
+            return 0.0 
+        if ep < self.aux_warmup_epochs: 
+            return 0.0 
+
+        if epochs <= 1: 
+            progress = 0.0 
+        else: 
+            progress = ep / float(epochs - 1)
+
+        decay = (1.0 - progress) ** max(self.aux_decay_power, 0.0)
+        phase = 1.0 if mixing else self.aux_hard_scale 
+        return float(max(0.0, phase * decay))
 
     # -----------------------------------------------------
     # Predict Helpers 

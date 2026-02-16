@@ -26,7 +26,8 @@ from torch.utils.data import Dataset
 from utils.helpers import (
     bind,
     _mat_str_vector,
-    align_on_fips
+    align_on_fips,
+    project_path
 )
 
 from preprocessing.tensors import TileLoader 
@@ -1089,14 +1090,52 @@ def canon_fips_vec(x) -> NDArray[np.str_]:
         out.append(s)
     return np.asarray(out, dtype="U5")
 
+def coords_by_fips(fips: NDArray[np.str_]) -> tuple[NDArray[np.float64], NDArray[np.bool_]]: 
+    path = Path(project_path("data", "datasets", "saipe_population.mat")) # fallback coords path
+    n    = fips.shape[0]
+    if not path.exists(): 
+        return np.zeros((fips.shape[0], 2), dtype=np.float64), np.ones(n, dtype=bool)
+
+    ref = loadmat(str(path))
+    if "coords" not in ref or "fips_codes" not in ref: 
+        return np.zeros((fips.shape[0], 2), dtype=np.float64), np.ones(n, dtype=bool)
+
+    ref_coords = np.asarray(ref["coords"], dtype=np.float64)
+    ref_fips   = _mat_str_vector(ref["fips_codes"]).astype("U5")
+
+    if ref_fips.shape[0] != ref_coords.shape[0]: 
+        return np.zeros((fips.shape[0], 2), dtype=np.float64), np.ones(n, dtype=bool)
+
+    idx  = {fid: i for i, fid in enumerate(ref_fips)}
+    keep = np.array([fid in idx for fid in fips], dtype=bool)
+
+    if not keep.any(): 
+        return np.zeros((0, 2), dtype=np.float64), keep 
+
+    coords = np.asarray([ref_coords[idx[fid]] for fid in fips[keep]], dtype=np.float64)
+    return coords, keep 
+
+def load_wide_dataset(
+    filepath: str, 
+): 
+    ds   = load_compact_dataset(filepath)
+    fips = canon_fips_vec(np.asarray(ds["sample_ids"]).astype("U5")) 
+    coords, keep = coords_by_fips(fips)
+
+    ds["features"]   = np.asarray(ds["features"])[keep]
+    ds["labels"]     = np.asarray(ds["labels"])[keep]
+    ds["sample_ids"] = fips[keep]
+    ds["coords"]     = coords 
+    return ds
+
 def load_wide_deep_inputs(
     *,
     expert_paths: dict[str, str],
     wide_path: str,
 ) -> WideDeepInputs: 
-    wide_ds     = load_compact_dataset(wide_path)
-    wide_ids    = canon_fips_vec(wide_ds["sample_ids"])
-    wide_x      = np.asarray(wide_ds["features"], dtype=np.float32)
+    wide_ds  = load_wide_dataset(wide_path)
+    wide_ids = wide_ds["sample_ids"] 
+    wide_x   = np.asarray(wide_ds["features"], dtype=np.float32)
     if wide_x.ndim != 2: 
         raise ValueError(f"wide features must be 2d, got {wide_x.shape}")
 
