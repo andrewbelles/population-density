@@ -1,6 +1,6 @@
 #!/usr/bin/env python3 
 # 
-# population_labels.py  Andrew Belles  Feb 9th, 2026 
+# labels.py  Andrew Belles  Feb 9th, 2026 
 # 
 # Label set of log population discretely binned in K (~8) discrete classes for ordinal regression 
 # 
@@ -26,15 +26,13 @@ class BinConfig:
     min_samples_per_bin: int = 40 
     min_k: int = 5 
     max_k: int = 32
-    edge_margin: float = 0.5 
+    edge_margin: float = 0.05 
 
 class PopulationLabels: 
 
     '''
-    Label set of log-population binned into discrete K classes for ordinal regression. 
-
-    Uses Pandas qcut to ensure classes have enough positive samples for contrastive learning to be 
-    effective. 
+    Label set of log-population binned into discrete K classes for ordinal regression via 
+    log-uniform spacing. 
     ''' 
 
     # File to year mapping 
@@ -203,20 +201,28 @@ class PopulationLabels:
 
     @staticmethod 
     def fit_edges(log_pop: np.ndarray, K: int, edge_margin: float = 0.0) -> np.ndarray: 
-        q     = np.linspace(0.0, 1.0, K + 1)
-        edges = np.unique(np.quantile(log_pop, q))
-        if edges.size < 3: 
-            raise ValueError("degenerate quantile edges, reduce K or inspect distribution")
-        
-        if edge_margin > 0.0: 
-            e  = edges.copy() 
-            lo = max(e[1] - e[0], 1e-9)
-            hi = max(e[-1] - e[-2], 1e-9)
-            e[0]  = e[0] - edge_margin * lo 
-            e[-1] = e[-1] + edge_margin * hi 
-            edges = e
+        vals = np.asarray(log_pop, dtype=np.float64).reshape(-1)
+        vals = vals[np.isfinite(vals)]
+        if vals.size < 2: 
+            raise ValueError("fit_edges requires at least 2 finite samples")
+        if K < 2: 
+            raise ValueError(f"K must be >= 2, got {K}")
 
-        return edges 
+        lo   = float(vals.min())
+        hi   = float(vals.max())
+        span = max(hi - lo, 1e-9)
+
+        if hi <= lo: 
+            hi = lo + span 
+
+        if edge_margin > 0.0: 
+            lo -= edge_margin * span 
+            hi += edge_margin * span 
+
+        edges = np.linspace(lo, hi, K + 1, dtype=np.float64)
+        if np.any(np.diff(edges) <= 0): 
+            raise ValueError("degenerate log-uniform edges.")
+        return edges
 
     @staticmethod
     def normalize_fips(values: Iterable[str]) -> list[str]: 
