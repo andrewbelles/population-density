@@ -6,6 +6,7 @@
 # model architecture (wide & deep)
 # 
 
+from typing import Optional
 import torch, time, copy, sys
 
 import torch.nn as nn 
@@ -28,6 +29,10 @@ from sklearn.cluster import KMeans
 
 from sklearn.neighbors import NearestNeighbors
 
+from models.loss import (
+    build_ssfe_loss
+)
+
 from torch.utils.data import (
     DataLoader,
     TensorDataset, 
@@ -35,6 +40,7 @@ from torch.utils.data import (
 )
 
 from models.networks import (
+    GatedAttentionPooling,
     HyperGATStack, 
     LightweightBackbone,
     ResidualMLP,
@@ -147,6 +153,7 @@ class SSFEBase(BaseEstimator, ABC):
         self.model_          = nn.ModuleDict() 
         self.opt_            = None 
         self.scheduler_      = None 
+        self.loss_           = None 
         self.best_val_score_ = np.inf 
         self.is_fitted_      = False 
 
@@ -212,9 +219,11 @@ class SSFEBase(BaseEstimator, ABC):
         self.is_fitted_ = True 
         return self 
 
-    def extract(self, X, *, view: str = "structural", level: str = "bag") -> NDArray: 
+    def extract(self, X, *, view: str = "concat", level: Optional[str] = None) -> NDArray: 
         if not self.is_fitted_: 
             raise ValueError("Call fit() before extract().")
+        if level not in (None, "county"): 
+            raise ValueError("extract only supports county-level output (level=county).")
 
         loader = self.ensure_loader(X, shuffle=False)
         outs: list[NDArray] = []
@@ -222,25 +231,23 @@ class SSFEBase(BaseEstimator, ABC):
         self.model_.eval() 
         with torch.no_grad(): 
             for batch in loader: 
+
                 prep = self.forward_preprocess(batch)
-                sem_node, sem_bag = self.forward_semantic(prep)
-                st_node, st_bag   = self.forward_structural(prep)
+                _, sem_county = self.forward_semantic(prep)
+                _, st_county  = self.forward_structural(prep)
 
                 if view == "semantic": 
-                    x = sem_bag if level == "bag" else sem_node 
+                    x = sem_county  
                 elif view == "structural": 
-                    x = st_bag  if level == "bag" else st_node 
+                    x = st_county  
                 elif view == "concat": 
-                    if level == "bag": 
-                        x = torch.cat([sem_bag, st_bag], dim=1)
-                    else: 
-                        x = torch.cat([sem_node, st_node], dim=1)
+                    x = torch.cat([sem_county, st_county], dim=1)
                 else: 
                     raise ValueError(f"unknown view={view}")
 
                 outs.append(x.detach().cpu().numpy())
 
-        return np.vstack(outs)
+        return np.vstack(outs) if outs else np.empty((0, 0), dtype=np.float32)
 
     # -----------------------------------------------------
     # Setup   
@@ -283,6 +290,18 @@ class SSFEBase(BaseEstimator, ABC):
         d_sem_bag  = sem_bag.shape[1]
         d_st_bag   = st_bag.shape[1]
 
+        if hasattr(prep, "tile_batch_idx"): 
+            self.model_["sem_county_pool"] = GatedAttentionPooling(
+                in_dim=d_sem_bag,
+                attn_dim=max(32, d_sem_bag // 2), 
+                attn_dropout=getattr(self, "attn_dropout", 0.0)  
+            ).to(self.device)
+            self.model_["st_county_pool"] = GatedAttentionPooling(
+                in_dim=d_st_bag,
+                attn_dim=max(32, d_st_bag // 2), 
+                attn_dropout=getattr(self, "attn_dropout", 0.0)  
+            ).to(self.device)
+
         self.model_["sem_proj"] = ProjectionHead(d_sem_bag, self.proj_dim).to(self.device)
         self.model_["st_proj"]  = ProjectionHead(d_st_bag, self.proj_dim).to(self.device)
 
@@ -292,6 +311,18 @@ class SSFEBase(BaseEstimator, ABC):
 
         self.model_["sem_recon"] = nn.Linear(d_sem_node, d_target).to(self.device)
         self.model_["st_recon"]  = nn.Linear(d_st_node, d_target).to(self.device)
+
+        self.loss_ = build_ssfe_loss(
+            sem_proj=self.model_["sem_proj"],
+            st_proj=self.model_["st_proj"],
+            proto=self.model_["proto"],
+            sem_recon=self.model_["sem_recon"],
+            st_recon=self.model_["st_recon"], 
+            contrast_temperature=self.contrast_temperature,
+            cluster_temperature=self.cluster_temperature,
+            contrast_active_eps=1e-6, 
+            sinkhorn_epsilon=0.05 
+        )
 
         self.compile_modules()
 
@@ -304,6 +335,38 @@ class SSFEBase(BaseEstimator, ABC):
         self.scheduler_ = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.opt_, T_max=max(1, self.epochs)
         )
+
+    def resolve_contrast_node_batch_idx(
+        self,
+        prep: SSFEBatch,
+        *,
+        bag_count: int 
+    ) -> torch.Tensor: 
+        node_to_tile = prep.batch_idx.to(
+            self.device, dtype=torch.long, non_blocking=True
+        ).view(-1)
+
+        tile_to_county = getattr(prep, "tile_batch_idx", None)
+        if tile_to_county is None:
+            return node_to_tile
+
+        tile_to_county = tile_to_county.to(
+            self.device, dtype=torch.long, non_blocking=True
+        ).view(-1)
+
+        if node_to_tile.numel() == 0:
+            return node_to_tile
+        if int(node_to_tile.max().item()) >= tile_to_county.numel():
+            raise ValueError("prep.batch_idx contains tile index out of range")
+
+        _, tile_to_county_inv = torch.unique(
+            tile_to_county, sorted=True, return_inverse=True
+        )
+        node_to_county = tile_to_county_inv[node_to_tile]
+
+        if node_to_county.numel() and (int(node_to_county.max().item()) + 1 != int(bag_count)):
+            raise ValueError("node->county index mismatch with bag embedding count")
+        return node_to_county
 
     # -----------------------------------------------------
     # Training    
@@ -413,116 +476,39 @@ class SSFEBase(BaseEstimator, ABC):
     # -----------------------------------------------------
 
     def process_batch(self, batch): 
+        if self.loss_ is None: 
+            raise RuntimeError("loss_ not initializaed. Call init_fit() first.")
+
         with self.amp_ctx(): 
             prep = self.forward_preprocess(batch)
 
             sem_node, sem_bag = self.forward_semantic(prep)
             st_node, st_bag   = self.forward_structural(prep)
-
-            l_con = self.contrastive_loss(
-                sem_bag, st_bag, 
-                stats_raw=prep.stats_raw, 
-                node_batch_idx=prep.batch_idx
+            node_batch_idx    = self.resolve_contrast_node_batch_idx(
+                prep, bag_count=sem_bag.shape[0]
             )
-            l_kl  = self.swapped_prediction_loss(sem_bag, st_bag)
-            l_rec = self.two_view_reconstruction_loss(prep, sem_node, st_node)
-            loss  = (self.w_contrast * l_con + self.w_cluster * l_kl + self.w_recon * l_rec)
+
+            pack = self.loss_(
+                sem_bag=sem_bag, 
+                st_bag=st_bag,
+                sem_node=sem_node,
+                st_node=st_node,
+                prep=prep,
+                stats_raw=prep.stats_raw,
+                node_batch_idx=node_batch_idx,
+                w_contrast=self.w_contrast,
+                w_cluster=self.w_cluster,
+                w_recon=self.w_recon
+            )
+
+            loss  = pack.total 
+            l_con = pack.raw["contrast"]
+            l_kl  = pack.raw["cluster"]
+            l_rec = pack.raw["recon"]
+
             bsz   = sem_bag.shape[0]
         return loss, l_con, l_kl, l_rec, bsz 
 
-    def contrastive_loss(
-        self,
-        sem_bag: torch.Tensor, 
-        st_bag: torch.Tensor,
-        stats_raw: torch.Tensor, 
-        node_batch_idx: torch.Tensor, 
-        active_eps: float = 1e-6
-    ) -> torch.Tensor:
-        z_sem  = F.normalize(self.model_["sem_proj"](sem_bag), dim=1) 
-        z_st   = F.normalize(self.model_["st_proj"](st_bag), dim=1)
-
-        logits = torch.matmul(z_sem, z_st.T) / self.contrast_temperature 
-        labels = torch.arange(z_sem.shape[0], device=z_sem.device)
-
-        loss_a = F.cross_entropy(logits, labels, reduction="none")
-        loss_b = F.cross_entropy(logits.T, labels, reduction="none")
-
-        patch_active = (stats_raw.abs().amax(dim=1) > active_eps).to(loss_a.dtype) 
-
-        if patch_active.numel() == loss_a.numel(): 
-            weights = patch_active 
-
-        elif node_batch_idx.numel() == patch_active.numel(): 
-            node_batch_idx = node_batch_idx.to(device=loss_a.device, dtype=torch.long)
-
-            active_sum  = loss_a.new_zeros((loss_a.numel(),))
-            patch_count = loss_a.new_zeros((loss_a.numel(),))
-            active_sum.index_add_(0, node_batch_idx, patch_active)
-            patch_count.index_add_(0, node_batch_idx, torch.ones_like(patch_active))
-            weights     = active_sum / patch_count.clamp_min(1.0)
-
-        else: 
-            raise ValueError 
-
-        denom  = weights.sum().clamp_min(1.0)
-
-        loss_a = (loss_a * weights).sum() / denom 
-        loss_b = (loss_b * weights).sum() / denom 
-
-        return 0.5 * (loss_a + loss_b) 
-
-    def swapped_prediction_loss(
-        self,
-        sem_bag: torch.Tensor, 
-        st_bag: torch.Tensor,
-        *,
-        epsilon=0.05,
-    ) -> torch.Tensor:
-        tau = self.cluster_temperature
-
-        z_sem = F.normalize(self.model_["sem_proj"](sem_bag), dim=1) 
-        z_st  = F.normalize(self.model_["st_proj"](st_bag), dim=1)
-
-        s_sem = self.model_["proto"](z_sem) 
-        s_st  = self.model_["proto"](z_st)
-
-        with torch.no_grad(): 
-            q_sem = self.sinkhorn_assign(s_sem, epsilon=epsilon)
-            q_st  = self.sinkhorn_assign(s_st, epsilon=epsilon)
-
-        l_sem = -(q_st * F.log_softmax(s_sem / tau, dim=1)).sum(dim=1).mean() 
-        l_st  = -(q_sem * F.log_softmax(s_st / tau, dim=1)).sum(dim=1).mean() 
-        return 0.5 * (l_sem + l_st)
-
-    def two_view_reconstruction_loss(
-        self,
-        prep: SSFEBatch, 
-        sem_node: torch.Tensor,
-        st_node: torch.Tensor, 
-    ) -> torch.Tensor: 
-        target  = prep.repr_target 
-
-        rec_sem = self.model_["sem_recon"](sem_node)
-
-        rec_st  = self.model_["st_recon"](st_node)
-        return 0.5 * (F.mse_loss(rec_sem, target) + F.mse_loss(rec_st, target))
-
-    @staticmethod
-    def sinkhorn_assign(scores, epsilon=0.05):  
-        scores = scores - scores.max(dim=1, keepdim=True).values 
-        Q = torch.exp(scores / epsilon).t() 
-        K, B = Q.shape 
-        Q = Q / Q.sum().clamp_min(1e-9)
-
-        # single pass 
-        Q = Q / Q.sum(dim=1, keepdim=True).clamp_min(1e-9) 
-        Q = Q / K 
-        Q = Q / Q.sum(dim=0, keepdim=True).clamp_min(1e-9) 
-        Q = Q / B  
-
-        Q = Q / Q.sum(dim=0, keepdim=True).clamp_min(1e-9)
-        return Q.t().detach()
-    
     # -----------------------------------------------------
     # Loader Utils    
     # -----------------------------------------------------
@@ -1039,16 +1025,34 @@ class SpatialSSFE(SSFEBase):
     def forward_semantic(self, prep: SSFEBatch) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(prep, SpatialPatchBatch):
             raise TypeError("SpatialSSFE expects SpatialPatchBatch in semantic path")
-        return self.model_["semantic"](
+        sem_node, sem_tile = self.model_["semantic"](
             prep.semantic_input,
             prep.batch_idx,
             batch_size=prep.n_tiles
         )
 
+        if "sem_county_pool" not in self.model_: 
+            return sem_node, sem_tile
+
+        tidx = prep.tile_batch_idx.to(self.device, dtype=torch.long).view(-1)
+        _, inv = torch.unique(tidx, sorted=True, return_inverse=True)
+        n_county = int(inv.max().item()) + 1 if inv.numel() else 0 
+        sem_county = self.model_["sem_county_pool"](sem_tile, inv, n_county)
+        return sem_node, sem_county 
+
     def forward_structural(self, prep: SSFEBatch) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(prep, SpatialPatchBatch):
             raise TypeError("SpatialSSFE expects SpatialPatchBatch in structural path")
-        return self.model_["structural"](prep)
+        st_node, st_tile = self.model_["structural"](prep)
+
+        if "st_county_pool" not in self.model_: 
+            return st_node, st_tile
+
+        tidx = prep.tile_batch_idx.to(self.device, dtype=torch.long).view(-1)
+        _, inv = torch.unique(tidx, sorted=True, return_inverse=True)
+        n_county = int(inv.max().item()) + 1 if inv.numel() else 0 
+        st_county = self.model_["st_county_pool"](st_tile, inv, n_county)
+        return st_node, st_county 
 
     def anchor_features_from_batch(self, batch) -> np.ndarray: 
         if not isinstance(batch, (list, tuple)) or len(batch) < 4:

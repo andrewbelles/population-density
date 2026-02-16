@@ -384,14 +384,22 @@ class MixedLossAdapter(nn.Module):
         p = to_batch_tensor(context["mix_lambda"], n=n, device=device, dtype=dtype)
         q = 1.0 - p 
 
-        base_sw = context.get("sample_weight", None)
-        if base_sw is not None: 
-            base_sw = to_batch_tensor(base_sw, n=n, device=device, dtype=dtype)
-            sw_a    = base_sw * p 
-            sw_b    = base_sw * q 
+        has_a      = "sample_weight_a" in context 
+        has_b      = "sample_weight_b" in context 
+
+        if has_a != has_b: 
+            raise KeyError("mixed loss required sample weights for both pairs")
+
+        if has_a: 
+            sw_a_base = to_batch_tensor(context["sample_weight_a"], n=n, 
+                                        device=device, dtype=dtype)
+            sw_b_base = to_batch_tensor(context["sample_weight_b"], n=n, 
+                                        device=device, dtype=dtype)
+            sw_a = sw_a_base * p 
+            sw_b = sw_b_base * q 
         else: 
-            sw_a    = p 
-            sw_b    = q 
+            sw_a = p 
+            sw_b = q 
 
         context_a = dict(context)
         context_b = dict(context)
