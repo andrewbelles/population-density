@@ -6,19 +6,21 @@
 # 
 # 
 
-import argparse, io 
+import argparse, io, torch 
 
 import numpy as np
+
 from numpy.typing import NDArray
+
+from typing import Literal 
+
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
+
+from torch.utils.data import TensorDataset
 
 from analysis.cross_validation import (
     CVConfig,
     ScaledEstimator
-)
-
-from models.estimators         import (
-    TFTabular, 
 )
 
 from scipy.io                  import (
@@ -34,17 +36,18 @@ from optimization.engine       import (
 
 from optimization.evaluators   import (
     TabularEvaluator,
-    StandardEvaluator
+    StandardEvaluator,
+    HierarchicalFusionEvaluator
 )
 
 from optimization.spaces       import (
-    define_tabular_space
+    define_tabular_space,
+    define_fusion_joint_space
 )
 
 from testbench.utils.data      import (
     BASE, 
     load_spatial_dataset,
-    save_embedding_artifact 
 ) 
 
 from testbench.utils.etc       import (
@@ -63,32 +66,35 @@ from testbench.utils.metrics   import (
 from testbench.utils.config    import (
     load_model_params,
     make_residual_tabular,
-    make_spatial_gat,
     normalize_params,
     normalize_spatial_params,
     load_node_anchors
 )
 
-from preprocessing.population_labels import PopulationLabels, build_label_map
+from models.ssfe import TabularSSFE, SpatialSSFE 
+
+from models.estimators import HierarchicalFusionModel
+
+from preprocessing.labels import PopulationLabels, build_label_map
 
 from testbench.utils.paths     import (
     CONFIG_PATH
 )
 
-from preprocessing.loaders     import load_compact_dataset 
+from preprocessing.loaders     import load_compact_dataset, load_wide_deep_inputs 
 
 from utils.resources           import ComputeStrategy
 
-from utils.helpers             import project_path
+from utils.helpers             import project_path, save_model_config
 
 strategy = ComputeStrategy.from_env() 
 
 CENSUS_DIR     = project_path("data", "census")
-_, TRAIN_EDGES = build_label_map(2013, census_dir=CENSUS_DIR)
 
-VIIRS_KEY = "Manifold/VIIRS" 
-SAIPE_KEY = "Manifold/SAIPE"
-USPS_KEY  = "Manifold/USPS"
+VIIRS_KEY  = "Manifold/VIIRS" 
+SAIPE_KEY  = "Manifold/SAIPE"
+USPS_KEY   = "Manifold/USPS"
+FUSION_KEY = "Fusion/2013"
 
 VIIRS_ARTIFACT = project_path("data", "datasets", "viirs_2013_artifact.mat")
 SAIPE_ARTIFACT = project_path("data", "datasets", "saipe_2013_artifact.mat")
@@ -119,33 +125,6 @@ SCALAR_SWEEP_DATASETS = {
     }
 }
 
-def _true_pop_for_fips(fips: np.ndarray, year: int) -> np.ndarray: 
-    pop_table = PopulationLabels(year=year, census_dir=CENSUS_DIR).load_population_table()
-    idx = [str(x).strip().zfill(5) for x in np.asarray(fips).reshape(-1)]
-    return pop_table.reindex(idx)["pop"].to_numpy(np.float64)
-
-def _save_probs_mat(
-    out_path: str, 
-    probs: NDArray,
-    labels: NDArray,
-    fips: NDArray,
-    class_labels: NDArray,
-    model_name: str 
-): 
-    probs_stack = probs[:, None, :]
-    if class_labels.size: 
-        feature_names = np.array([f"{model_name}_p{c}" for c in class_labels], dtype="U64") 
-    else: 
-        feature_names = np.array([f"{model_name}_pred"], dtype="U64")
-
-    savemat(out_path, {
-        "features": probs, 
-        "probs": probs_stack,
-        "labels": labels, 
-        "feature_names": feature_names, 
-        "sample_ids": fips 
-    })
-
 def _resolve_dataset(spec: str): 
     if spec in BASE: 
         base = BASE[spec]
@@ -164,6 +143,48 @@ def _load_dataset(path, loader):
     if coords is not None: 
         coords = np.asarray(coords, dtype=np.float64)
     return X, y, coords 
+
+def _edges_for_year(year: int) -> NDArray:
+    return np.asarray(
+        PopulationLabels(year=year, census_dir=CENSUS_DIR).fit().edges_, dtype=np.float64
+    )
+
+def _canon_fips(fips: NDArray) -> NDArray:
+    return np.asarray([str(x).strip().zfill(5) for x in np.asarray(fips).reshape(-1)], dtype="U5")
+
+def _soft_rank_for_fips(fips: NDArray, year: int) -> NDArray:
+    f   = _canon_fips(fips)
+    pl  = PopulationLabels(year=year, census_dir=CENSUS_DIR).fit(feature_fips=f)
+    srm = pl.to_soft_rank_map(f)
+    return np.asarray([srm.get(fid, np.nan) for fid in f], dtype=np.float32)
+
+def _save_embedding_mat(
+    out_path: str, 
+    *,
+    features: NDArray,
+    labels: NDArray,
+    fips: NDArray,
+    soft_rank: NDArray,
+    feature_prefix: str,
+    year: int
+): 
+    X  = np.asarray(features, dtype=np.float32)
+    y  = np.asarray(labels).reshape(-1, 1)
+    f  = _canon_fips(fips)
+    sr = np.asarray(soft_rank, dtype=np.float32).reshape(-1, 1)
+    names = np.asarray([f"{feature_prefix}_emb_{i}" for i in range(X.shape[1])], dtype="U64")
+
+    if not (X.shape[0] == y.shape[0] == f.shape[0] == sr.shape[0]): 
+        raise ValueError("features/labels/fips/soft_rank size mismatch")
+
+    savemat(out_path, {
+        "features": X, 
+        "labels": y,
+        "soft_rank": sr, 
+        "fips_codes": f,
+        "feature_names": names, 
+        "year": np.asarray([int(year)], dtype=np.int64),
+    })
 
 def _optimize_on_train(
     train_path, 
@@ -219,261 +240,88 @@ def _fit_eval(train_path, train_loader, test_path, test_loader, model_name, para
     metrics      = metrics_from_probs(y_te, probs, class_labels)
     return metrics
 
-def _tabular_fit_extract(
+def _ssfe_fit_extract(
     *,
-    train_path: str, 
-    test_path: str, 
-    out_path: str,
+    source: str, 
+    out_path: str, 
     model_key: str, 
+    modality: Literal["tabular", "spatial"], 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
-    class_metrics: bool = False, 
-    save_proba: bool = False, 
-    feature_prefix: str | None = None,
-    proba_key: str | None = None,
-    artifact_path: str | None = None
-):
-    train_path, train_loader = _resolve_dataset(train_path)
-    test_path, test_loader   = _resolve_dataset(test_path)
-
-    X_tr, y_tr, _ = _load_dataset(train_path, train_loader)
-    X_te, y_te, _ = _load_dataset(test_path, test_loader)
-
-    train_data = train_loader(train_path)
-    test_data  = test_loader(test_path)
-    train_fips = np.asarray(train_data["sample_ids"]).astype("U5")
-    test_fips  = np.asarray(test_data["sample_ids"]).astype("U5")
-
-    scaler = StandardScaler()
-    X_tr_s = scaler.fit_transform(X_tr)
-    X_te_s = scaler.transform(X_te)
-
-    params = load_model_params(config_path, model_key)
-
-    model = make_residual_tabular()(
-        in_dim=X_tr_s.shape[1],
-        **params,
-        random_state=random_state,
-        compute_strategy=strategy
-    )
-
-    model.fit(X_tr_s, y_tr)
-    train_emb = model.extract(X_tr_s)
-    test_emb = model.extract(X_te_s)
-    loss = model.loss(X_te_s, y_te)
-
-    probs = model.predict_proba(X_te_s)
-
-    if save_proba and proba_key: 
-        proba_path = EXPERT_PROBA[proba_key] 
-        class_labels = np.sort(np.unique(y_tr))
-        fips = np.asarray(load_compact_dataset(test_path)["sample_ids"])
-        _save_probs_mat(
-            proba_path,
-            probs=probs,
-            labels=y_te,
-            fips=fips,
-            class_labels=class_labels,
-            model_name=proba_key
-        )
-
-    metrics = None 
-    if class_metrics: 
-        class_labels = np.sort(np.unique(y_tr))
-        metrics      = metrics_from_probs(y_te, probs, class_labels)
-        true_pop     = _true_pop_for_fips(test_fips, 2019)
-        valid        = np.isfinite(true_pop) & (true_pop > 0)
-        
-        if valid.any(): 
-            reg = mape_wape_from_probs(
-                probs=np.asarray(probs)[valid],
-                true_pop=true_pop[valid],
-                edges=TRAIN_EDGES
-            )
-            metrics.update(reg)
-        else: 
-            metrics.update({"mape": np.nan, "wape": np.nan})
-
-
-    if feature_prefix is None: 
-        feature_prefix = model_key.split("/")[-1].lower() 
-    feature_names = np.array([f"{feature_prefix}_emb_{i}" for i in range(test_emb.shape[1])],
-                             dtype="U64")
-
-    savemat(out_path, {
-        "features": test_emb, 
-        "labels": y_te.reshape(-1, 1),
-        "fips_codes": np.asarray(load_compact_dataset(test_path)["sample_ids"]),
-        "feature_names": feature_names,
-        "n_counties": np.array([len(y_te)], dtype=np.int64)
-    })
-
-    if artifact_path is not None: 
-        save_embedding_artifact(
-            out_path=artifact_path,
-            features=train_emb,
-            labels=y_tr,
-            fips_codes=train_fips,
-            model_key=model_key,
-            fit_train_indices=np.arange(train_fips.shape[0], dtype=np.int64),
-            fit_train_fips=train_fips,
-            source_indices=np.arange(train_fips.shape[0], dtype=np.int64),
-            source_year=2013,
-            fit_year=2013,
-            source_split="train"
-        )
-
-    header = ["Name", "Val Loss"]
-    row    = {
-        "Name": f"{model_key}",
-        "Val Loss": format_metric(loss),
-    }
-
-    if metrics is not None: 
-        header += ["MAPE", "WAPE", "ECE", "MAE"] 
-        row.update(_row(row["Name"], metrics))
-
-    return {"header": header, "row": row}
-    
-
-def _spatial_fit_extract(
-    *,
-    train_root: str, 
-    test_root: str, 
-    out_path: str,
-    model_key: str, 
-    tile_shape: tuple[int, int, int] = (1, 256, 256), 
-    node_anchors: list[list[float]] | None = None, 
-    anchor_stats: list[float] | None = None, 
-    sample_frac: float | None = None, 
-    random_state: int = 0, 
-    config_path: str = CONFIG_PATH, 
-    class_metrics: bool = False, 
-    save_proba: bool = False, 
-    proba_key: str | None = None, 
-    artifact_path: str | None = None, 
+    tile_shape: tuple[int, int, int] = (3, 256, 256), 
+    year: int = 2013, 
     **_
 ): 
-    train_ds, train_y, train_fips, train_collate, in_ch = load_spatial_dataset(
-        train_root, 
-        tile_shape=tile_shape,
-        sample_frac=sample_frac,
-        random_state=random_state 
-    )
+    if modality == "tabular": 
+        src_path, src_loader = _resolve_dataset(source)
+        src = src_loader(src_path)
 
-    test_ds, test_y, test_fips, test_collate, in_ch_te = load_spatial_dataset(
-        test_root, 
-        tile_shape=tile_shape,
-        sample_frac=sample_frac,
-        random_state=random_state 
-    )
+        X = np.asarray(src["features"], dtype=np.float32)
+        y = np.asarray(src["labels"]).reshape(-1)
+        fips = _canon_fips(np.asarray(src["sample_ids"]))
 
-    if in_ch_te != in_ch: 
-        raise ValueError(f"in_channels mismatch: train={in_ch}, test={in_ch_te}")
+        scaler = StandardScaler() 
+        Xs = scaler.fit_transform(X).astype(np.float32, copy=False)
 
-    params = load_model_params(config_path, model_key)
-    params = normalize_spatial_params(
-        params, 
-        random_state=random_state, 
-        collate_fn=train_collate
-    )
-
-    if node_anchors is not None and anchor_stats is not None: 
-        params["node_anchors"] = node_anchors 
-        params["anchor_stats"] = anchor_stats 
-
-    model = make_spatial_gat(
-        compute_strategy=strategy, 
-        **params
-    )(in_channels=in_ch_te)
-
-    model.fit(train_ds, train_y)
-    
-    train_emb = model.extract(train_ds)
-    test_emb  = model.extract(test_ds)
-
-    _, val_corn, val_mae  = model.validate(model.as_eval_loader(test_ds))
-
-    probs = model.predict_proba(test_ds)
-
-    if save_proba and proba_key: 
-        proba_path = EXPERT_PROBA[proba_key] 
-        class_labels = np.sort(np.unique(train_y))
-        _save_probs_mat(
-            proba_path,
-            probs=probs,
-            labels=test_y,
-            fips=test_fips,
-            class_labels=class_labels,
-            model_name=proba_key
+        node_ids = np.arange(Xs.shape[0], dtype=np.int64)
+        ds = TensorDataset(
+            torch.from_numpy(Xs),
+            torch.from_numpy(node_ids)
         )
 
-    metrics = None 
-    if class_metrics: 
-        class_labels = np.sort(np.unique(train_y))
-        metrics      = metrics_from_probs(test_y, probs, class_labels)
-        true_pop     = _true_pop_for_fips(test_fips, 2019)
-        valid        = np.isfinite(true_pop) & (true_pop > 0)
-        
-        if valid.any(): 
-            reg = mape_wape_from_probs(
-                probs=np.asarray(probs)[valid],
-                true_pop=true_pop[valid],
-                class_log_centroids=CLASS_LOG_CENTROIDS
-            )
-            metrics.update(reg)
-        else: 
-            metrics.update({"mape": np.nan, "wape": np.nan})
+        params = load_model_params(config_path, model_key)
+        params.setdefault("random_state", random_state)
 
-    feature_names = np.array(
-        [f"{model_key.split('/')[-1].lower()}_emb_{i}" for i in range(test_emb.shape[1])],
-        dtype="U32"
-    )
-
-    savemat(out_path, {
-        "features": test_emb, 
-        "labels": test_y.reshape(-1, 1), 
-        "fips_codes": test_fips, 
-        "feature_names": feature_names, 
-        "n_counties": np.array([len(test_y)], dtype=np.int64)
-    })
-
-    header = ["Name", "Dim", "mae", "Corn"]
-    row    = {
-        "Name": f"{model_key}/2013->2023",
-        "Dim": test_emb.shape[1],
-        "mae": format_metric(val_mae),
-        "Corn": format_metric(val_corn)
-    }
-
-    if artifact_path is not None: 
-        save_embedding_artifact(
-            out_path=artifact_path,
-            features=train_emb,
-            labels=train_y,
-            fips_codes=train_fips,
-            model_key=model_key, 
-            fit_train_indices=np.arange(train_fips.shape[0], dtype=np.int64),
-            fit_train_fips=train_fips,
-            source_indices=np.arange(len(train_y), dtype=np.int64), 
-            source_year=2013,
-            fit_year=2013,
-            source_split="train"
+        model = TabularSSFE(
+            in_dim=Xs.shape[1],
+            **params
         )
 
-    if metrics is not None: 
-        header += ["MAPE", "WAPE", "ECE", "MAE"] 
-        row.update(_row(row["Name"], metrics))
+        model.fit(ds)
+        emb = model.extract(ds)
 
-    return {"header": header, "row": row}
+    else: 
+        ds, y, fips, collate_fn, in_ch = load_spatial_dataset(
+            source, tile_shape=tile_shape, random_state=random_state
+        )
 
-def _row(name, metrics): 
+        fips = _canon_fips(np.asarray(fips))
+        y    = np.asarray(y).reshape(-1)
+
+        params = load_model_params(config_path, model_key)
+        params = normalize_spatial_params(
+            params, random_state=random_state, collate_fn=collate_fn
+        )
+
+        model = SpatialSSFE(**params)
+
+        model.fit(ds)
+        emb = model.extract(ds)
+
+    score = model.best_val_score_
+
+    soft_rank = _soft_rank_for_fips(fips, year)
+
+    prefix = model_key.split("/")[-1].lower() 
+    _save_embedding_mat(
+        out_path, 
+        features=emb,
+        labels=y,
+        fips=fips,
+        soft_rank=soft_rank,
+        feature_prefix=prefix,
+        year=year
+    )
+
     return {
-        "Name": name, 
-        "MAPE":  format_metric(metrics.get("mape")),
-        "WAPE":   format_metric(metrics.get("wape")),
-        "ECE":  format_metric(metrics.get("ece")),
-        "MAE": format_metric(metrics.get("mae"))
+        "header": ["Name", "Year", "SSFE Loss", "Dim", "N Samples"], 
+        "row": {
+            "Name": model_key, 
+            "Year": year, 
+            "SSFE Loss": f"{score:.4f}",
+            "Dim": emb.shape[1],
+            "N Samples": emb.shape[0]
+        }
     }
 
 # ---------------------------------------------------------
@@ -513,177 +361,163 @@ def test_fit_eval(
 def test_saipe_manifold(
     _buf,
     *,
-    train: str, 
     test: str, 
     out: str | None = None, 
     model_key: str = SAIPE_KEY, 
     random_state: int = 0,
     config_path: str = CONFIG_PATH,
-    class_metrics: bool = False, 
-    save_proba: bool = False, 
-    proba_key: str = "SAIPE_MANIFOLD",
-    artifact_path: str = SAIPE_ARTIFACT, 
+    year: int = 2013, 
     **_
 ): 
     if out is None: 
-        out = project_path("data", "datasets", "saipe_2023_pooled.mat")
+        out = project_path("data", "datasets", f"saipe_embeddings_{year}.mat")
 
-    return _tabular_fit_extract(
-        train_path=train,
-        test_path=test,
-        out_path=out,
-        model_key=model_key,
-        random_state=random_state,
-        config_path=config_path,
-        class_metrics=class_metrics,
-        save_proba=save_proba,
-        proba_key=proba_key,
-        feature_prefix="saipe",
-    )
+        return _ssfe_fit_extract(
+            source=test,
+            year=year, 
+            out_path=out,
+            model_key=model_key,
+            modality="tabular",
+            random_state=random_state,
+            config_path=config_path
+        )
 
 def test_usps_manifold(
     _buf,
     *,
-    train: str, 
     test: str, 
     out: str | None = None, 
     model_key: str = "Manifold/USPS", 
     random_state: int = 0,
     config_path: str = CONFIG_PATH,
-    class_metrics: bool = False, 
-    save_proba: bool = False, 
-    proba_key: str = "USPS_MANIFOLD",
-    artifact_path: str = USPS_ARTIFACT, 
+    year: int = 2013, 
     **_
 ):
     if out is None: 
-        out = project_path("data", "datasets", "usps_scalar_2023_pooled.mat")
+        out = project_path("data", "datasets", f"usps_embeddings_{year}.mat")
 
-    return _tabular_fit_extract(
-        train_path=train,
-        test_path=test,
+    return _ssfe_fit_extract(
+        source=test,
+        year=year, 
         out_path=out,
         model_key=model_key,
+        modality="tabular",
         random_state=random_state,
-        config_path=config_path,
-        class_metrics=class_metrics,
-        save_proba=save_proba,
-        proba_key=proba_key,
-        feature_prefix="usps_scalar",
+        config_path=config_path
     )
 
 def test_viirs_manifold(
     _buf,
     *,
-    train: str, 
     test: str, 
-    out: str,
+    out: str | None,
     model_key: str = VIIRS_KEY, 
-    tile_shape: tuple[int, int, int] = (2, 256, 256), 
-    viirs_anchors: str = VIIRS_ANCHORS, 
-    sample_frac: float | None = None, 
+    tile_shape: tuple[int, int, int] = (3, 256, 256), 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
-    class_metrics: bool = False, 
-    save_proba: bool = False, 
-    proba_key: str = "VIIRS_MANIFOLD",
-    artifact_path: str = VIIRS_ARTIFACT, 
+    year: int = 2013, 
     **_
 ): 
-    node_anchors, anchor_stats = load_node_anchors(viirs_anchors)
+    if out is None: 
+        out = project_path("data", "datasets", f"viirs_embeddings_{year}.mat")
 
-    return _spatial_fit_extract(
-        train_root=train, 
-        test_root=test, 
+    return _ssfe_fit_extract(
+        source=test,
+        year=year, 
+        tile_shape=tile_shape, 
         out_path=out,
         model_key=model_key,
-        tile_shape=tile_shape,
-        sample_frac=sample_frac,
+        modality="spatial",
         random_state=random_state,
-        config_path=config_path,
-        node_anchors=node_anchors,
-        anchor_stats=anchor_stats,
-        class_metrics=class_metrics,
-        save_proba=save_proba,
-        proba_key=proba_key,
-        artifact_path=artifact_path
+        config_path=config_path
     )
 
-def test_scalar_ens_sweep(
-    _buf, 
-    *, 
-    dataset: str = "SAIPE", 
-    train: str | None = None, 
-    test: str | None = None,
-    model_key: str | None = None, 
-    beta_min: float = 0.99, 
-    beta_max: float = 0.999, 
-    beta_steps: int = 10, 
-    holdout_frac: float = 0.2, 
+def test_fusion_opt(
+    _buf,
+    *,
+    model_key: str = FUSION_KEY, 
+    trials: int = 50, 
     random_state: int = 0, 
-    config_path: str = CONFIG_PATH
-): 
-    if dataset not in SCALAR_SWEEP_DATASETS: 
-        raise ValueError(f"unknown dataset: {dataset}")
-
-    spec       = SCALAR_SWEEP_DATASETS[dataset]
-    train_spec = train     or spec["train"]
-    test_spec  = test      or spec["test"]
-    model_key  = model_key or spec["model_key"]
-
-    train_path, train_loader = _resolve_dataset(train_spec)
-    test_path, test_loader   = _resolve_dataset(test_spec)
-
-    X13, y13, _ = _load_dataset(train_path, train_loader)
-    X23, y23, _ = _load_dataset(test_path, test_loader)
-
-    splitter = StratifiedShuffleSplit(
-        n_splits=1, test_size=holdout_frac, random_state=random_state
+    config_path: str = CONFIG_PATH, 
+    year: int = 2013, 
+    **_ 
+):
+    viirs_embeddings = project_path(
+        "data", "datasets", f"viirs_embeddings_{year}.mat"
     )
-    tr_idx, va_idx = next(splitter.split(X13, y13)) 
-    
-    scaler = StandardScaler() 
-    X13_tr   = scaler.fit_transform(X13[tr_idx])
-    X13_va   = scaler.transform(X13[va_idx])
-    y13_tr   = y13[tr_idx]
-    y13_va   = y13[va_idx]
-    X23      = scaler.transform(X23) 
+    usps_embeddings = project_path(
+        "data", "datasets", f"usps_embeddings_{year}.mat"
+    )
+    saipe_embeddings = project_path(
+        "data", "datasets", f"saipe_embeddings_{year}.mat"
+    )
+    wide_dataset = project_path(
+        "data", "datasets", f"wide_scalar_{year}.mat"
+    )
 
-    class_labels_13 = np.sort(np.unique(y13))
-    class_labels_23 = np.sort(np.unique(y23))
+    X = load_wide_deep_inputs(
+        expert_paths={
+            "viirs": viirs_embeddings,
+            "usps": usps_embeddings,
+            "saipe": saipe_embeddings 
+        },
+        wide_path=wide_dataset
+    )
 
-    base_params = load_model_params(config_path, model_key)
+    cut_edges = _edges_for_year(year)
+    fixed = {
+        "expert_dims": X["expert_dims"], 
+        "wide_in_dim": X["wide_in_dim"], 
+        "cut_edges": cut_edges
+    }
 
-    betas = np.linspace(beta_min, beta_max, beta_steps)
-    qwk13 = np.zeros_like(betas, dtype=np.float64)
-    qwk23 = np.zeros_like(betas, dtype=np.float64)
-
-    for i, b in enumerate(betas): 
-        print(f"[sweep] beta={b:.4f}") 
-
-        params = dict(base_params)
-        params["ens"] = float(b)
-        params["random_state"] = random_state 
-
-        model = make_residual_tabular()(
-            in_dim=X13_tr.shape[1],
-            **params, 
+    def model_factory(**params): 
+        merged = dict(fixed)
+        merged.update(params)
+        return HierarchicalFusionModel(
+            **merged,
+            random_state=random_state,
             compute_strategy=strategy
         )
-        model.fit(X13_tr, y13_tr)
 
-        probs13  = model.predict_proba(X13_va)
-        qwk13[i] = metrics_from_probs(y13_va, probs13, class_labels_13)["qwk"] 
+    evaluator = HierarchicalFusionEvaluator(
+        X=X,
+        model_factory=model_factory,
+        param_space=define_fusion_joint_space,
+        random_state=random_state,
+        compute_strategy=strategy
+    )
 
-        probs23  = model.predict_proba(X23)
-        qwk23[i] = metrics_from_probs(y23, probs23, class_labels_23)["qwk"] 
+    prior_params = None 
+    try: 
+        prior_params = load_model_params(config_path, model_key)
+    except Exception: 
+        prior_params = None 
+
+    config = EngineConfig(
+        n_trials=trials,
+        direction="minimize",
+        random_state=random_state,
+        sampler_type="multivariate-tpe",
+        mp_enabled=False,
+        enqueue_trials=[prior_params] if prior_params else None
+    )
+
+    best_params, best_value, _ = run_optimization(
+        name=model_key,
+        evaluator=evaluator,
+        config=config
+    )
+
+    save_model_config(config_path, model_key, best_params)
 
     return {
-        "betas": betas, 
-        "qwk_2013": qwk13, 
-        "qwk_2023": qwk23, 
-        "dataset": dataset, 
-        "model_key": model_key 
+        "header": ["Name", "Year", "Ordinal + Regression Loss"], 
+        "row": {
+            "Name": model_key, 
+            "Year": year, 
+            "Ordinal + Regression Loss": f"{best_value:.4f}"
+        }
     }
 
 TESTS = {
@@ -691,22 +525,21 @@ TESTS = {
     "saipe-manifold": test_saipe_manifold,
     "viirs-manifold": test_viirs_manifold,
     "usps-manifold": test_usps_manifold,
-    "scalar-ens-sweep": test_scalar_ens_sweep 
+    "fusion-opt": test_fusion_opt
 }
 
 
 def main():
     parser = argparse.ArgumentParser() 
     parser.add_argument("--tests", nargs="*", default=None)
-    parser.add_argument("--train", required=True)
-    parser.add_argument("--test", required=True)
+    parser.add_argument("--train", default=None)
+    parser.add_argument("--test", default=True)
     parser.add_argument("--out", default=None)
     parser.add_argument("--models", nargs="*", default=None)
     parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--random-state", type=int, default=0)
-    parser.add_argument("--class-metrics", action="store_true")
-    parser.add_argument("--save-proba", action="store_true")
+    parser.add_argument("--year", type=int, required=True)
     args = parser.parse_args()
 
     buf = io.StringIO() 
@@ -724,8 +557,6 @@ def main():
         trials=args.trials,
         folds=args.folds,
         random_state=args.random_state,
-        class_metrics=args.class_metrics,
-        save_proba=args.save_proba
     )
 
     print(buf.getvalue().strip())

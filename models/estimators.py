@@ -7,20 +7,19 @@
 # and usable within Sklearn's CV infrastructure 
 # 
 
+from dataclasses import dataclass
+
+from typing import Optional
+
 import numpy as np 
 
+from numpy.typing import NDArray
 
 from sklearn.preprocessing   import StandardScaler
 
 import time, copy, time, sys, torch   
 
-from abc                     import abstractmethod
-
-from torch.cuda import temperature
-
 from utils.resources         import ComputeStrategy
-
-from numpy.typing            import NDArray
 
 from sklearn.base            import (
     BaseEstimator, 
@@ -46,48 +45,46 @@ from xgboost                 import (
 
 from utils.loss_funcs        import (
     HybridOrdinalLoss,
-    LogitScaler,
     MixedLoss,
-    compute_ens_weights
 )
-
-from scipy.sparse            import csr_matrix
 
 from torch                   import nn 
 
 from torch.utils.data        import (
     DataLoader, 
     TensorDataset,
-    non_deterministic, 
-    random_split, 
-    Subset 
 )
 
 from models.networks         import (
-    GatedAttentionPooling,
+    DeepFusionMLP,
     MILOrdinalHead,
     TransformerProjector,
     ResidualMLP,
-    Mixer
+    Mixer,
+    WideRidgeRegressor
 ) 
 
-from models.graph.construction import (
-    LOGRADIANCE_GATE_HIGH,
-    LOGRADIANCE_GATE_LOW
+from models.loss               import (
+    KESConfig,
+    KernelEffectiveSamples,
+    MixedLossAdapter,
+    build_wide_deep_loss
 )
 
 from sklearn.model_selection import (
-    StratifiedGroupKFold,
     StratifiedShuffleSplit,
     StratifiedKFold,
     cross_val_predict
 )
 
-from sklearn.metrics         import (
-    cohen_kappa_score
+from preprocessing.loaders   import (
+    DatasetLoader,
+    FusionDataset
 )
 
-from utils.helpers           import align_on_fips, bind 
+from utils.helpers           import (
+    bind 
+)
 
 # ---------------------------------------------------------
 # Regressors 
@@ -677,6 +674,617 @@ class SVMClassifier(BaseEstimator, ClassifierMixin):
         return self.calibrator_.predict_proba(scores_scaled)
 
 # ---------------------------------------------------------
+# Wide and Deep Hierarchical Fusion 
+# ---------------------------------------------------------
+
+@dataclass 
+class PhaseStats: 
+    loss: float 
+    ordinal: float 
+    uncertainty: float 
+
+class HierarchicalFusionModel(BaseEstimator, RegressorMixin): 
+
+    '''
+    Top-level fusion module
+    '''
+
+    def __init__(
+        self, 
+        *,
+        expert_dims: dict[str, int], 
+        wide_in_dim: int, 
+        cut_edges: NDArray,
+        
+        d_model: int, 
+        transformer_heads: int, 
+        transformer_layers: int, 
+        transformer_ff_mult: int, 
+        transformer_dropout: float, 
+        transformer_attn_dropout: float, 
+        gate_floor: float = 0.05, 
+
+        trunk_hidden_dim: int, 
+        trunk_depth: int, 
+        trunk_dropout: float, 
+        trunk_out_dim: Optional[int], 
+
+        head_hidden_dim: Optional[int], 
+        head_dropout: float, 
+        log_var_min: float = -9.0, 
+        log_var_max: float =  9.0, 
+
+        wide_l2_alpha: float, 
+        wide_init_log_var: float, 
+        ridge_scale: float, 
+
+        w_ordinal: float = 1.0, 
+        w_uncertainty: float = 1.0, 
+        var_floor: float = 1e-6, 
+        prob_eps: float = 1e-9, 
+
+        mix_alpha: float = 0.2, 
+        mix_mult: int = 2, 
+        mix_min_lambda: float, 
+        mix_with_replacement: bool = True, 
+
+        kes_config: Optional[KESConfig] = None, 
+
+        soft_epochs: int = 300, 
+        hard_epochs: int = 200, 
+        batch_size: int = 256, 
+        lr_deep: float, 
+        lr_wide: float, 
+        weight_decay: float, 
+        eval_fraction: float = 0.2, 
+        early_stopping_rounds: int = 20, 
+        min_delta: float = 1e-4, 
+        random_state: int = 0,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
+    ):
+        self.expert_dims              = expert_dims
+        self.wide_in_dim              = wide_in_dim
+        self.cut_edges                = np.asarray(cut_edges, dtype=np.float32)
+
+        self.d_model                  = d_model
+        self.transformer_heads        = transformer_heads
+        self.transformer_layers       = transformer_layers
+        self.transformer_ff_mult      = transformer_ff_mult
+        self.transformer_dropout      = transformer_dropout
+        self.transformer_attn_dropout = transformer_attn_dropout
+        self.gate_floor               = gate_floor
+
+        self.trunk_hidden_dim         = trunk_hidden_dim
+        self.trunk_depth              = trunk_depth
+        self.trunk_dropout            = trunk_dropout
+        self.trunk_out_dim            = trunk_out_dim
+
+        self.head_hidden_dim          = head_hidden_dim
+        self.head_dropout             = head_dropout
+        self.log_var_min              = log_var_min
+        self.log_var_max              = log_var_max
+
+        self.wide_l2_alpha            = wide_l2_alpha
+        self.wide_init_log_var        = wide_init_log_var
+        self.ridge_scale              = ridge_scale
+
+        self.w_ordinal                = w_ordinal
+        self.w_uncertainty            = w_uncertainty
+        self.var_floor                = var_floor
+        self.prob_eps                 = prob_eps
+
+        self.mix_alpha                = mix_alpha
+        self.mix_mult                 = mix_mult
+        self.mix_min_lambda           = mix_min_lambda
+        self.mix_with_replacement     = mix_with_replacement
+
+        self.kes_config               = kes_config
+
+        self.soft_epochs              = soft_epochs
+        self.hard_epochs              = hard_epochs
+        self.batch_size               = batch_size 
+        self.lr_deep                  = lr_deep
+        self.lr_wide                  = lr_wide
+        self.weight_decay             = weight_decay
+        self.eval_fraction            = eval_fraction
+        self.early_stopping_rounds    = early_stopping_rounds
+        self.min_delta                = min_delta
+        self.random_state             = random_state
+
+        self.device     = self.resolve_device(compute_strategy.device)
+
+    # -----------------------------------------------------
+    # Public Interface  
+    # -----------------------------------------------------
+    
+    def predict(self, X) -> NDArray: 
+        check_is_fitted(self, "is_fitted_")
+        comp = self.predict_components(X)
+        return comp["mu_fused"]
+
+    def predict_distribution(self, X) -> dict[str, NDArray]: 
+        check_is_fitted(self, "is_fitted_")
+        comp = self.predict_components(X)
+        return {
+            "mu_fused": comp["mu_fused"],
+            "log_var_fused": comp["log_var_fused"], 
+            "std_fused": np.exp(0.5 * comp["log_var_fused"])
+        }
+
+    def extract(self, X) -> NDArray:
+        check_is_fitted(self, "is_fitted_")
+        loader = self.build_predict_loader(X)
+
+        self.deep_.eval() 
+        chunks: list[torch.Tensor] = []
+
+        with torch.no_grad(): 
+            for experts_b, _, _, _ in loader: 
+                experts_b = {k: v.to(self.device) for k, v in experts_b.items()}
+                emb = self.deep_.extract(experts_b)
+                chunks.append(emb.detach().cpu())
+
+        return torch.cat(chunks, dim=0).numpy() 
+
+    # -----------------------------------------------------
+    # Training 
+    # -----------------------------------------------------
+
+    def fit(self, X, y=None, coords=None): 
+        experts = X["experts"]
+        wide    = X["wide"]
+        y_rank  = np.asarray(X["y_rank"] if y is None else y, dtype=np.float32).reshape(-1)
+        coords  = X.get("coords", coords)
+
+        experts = {k: np.asarray(v, dtype=np.float32) for k, v in experts.items()}
+        wide    = np.asarray(wide, dtype=np.float32)
+
+        tr_idx, va_idx = self.split_indices(y_rank)
+
+        sw = np.ones(y_rank.shape[0], dtype=np.float32)
+        if coords is None: 
+            raise ValueError("coords are required for sample weight")
+
+        coords       = np.asarray(coords, dtype=np.float64)
+        sw_tr, sw_va = self.build_sample_weights(y_rank, coords, tr_idx, va_idx)
+        sw[tr_idx]   = sw_tr 
+        sw[va_idx]   = sw_va
+
+        train_loader = self.build_fusion_loader(
+            experts, wide, y_rank, sw, 
+            tr_idx, shuffle=True, drop_last=True)
+        val_loader   = self.build_fusion_loader(
+            experts, wide, y_rank, sw, 
+            va_idx, shuffle=False, drop_last=False)
+
+        self.build_model() 
+
+        best_soft = self.run_phase(
+            name="Soft-Labels",
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=self.soft_epochs,
+            mixing=True,
+            lr_scale=1.0,
+            start_state=None
+        )
+
+        best_hard = self.run_phase(
+            name="Rank-Labels",
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=self.hard_epochs,
+            mixing=False,
+            lr_scale=0.2,
+            start_state=best_soft
+        )
+
+        best_state = best_hard if best_hard is not None else best_soft 
+        if best_state is not None: 
+            self.deep_.load_state_dict(best_state["deep"])
+            self.wide_.load_state_dict(best_state["wide"])
+
+        self.is_fitted_ = True 
+        return self 
+
+    def run_phase(
+        self,
+        *,
+        name: str, 
+        train_loader: DataLoader, 
+        val_loader: DataLoader,
+        epochs: int, 
+        mixing: bool, 
+        lr_scale: float, 
+        start_state: Optional[dict[str, dict[str, torch.Tensor]]] = None 
+    ): 
+        print(f"[{name}] starting...", file=sys.stderr, flush=True)
+
+        if start_state is not None: 
+            self.deep_.load_state_dict(start_state["deep"])
+            self.wide_.load_state_dict(start_state["wide"])
+
+        self.build_optimizer(lr_scale=lr_scale, ep=epochs)
+
+        best_val   = float("inf")
+        best_state = None 
+        patience   = 0 
+        t0         = time.perf_counter()
+    
+        for ep in range(epochs): 
+            _ = self.train_epoch(train_loader, mixing=mixing)
+            val   = self.validate(val_loader)  
+            score = val.ordinal + val.uncertainty 
+
+            if score < best_val - self.min_delta:
+                best_val   = score 
+                best_state = {
+                    "deep": copy.deepcopy(self.deep_.state_dict()),
+                    "wide": copy.deepcopy(self.wide_.state_dict()),
+                } 
+                self.best_val_score_ = best_val 
+                patience = 0 
+            else: 
+                patience += 1 
+                if self.early_stopping_rounds and patience >= self.early_stopping_rounds: 
+                    break 
+
+            if ep % 5 == 0: 
+                avg_dt = (time.perf_counter() - t0) / (ep + 1)
+                
+                print(
+                    f"[epoch {ep:3d}] {avg_dt:.2f}s avg | "
+                    f"val_loss={val.loss:.4f} | val_ord={val.ordinal:.4f} | " 
+                    f"val_unc={val.uncertainty:.4f}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        return best_state 
+
+    def train_epoch(self, loader: DataLoader, *, mixing: bool) -> PhaseStats:
+        self.deep_.train() 
+        self.wide_.train() 
+
+        total, ord_sum, unc_sum, count = 0.0, 0.0, 0.0, 0 
+        for experts_b, wide_b, yb, swb in loader: 
+            experts_b = {k: v.to(self.device) for k, v in experts_b.items()}
+            wide_b    = wide_b.to(self.device)
+            yb        = yb.to(self.device)
+            swb       = swb.to(self.device)
+
+            loss, ord_raw, unc_raw = self.process_batch(
+                experts_b, wide_b, yb, swb,
+                with_mixing=mixing,
+            )
+
+            self.opt_.zero_grad(set_to_none=True)
+            loss.backward()
+            self.opt_.step() 
+
+            bsz      = yb.size(0) 
+            total   += loss.item() * bsz 
+            ord_sum += ord_raw * bsz 
+            unc_sum += unc_raw * bsz 
+            count   += bsz 
+
+        if self.scheduler_ is not None: 
+            self.scheduler_.step() 
+
+        denom = max(count, 1)
+        return PhaseStats(total / denom, ord_sum / denom, unc_sum / denom)
+
+    def validate(self, loader: DataLoader) -> PhaseStats: 
+        self.deep_.eval() 
+        self.wide_.eval() 
+
+        with torch.no_grad(): 
+            total, ord_sum, unc_sum, count = 0.0, 0.0, 0.0, 0 
+            for experts_b, wide_b, yb, _ in loader: 
+                experts_b = {k: v.to(self.device) for k, v in experts_b.items()}
+                wide_b    = wide_b.to(self.device)
+                yb        = yb.to(self.device)
+
+                loss, ord_raw, unc_raw = self.process_batch(
+                    experts_b, wide_b, yb, None,
+                    with_mixing=False,
+                )
+
+                bsz      = yb.size(0) 
+                total   += loss.item() * bsz 
+                ord_sum += ord_raw * bsz 
+                unc_sum += unc_raw * bsz 
+                count   += bsz 
+
+        denom = max(count, 1)
+        return PhaseStats(total / denom, ord_sum / denom, unc_sum / denom)
+
+    # -----------------------------------------------------
+    # Processing  
+    # -----------------------------------------------------
+
+    def process_batch(
+        self,
+        experts_b: dict[str, torch.Tensor], 
+        wide_b: torch.Tensor, 
+        yb: torch.Tensor, 
+        swb: torch.Tensor,
+        *,
+        with_mixing: bool = False 
+    ) -> tuple[torch.Tensor, float, float]: 
+
+        if with_mixing: 
+            y_bucket = torch.floor(yb).to(torch.long)
+            self.mixer_.fit(y_bucket=y_bucket)
+
+            idx_a, idx_b, lam = self.mixer_.plan() 
+            idx_a, idx_b = idx_a.to(self.device), idx_b.to(self.device) 
+            lam = lam.to(self.device, dtype=yb.dtype)
+        
+            experts = {k: self.mixer_.transform(v) for k, v in experts_b.items()}
+            wide    = self.mixer_.transform(wide_b)
+        else: 
+            experts = experts_b 
+            wide    = wide_b 
+            lam, idx_a, idx_b = None, None, None 
+
+        deep_out = self.deep_(experts, return_features=False)
+        wide_out = self.wide_(wide)
+
+        context = {
+            "mu_deep": deep_out["mu_deep"], 
+            "log_var_deep": deep_out["log_var_deep"], 
+            "mu_wide": wide_out["mu_wide"], 
+            "log_var_wide": wide_out["log_var_wide"], 
+            "w_ordinal": self.w_ordinal, 
+            "w_uncertainty": self.w_uncertainty
+        }
+
+        if with_mixing: 
+            # no sample weights in mixed loss 
+            context.update({
+                "y_rank_a": yb[idx_a], 
+                "y_rank_b": yb[idx_b],
+                "mix_lambda": lam, 
+                "sample_weight_a": swb[idx_a],
+                "sample_weight_b": swb[idx_b]
+            })
+        else: 
+            context.update({
+                "y_rank": yb, 
+                "sample_weight": swb 
+            })
+        comp  = self.mix_loss_fn_(**context) if with_mixing else self.loss_fn_(**context)
+        ridge = self.ridge_scale * self.wide_.ridge_penalty()
+        total = comp.total + ridge
+
+        ord_raw = float(comp.raw["ordinal"].detach().item())
+        unc_raw = float(comp.raw["uncertainty"].detach().item())
+
+        return total, ord_raw, unc_raw 
+
+    # -----------------------------------------------------
+    # Instantiation 
+    # -----------------------------------------------------
+
+    def build_model(self): 
+        self.deep_ = DeepFusionMLP(
+            expert_dims=self.expert_dims,
+            d_model=self.d_model,
+            n_heads=self.transformer_heads,
+            n_layers=self.transformer_layers,
+            ff_mult=self.transformer_ff_mult,
+            transformer_dropout=self.transformer_dropout,
+            transformer_attn_dropout=self.transformer_attn_dropout,
+            pre_norm=True,
+            gate_floor=self.gate_floor,
+            hidden_dim=self.trunk_hidden_dim,
+            depth=self.trunk_depth,
+            dropout=self.trunk_dropout,
+            trunk_out_dim=self.trunk_out_dim,
+            head_hidden_dim=self.head_hidden_dim,
+            head_dropout=self.head_dropout,
+            log_var_min=self.log_var_min,
+            log_var_max=self.log_var_max,
+        ).to(self.device)
+
+        self.wide_ = WideRidgeRegressor(
+            in_dim=self.wide_in_dim,
+            l2_alpha=self.wide_l2_alpha,
+            init_log_var=self.wide_init_log_var,
+            log_var_min=self.log_var_min,
+            log_var_max=self.log_var_max,
+        ).to(self.device)
+
+        # self.deep_ = torch.compile(self.deep_, mode="reduce-overhead", fullgraph=False)
+        # self.wide_ = torch.compile(self.wide_, mode="reduce-overhead", fullgraph=False)
+
+        self.loss_fn_ = build_wide_deep_loss(
+            cut_edges=self.cut_edges,
+            log_var_min=self.log_var_min,
+            log_var_max=self.log_var_max,
+            var_floor=self.var_floor,
+            prob_eps=self.prob_eps,
+        )
+
+        self.mix_loss_fn_ = MixedLossAdapter(
+            self.loss_fn_,
+            target_pairs={"y_rank": ("y_rank_a", "y_rank_b")},
+        )
+
+        self.mixer_ = Mixer(
+            alpha=self.mix_alpha,
+            mix_mult=self.mix_mult,
+            min_lambda=self.mix_min_lambda,
+            with_replacement=self.mix_with_replacement,
+        )
+
+    def ensure_loader(
+        self,
+        X,
+        *,
+        shuffle: bool = False, 
+        drop_last: bool = False 
+    ) -> DataLoader: 
+        if isinstance(X, DataLoader): 
+            return X 
+        if isinstance(X, FusionDataset): 
+            return self.build_loader(X, shuffle=shuffle, drop_last=drop_last)
+
+    def build_loader(
+        self,
+        dataset, 
+        *,
+        shuffle: bool,
+        drop_last: bool 
+    ) -> DataLoader: 
+        return DataLoader(
+            dataset, 
+            batch_size=self.batch_size, 
+            shuffle=shuffle,
+            num_workers=0,
+            pin_memory=(self.device.type == "cuda"),
+            drop_last=drop_last 
+        )
+
+    def build_fusion_loader(
+        self,
+        experts: dict[str, NDArray],
+        wide: NDArray,
+        y_rank: NDArray,
+        sw: NDArray,
+        idx: NDArray,
+        *,
+        shuffle: bool,
+        drop_last: bool = False
+    ) -> DataLoader:
+        experts_t = {k: torch.from_numpy(v[idx]).float() for k, v in experts.items()}
+        wide_t    = torch.from_numpy(wide[idx]).float() 
+        y_t       = torch.from_numpy(y_rank[idx]).float() 
+        sw_t      = torch.from_numpy(sw[idx]).float() 
+
+        ds = FusionDataset(experts_t, wide_t, y_t, sw_t)
+        return self.build_loader(ds, shuffle=shuffle, drop_last=drop_last)
+
+    def build_predict_loader(self, X) -> DataLoader: 
+        experts = {k: np.asarray(v, dtype=np.float32) for k, v in X["experts"].items()}
+        wide    = np.asarray(X["wide"], dtype=np.float32)
+        n       = wide.shape[0]
+
+        experts_t = {k: torch.from_numpy(v).float() for k, v in experts.items()}
+        wide_t    = torch.from_numpy(wide).float() 
+        y_t       = torch.zeros(n, dtype=torch.float32)
+        sw_t      = torch.ones(n, dtype=torch.float32)
+
+        ds = FusionDataset(experts_t, wide_t, y_t, sw_t)
+        return self.ensure_loader(ds, shuffle=False, drop_last=False)
+
+    def build_optimizer(self, *, lr_scale: float = 1.0, ep: int = 1): 
+        self.opt_ = torch.optim.AdamW([
+            {"params": self.deep_.parameters(), "lr": lr_scale * self.lr_deep},
+            {"params": self.wide_.parameters(), "lr": lr_scale * self.lr_wide}
+        ], weight_decay=self.weight_decay)
+
+        self.scheduler_ = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.opt_, T_max=max(1, ep)
+        )
+
+    def build_sample_weights(
+        self,
+        y_rank: NDArray,
+        coords: NDArray, 
+        tr_idx: NDArray,
+        va_idx: NDArray
+    ) -> tuple[NDArray, NDArray]: 
+        sw_train = np.ones(tr_idx.shape[0], dtype=np.float32)
+        sw_val   = np.ones(va_idx.shape[0], dtype=np.float32)
+
+        self.kes_ = KernelEffectiveSamples(self.kes_config)
+
+        sw_train  = (self.kes_.fit_transform(y_rank[tr_idx], coords[tr_idx])
+                     .astype(np.float32, copy=False)) 
+        sw_val    = self.kes_.transform(y_rank[va_idx]).astype(np.float32, copy=False)
+        return sw_train, sw_val 
+
+    def split_indices(self, y_rank: NDArray) -> tuple[NDArray, NDArray]: 
+        n = y_rank.shape[0]
+        if self.eval_fraction <= 0.0: 
+            idx = np.arange(n) 
+            return idx, idx 
+
+        y_bucket = np.floor(y_rank).astype(np.int64)
+        splitter = StratifiedShuffleSplit(
+            n_splits=1,
+            test_size=self.eval_fraction,
+            random_state=self.random_state
+        )
+        return next(splitter.split(np.zeros((n, 1)), y_bucket))
+
+    def resolve_device(self, device: Optional[str]) -> torch.device: 
+        if device is not None: 
+            return torch.device(device)
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # -----------------------------------------------------
+    # Predict Helpers 
+    # -----------------------------------------------------
+
+    def predict_components(self, X) -> dict[str, NDArray]: 
+        check_is_fitted(self, "is_fitted_") 
+        loader = self.build_predict_loader(X)
+
+        self.deep_.eval() 
+        self.wide_.eval() 
+
+        keys = (
+            "mu_deep", "log_var_deep",
+            "mu_wide", "log_var_wide",
+            "mu_fused", "log_var_fused",
+            "alpha_deep", "alpha_wide"
+        )
+
+        acc: dict[str, list[torch.Tensor]] = {k: [] for k in keys}
+
+        with torch.no_grad(): 
+            for experts_b, wide_b, _, _ in loader: 
+                experts_b = {k: v.to(self.device) for k, v in experts_b.items()} 
+                wide_b    = wide_b.to(self.device)
+                out_b     = self.predict_batch_components(experts_b, wide_b)
+                for k in keys: 
+                    acc[k].append(out_b[k].detach().cpu())
+                    
+        return {k: torch.cat(v, dim=0).numpy() for k, v in acc.items()}
+
+    def predict_batch_components(
+        self, 
+        experts_b: dict[str, torch.Tensor], 
+        wide_b: torch.Tensor
+    ) -> dict[str, torch.Tensor]: 
+        deep_out = self.deep_(experts_b, return_features=False)
+        wide_out = self.wide_(wide_b) 
+
+        fuse_term = self.loss_fn_.terms[0]
+        mu_fused, log_var_fused, alpha_d, alpha_w = fuse_term.fuse({
+            "y": deep_out["mu_deep"], # for shape 
+            "mu_deep": deep_out["mu_deep"],
+            "log_var_deep": deep_out["log_var_deep"],
+            "mu_wide": wide_out["mu_wide"],
+            "log_var_wide": wide_out["log_var_wide"],
+        })
+
+        return {
+            "mu_deep": deep_out["mu_deep"],
+            "log_var_deep": deep_out["log_var_deep"],
+            "mu_wide": wide_out["mu_wide"],
+            "log_var_wide": wide_out["log_var_wide"],
+            "mu_fused": mu_fused,
+            "log_var_fused": log_var_fused,
+            "alpha_deep": alpha_d,
+            "alpha_wide": alpha_w,
+        }
+
+
+# ---------------------------------------------------------
 # Mixing Tabular, Residual MLP Model 
 # ---------------------------------------------------------
 
@@ -1074,9 +1682,9 @@ class TFTabular(BaseEstimator, ClassifierMixin):
         probs = probs / probs.sum(dim=1, keepdim=True)
         return probs 
 
-# --------------------------------------------------------
+# ---------------------------------------------------------
 # Helper functions 
-# --------------------------------------------------------
+# ---------------------------------------------------------
 
 def soft_rank_and_bucket(y):
     arr = np.asarray(y).reshape(-1)

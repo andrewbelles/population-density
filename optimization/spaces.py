@@ -266,6 +266,68 @@ def define_tabular_ssfe_space(trial: optuna.Trial):
         "min_delta": 1e-4,
     }
 
+# ---------------------------------------------------------
+# Fusion Spaces
+# ---------------------------------------------------------
+
+def define_deep_moe_space(trial: optuna.Trial): 
+
+    return {
+        "d_model": trial.suggest_categorical("d_model", [64, 128, 256]), 
+        "transformer_heads": trial.suggest_categorical("transformer_heads", [2, 4, 8]), 
+        "transformer_layers": trial.suggest_int("transformer_layers", 1, 3),
+        "transformer_ff_mult": trial.suggest_categorical("transformer_ff_mult", [2, 4]), 
+        "transformer_attn_dropout": trial.suggest_float("transformer_attn_dropout", 0.0, 0.2),
+        "transformer_dropout": trial.suggest_float("transformer_dropout", 0.0, 0.2), 
+        "gate_floor": trial.suggest_float("gate_floor", 0.0, 0.15), 
+
+        "trunk_hidden_dim": trial.suggest_categorical("trunk_hidden_dim", [128, 256, 512]), 
+        "trunk_depth": trial.suggest_int("trunk_depth", 1, 6), 
+        "trunk_dropout": trial.suggest_float("trunk_dropout", 0.0, 0.25), 
+        "trunk_out_dim": trial.suggest_categorical("trunk_out_dim", [None, 64, 128, 256]),
+
+        "head_hidden_dim": trial.suggest_categorical("head_hidden_dim", [None, 64, 128, 256]),
+        "head_dropout": trial.suggest_float("head_dropout", 0.0, 0.25), 
+
+        "log_var_min": -9.0, 
+        "log_var_max": 9.0 
+    }
+
+def define_wide_rreg_space(trial: optuna.Trial): 
+    return {
+        "wide_l2_alpha": trial.suggest_float("wide_l2_alpha", 1e-7, 1e-2, log=True), 
+        "wide_init_log_var": trial.suggest_float("wide_init_log_var", -2.0, 2.0), 
+        "ridge_scale": trial.suggest_float("ridge_scale", 1e-5, 1e-1, log=True)
+    }
+
+def define_fusion_joint_space(trial: optuna.Trial): 
+    p = {}
+    p.update(define_deep_moe_space(trial))
+    p.update(define_wide_rreg_space(trial))
+
+    p.update({
+        "mix_alpha": trial.suggest_float("mix_alpha", 0.1, 0.8), 
+        "mix_mult": trial.suggest_categorical("mix_mult", [2, 4]), 
+        "mix_min_lambda": trial.suggest_float("mix_min_lambda", 0.1, 0.4),  
+
+        "lr_deep": trial.suggest_float("lr_deep", 1e-5, 5e-4, log=True),
+        "lr_wide": trial.suggest_float("lr_wide", 1e-5, 5e-4, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True),
+        
+        "batch_size": trial.suggest_categorical("batch_size", [64, 128]),
+
+        "w_ordinal": 1.0, 
+        "w_uncertainty": 1.0, 
+        "var_floor": 1e-6, 
+        "prob_eps": 1e-9, 
+        "soft_epochs": 400, 
+        "hard_epochs": 400, 
+        "eval_fraction": 0.2, 
+        "early_stopping_rounds": 20, 
+        "min_delta": 1e-4, 
+        "mix_with_replacement": True
+    })
+    return p 
 
 # ---------------------------------------------------------
 # MLP Projector  

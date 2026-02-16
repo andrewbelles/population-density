@@ -26,7 +26,8 @@ from sklearn.preprocessing     import StandardScaler
 from typing                    import (
     Any, 
     Callable, 
-    Dict 
+    Dict,
+    Optional 
 )
 
 from sklearn.metrics           import (
@@ -122,6 +123,47 @@ def select_metric_value(metrics, task, metric):
             return metrics["r2"]
 
     raise ValueError("no suitable metric found")
+
+# ---------------------------------------------------------
+# Hierarchical Fusion Model Evaluator  
+# ---------------------------------------------------------
+
+class HierarchicalFusionEvaluator(OptunaEvaluator): 
+
+    def __init__(
+        self,
+        *,
+        X: dict, 
+        model_factory: Callable,
+        param_space: Callable[[optuna.Trial], Dict[str, Any]],
+        fixed_params: Optional[Dict[str, Any]] = None, 
+        random_state: int = 0, 
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
+    ): 
+        self.X                = X 
+        self.model_factory    = model_factory
+        self.param_space_fn   = param_space 
+        self.fixed_params     = dict(fixed_params or {})
+        self.random_state     = random_state 
+        self.compute_strategy = compute_strategy
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        return self.param_space_fn(trial)
+
+    def evaluate(self, params: Dict[str, Any], trial: Optional[optuna.Trial] = None) -> float: 
+        kwargs = dict(self.fixed_params)
+        kwargs.update(params)
+
+        model = self.model_factory(**kwargs)
+        try: 
+            model.fit(self.X)
+            score = float(model.best_val_score_)
+            if not np.isfinite(score): 
+                return float("inf")
+            return score 
+        finally: 
+            del model 
+            _cleanup_cuda()
 
 # ---------------------------------------------------------
 # Evaluator for Self-Supervised Feature Extractor 
@@ -955,6 +997,7 @@ class MetricCASEvaluator(OptunaEvaluator):
             early_stopping_delta=1e-4,
             random_state=self.random_state
         )
+
         _, best_value, _ = run_optimization("CorrectAndSmooth_inner", cs, cfg)
         return best_value
 

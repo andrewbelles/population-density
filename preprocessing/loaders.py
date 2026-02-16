@@ -1089,31 +1089,73 @@ def canon_fips_vec(x) -> NDArray[np.str_]:
         out.append(s)
     return np.asarray(out, dtype="U5")
 
-def load_rank_source(
-    path: str, 
-    *, 
-    rank_key: str
-) -> tuple[NDArray[np.str_], NDArray[np.float32]]:
-
-    mat = loadmat(path)
-    if "fips_codes" not in mat: 
-        raise ValueError(f"{path} missing fips_codes.")
-    if rank_key not in mat and "labels" not in mat: 
-        raise ValueError(f"{path} missing {rank_key} and labels.")
-
-    fips = canon_fips_vec(_mat_str_vector(mat["fips_codes"]))
-    key  = rank_key if rank_key in mat else "labels" 
-    y    = np.asarray(mat[key], dtype=np.float32).reshape(-1)
-
-    if fips.shape[0] != y.shape[0]: 
-        raise ValueError(f"{path} rank/fips mismatch.")
-    return fips, y
-
 def load_wide_deep_inputs(
     *,
     expert_paths: dict[str, str],
     wide_path: str,
-    rank_path: str,
-    coords_path: Optional[str] = None, 
-    rank_key: str = "soft_rank"
-) -> WideDeepInputs: ...
+) -> WideDeepInputs: 
+    wide_ds     = load_compact_dataset(wide_path)
+    wide_ids    = canon_fips_vec(wide_ds["sample_ids"])
+    wide_x      = np.asarray(wide_ds["features"], dtype=np.float32)
+    if wide_x.ndim != 2: 
+        raise ValueError(f"wide features must be 2d, got {wide_x.shape}")
+
+    y_rank = np.asarray(wide_ds["labels"], dtype=np.float32).reshape(-1)
+    coords = np.asarray(wide_ds["coords"], dtype=np.float32)
+
+    expert_x_raw: dict[str, NDArray[np.float32]] = {}
+    expert_ids:   dict[str, NDArray[np.str_]]    = {}
+    common = set(wide_ids.tolist())
+
+    for name, path in expert_paths.items(): 
+        d   = load_compact_dataset(path)
+        ids = canon_fips_vec(d["sample_ids"])
+        x   = np.asarray(d["features"], dtype=np.float32)
+
+        if x.ndim != 2: 
+            raise ValueError(f"expert {name} features not 2d, got {x.shape}")
+        if x.shape[0] != ids.shape[0]: 
+            raise ValueError(f"expert {name} fips/row mismatch")
+
+        expert_x_raw[name] = x 
+        expert_ids[name]   = ids 
+        common &= set(ids.tolist())
+
+    if not common: 
+        raise ValueError("no common fips.")
+
+    sample_ids = np.asarray([f for f in wide_ids if f in common], dtype="U5") 
+    if sample_ids.size == 0: 
+        raise ValueError("no rows after alignment.")
+
+    idx_w = align_on_fips(sample_ids, wide_ids)
+
+    wide   = wide_x[idx_w]
+    y      = y_rank[idx_w]
+    coords = coords[idx_w]
+
+    experts: dict[str, NDArray[np.float32]] = {}
+    for name, x in expert_x_raw.items(): 
+        idx_e = align_on_fips(sample_ids, expert_ids[name])
+        experts[name] = x[idx_e]
+
+    keep = np.isfinite(y)
+    if not bool(np.all(keep)): 
+        sample_ids = sample_ids[keep]
+        wide       = wide[keep]
+        y          = y[keep]
+        coords     = coords[keep]
+        experts    = {k: v[keep] for k, v in experts.items()}
+
+    if sample_ids.size == 0: 
+        raise ValueError("all rows dropped.")
+
+    return {
+        "experts": experts, 
+        "wide": wide.astype(np.float32, copy=False), 
+        "y_rank": y.astype(np.float32, copy=False),
+        "coords": coords.astype(np.float32, copy=False), 
+        "sample_ids": sample_ids, 
+        "expert_dims": {k: int(v.shape[1]) for k, v in experts.items()},
+        "wide_in_dim": int(wide.shape[1])
+    }
