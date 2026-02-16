@@ -16,11 +16,12 @@ These bounds enforce (32x32 chunks):
     - Type 2: ~21,450 
 '''
 
+from typing import Optional
 import torch 
 
 import torch.nn.functional as F 
 
-from torch import nn 
+from torch import nn, reshape 
 
 import torchvision.models as tvm
 
@@ -703,61 +704,138 @@ class TransformerProjector(nn.Module):
 
 class Mixer(nn.Module): 
     '''
-    Mixes Hard Labels using beta distributed ratios for TF-Residual MLP 
+    Mixup logic for taking interpolation of two samples. Acts as an overfitting relaxer 
+    to allow for a smoother interpolation of a learned manifold/latent variable. 
     '''
 
     def __init__(
         self, 
-        class_weights: torch.Tensor, 
         *,
         alpha: float = 0.2, 
         mix_mult: int = 4, 
-        max_mix: int | None = None, 
-        anchor_power: float = 1.0, 
+        min_lambda: float = 0.0, 
         with_replacement: bool = True 
     ): 
         super().__init__()
-        self.register_buffer("class_weights", class_weights.float())
+        if alpha <= 0: 
+            raise ValueError("alpha must be > 0")
+        if mix_mult < 1: 
+            raise ValueError("mix_mult must be >= 1")
+        if min_lambda < 0.0 or min_lambda >= 0.5: 
+            raise ValueError("min_lambda must be in [0.0, 0.5)")
+
         self.alpha            = alpha 
         self.mix_mult         = mix_mult
-        self.max_mix          = max_mix 
-        self.anchor_power     = anchor_power 
         self.with_replacement = with_replacement
-        
-    def forward(self, x, y, generator=None, return_indices: bool = False): 
+        self.min_lambda       = min_lambda
 
-        B      = y.numel() 
+        self.idx_a_:      torch.Tensor | None = None 
+        self.idx_b_:      torch.Tensor | None = None 
+        self.mix_lambda_: torch.Tensor | None = None 
+        
+    @property 
+    def is_fitted(self) -> bool: 
+        return (
+            self.idx_a_ is not None and self.idx_b_ is not None and self.mix_lambda_ is not None
+        )
+
+    def fit(
+        self,
+        y_bucket: torch.Tensor,
+        *,
+        generator: torch.Generator | None = None
+    ) -> "Mixer": 
+        if y_bucket.ndim == 0: 
+            raise ValueError("y_bucket must be 1d batch tensor")
+
+        y = y_bucket.reshape(-1)
+        b = int(y.numel())
+        if b <= 1: 
+            raise ValueError(f"batch size must be > 1, got {b}")
+
         device = y.device 
-
-        n_mix  = B * self.mix_mult 
-        if self.max_mix is not None: 
-            n_mix = min(n_mix, self.max_mix)
-
-        w = self.class_weights.to(device)
-        anchor_w  = w.gather(0, y).float().pow(self.anchor_power)
-        anchor_w  = anchor_w / anchor_w.sum()  
-
-        partner_w = torch.ones_like(anchor_w) / anchor_w.numel()  
-
-        idx_a = torch.multinomial(
-            anchor_w, n_mix, replacement=self.with_replacement, generator=generator
-        )
-        idx_b = torch.multinomial(
-            partner_w, n_mix, replacement=self.with_replacement, generator=generator
-        )
-
-        mix_lambda = mix_lambda = torch.distributions.Beta(
-            self.alpha, self.alpha).sample((n_mix,)).to(device)
-        lam_shape = (n_mix,) + (1,) * (x.ndim - 1)
-        lam = mix_lambda.view(*lam_shape)
-
-        x_mix = lam * x[idx_a] + (1 - lam) * x[idx_b]
-        y_a   = y[idx_a]
-        y_b   = y[idx_b]
+        n_mix  = max(1, b * self.mix_mult) 
         
-        if return_indices:
-            return x_mix, idx_a, idx_b, mix_lambda
-        return x_mix, y_a, y_b, mix_lambda 
+        uniform = torch.full((b, ), 1.0 / b, device=device)
+
+        idx_a   = torch.multinomial(
+            uniform,
+            n_mix, 
+            replacement=self.with_replacement,
+            generator=generator
+        )
+
+        idx_b   = torch.multinomial(
+            uniform,
+            n_mix,
+            replacement=self.with_replacement,
+            generator=generator
+        )
+
+        mix_lambda = torch.distributions.Beta(
+            self.alpha, self.alpha
+        ).sample((n_mix, )).to(device)
+
+        if self.min_lambda > 0.0: 
+            lo = self.min_lambda 
+            hi = 1.0 - self.min_lambda 
+            mix_lambda = mix_lambda.clamp(lo, hi)
+
+        self.idx_a_      = idx_a 
+        self.idx_b_      = idx_b 
+        self.mix_lambda_ = mix_lambda
+        return self 
+
+    def transform(self, x: torch.Tensor) -> torch.Tensor: 
+        if not self.is_fitted: 
+            raise RuntimeError("call fit() before transform()")
+
+        if x.ndim < 2: 
+            raise ValueError(f"x must be at least 2d (b, ...), got {tuple(x.shape)}")
+        if not torch.is_floating_point(x): 
+            raise TypeError("x must be a floating tensor")
+
+        idx_a = self.idx_a_ 
+        idx_b = self.idx_b_ 
+        lam   = self.mix_lambda_
+        assert idx_a is not None and idx_b is not None and lam is not None 
+    
+        if x.size(0) <= int(torch.max(torch.stack([idx_a, idx_b])).item()): 
+            raise ValueError("stored mix indices exceed current batch size")
+
+        idx_a = idx_a.to(device=x.device)
+        idx_b = idx_b.to(device=x.device)
+        lam   = lam.to(device=x.device, dtype=x.dtype)
+
+        lam_shape = (lam.numel(), ) + (1, ) * (x.ndim - 1) 
+        lam = lam.view(*lam_shape)
+
+        x_mix = lam * x[idx_a] + (1.0 - lam) * x[idx_b]
+        return x_mix 
+
+    def fit_transform(
+        self,
+        x: torch.Tensor,
+        y_bucket: torch.Tensor,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.fit(y_bucket, generator=generator)
+        x_mix = self.transform(x)
+
+        assert self.idx_a_ is not None and self.idx_b_ is not None 
+        assert self.mix_lambda_ is not None
+
+        return x_mix, self.idx_a_, self.idx_b_, self.mix_lambda_
+
+    def plan(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.is_fitted:
+            raise RuntimeError("no mix plan available; call fit() first")
+
+        assert self.idx_a_ is not None and self.idx_b_ is not None 
+        assert self.mix_lambda_ is not None
+
+        return self.idx_a_, self.idx_b_, self.mix_lambda_
 
 
 class PreNormResBlock(nn.Module):
@@ -871,3 +949,343 @@ class SemanticMLP(nn.Module):
         count.index_add_(0, batch_indices, node.new_ones((batch_indices.numel(), 1)))
         bag   = bag / count.clamp_min(1.0)
         return node, bag 
+
+# ---------------------------------------------------------
+# Transfomer Gate for Mixture of Experts 
+# ---------------------------------------------------------
+
+class MoETransformerGate(nn.Module): 
+    '''
+    Flexible expert transformer gate with intrinsic explainability: 
+    - per-expert projection into shared latent space 
+    - per-expert type embedding 
+    - per-expert learnable reliability gate 
+    - CLS-token aggregation 
+    '''
+
+    def __init__(
+        self,
+        *,
+        expert_dims: dict[str, int], 
+        d_model: int, 
+        n_heads: int, 
+        n_layers: int, 
+        ff_mult: int, 
+        dropout: float, 
+        attn_dropout: float, 
+        pre_norm: bool = True, 
+        gate_floor: float = 0.0 
+    ): 
+        super().__init__()
+        if not expert_dims: 
+            raise ValueError("expert_dims must be non-empty.")
+        if d_model <= 0: 
+            raise ValueError("d_model must be > 0.")
+
+        self.expert_names = tuple(expert_dims.keys())
+        self.n_experts    = len(self.expert_names)
+        self.d_model      = d_model 
+        self.gate_floor   = gate_floor
+
+        self.adapters     = nn.ModuleDict({
+            name: nn.Sequential(
+                nn.LayerNorm(int(dim)),
+                nn.Linear(int(dim), self.d_model)
+            )
+            for name, dim in expert_dims.items() 
+        })
+
+        self.type_embed   = nn.Parameter(torch.zeros(self.n_experts, self.d_model))
+        self.cls_token    = nn.Parameter(torch.zeros(1, 1, self.d_model))
+
+        # reliability gate 
+        self.gate_mlp     = nn.Sequential(
+            nn.LayerNorm(self.d_model),
+            nn.Linear(self.d_model, self.d_model),
+            nn.GELU(),
+            nn.Linear(self.d_model, 1)
+        )
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=self.d_model,
+            nhead=n_heads,
+            dim_feedforward=ff_mult * self.d_model,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=pre_norm
+        )
+        enc_layer.self_attn.dropout = attn_dropout 
+
+        self.encoder = nn.TransformerEncoder(
+            enc_layer,
+            num_layers=n_layers,
+            enable_nested_tensor=False
+        )
+        self.out_norm = nn.LayerNorm(self.d_model)
+
+        self.reset_parameters() 
+
+    def forward(
+        self, 
+        experts: dict[str, torch.Tensor],
+    ):
+        tokens = self.stack_expert_tokens(experts)
+        gate   = self.compute_gates(tokens)
+
+        # reliability gating 
+        gated_tokens = tokens * gate.unsqueeze(-1)
+
+        # pass through transformer block 
+        bsz = gated_tokens.size(0)
+        cls = self.cls_token.expand(bsz, -1, -1)
+        seq = torch.cat([cls, gated_tokens], dim=1)
+        enc = self.encoder(seq)
+        enc = self.out_norm(enc)
+
+        cls_out   = enc[:, 0, :]
+        token_out = enc[:, 1:, :]
+        return cls_out, token_out, gate
+
+    def reset_parameters(self): 
+        nn.init.trunc_normal_(self.type_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        for mod in self.adapters.values(): 
+            for m in mod.modules(): 
+                if isinstance(m, nn.Linear): 
+                    nn.init.xavier_uniform_(m.weight)
+                    nn.init.zeros_(m.bias)
+
+        for m in self.gate_mlp.modules(): 
+            if isinstance(m, nn.Linear): 
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def stack_expert_tokens(self, experts: dict[str, torch.Tensor]) -> torch.Tensor: 
+        missing = [k for k in self.expert_names if k not in experts]
+        extra   = [k for k in experts.keys() if k not in self.adapters]
+        if missing: 
+            raise KeyError(f"missing experts: {missing}")
+        if extra: 
+            raise KeyError(f"missing experts: {extra}")
+
+        tokens = []
+        bsz    = None 
+        device = None 
+        dtype  = None 
+
+        for idx, name in enumerate(self.expert_names): 
+            x = experts[name]
+            if x.ndim != 2: 
+                raise ValueError(f"expert {name} must be shape (B, d), got {tuple(x.shape)}")
+
+            if bsz is None: 
+                bsz    = x.size(0)
+                device = x.device 
+                dtype  = x.dtype
+            else: 
+                if x.size(0) != bsz or x.device != device or x.dtype != dtype: 
+                    raise ValueError("expert mismatch.")
+
+            t = self.adapters[name](x)
+            t = t + self.type_embed[idx].unsqueeze(0)
+            tokens.append(t)
+
+        return torch.stack(tokens, dim=1)
+    
+    def compute_gates(self, tokens: torch.Tensor) -> torch.Tensor: 
+        g_logits = self.gate_mlp(tokens).squeeze(-1)
+        g        = torch.sigmoid(g_logits)
+        if self.gate_floor > 0.0: 
+            g = self.gate_floor + (1.0 - self.gate_floor) * g 
+        return g 
+
+# ---------------------------------------------------------
+# Probabilistic Head (ordinal probit estimation) 
+# ---------------------------------------------------------
+
+class ProbabilisticRankHead(nn.Module): 
+    ''' 
+    Head for heteroscedastic rank prediction 
+    '''
+
+    def __init__(
+        self,
+        in_dim: int, 
+        hidden_dim: Optional[int], 
+        dropout: float, 
+        log_var_min: float = -9.0, 
+        log_var_max: float =  9.0 
+    ): 
+        super().__init__()
+        self.log_var_min = log_var_min 
+        self.log_var_max = log_var_max 
+
+        if hidden_dim is None: 
+            self.trunk = nn.Identity() 
+            d = in_dim 
+        else: 
+            self.trunk = nn.Sequential(
+                nn.LayerNorm(in_dim), 
+                nn.Linear(in_dim, hidden_dim), 
+                nn.GELU(), 
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
+            )
+            d = hidden_dim 
+
+        self.mu_head = nn.Linear(d, 1)
+        self.lv_head = nn.Linear(d, 1)
+
+    def forward(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: 
+        z  = self.trunk(h)
+        mu = self.mu_head(z).squeeze(-1)
+        log_var = self.lv_head(z).squeeze(-1)
+        log_var = log_var.clamp(min=self.log_var_min, max=self.log_var_max)
+        return mu, log_var 
+
+# --------------------------------------------------------
+# Deep Fusion Model 
+# --------------------------------------------------------
+
+class DeepFusionMLP(nn.Module): 
+
+    '''
+    Deep Branch for Wide & Deep fusion over expert embeddings
+    '''
+
+    def __init__(
+        self,
+        *,
+        expert_dims: dict[str, int], 
+
+        d_model: int, 
+        n_heads: int, 
+        n_layers: int, 
+        ff_mult: int, 
+        transformer_dropout: float, 
+        transformer_attn_dropout: float, 
+        pre_norm: bool = True, 
+        gate_floor: float = 0.05, 
+
+        hidden_dim: int, 
+        depth: int, 
+        dropout: float, 
+        trunk_out_dim: Optional[int], 
+
+        head_hidden_dim: Optional[int], 
+        head_dropout: float, 
+        log_var_min: float = -9.0, 
+        log_var_max: float =  9.0, 
+    ):
+        super().__init__()
+        
+        self.gate = MoETransformerGate(
+            expert_dims=expert_dims, 
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            ff_mult=ff_mult,
+            dropout=transformer_dropout,
+            attn_dropout=transformer_attn_dropout,
+            pre_norm=pre_norm,
+            gate_floor=gate_floor 
+        )
+
+        self.trunk = ResidualMLP(
+            in_dim=d_model,
+            hidden_dim=hidden_dim,
+            depth=depth,
+            dropout=dropout,
+            out_dim=trunk_out_dim
+        )
+
+        self.head = ProbabilisticRankHead(
+            in_dim=self.trunk.out_dim,
+            hidden_dim=head_hidden_dim,
+            dropout=head_dropout,
+            log_var_min=log_var_min,
+            log_var_max=log_var_max 
+        )
+
+        self.out_dim = self.trunk.out_dim 
+
+    def forward_features(self, experts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]: 
+        cls_out, token_out, gate = self.gate(experts)
+        emb = self.trunk(cls_out)
+
+        return {
+            "embedding": emb, 
+            "cls": cls_out, 
+            "tokens": token_out, 
+            "gate": gate 
+        }
+
+    def extract(self, experts: dict[str, torch.Tensor]) -> torch.Tensor: 
+        return self.forward_features(experts)["embedding"]
+
+    def forward(
+        self, 
+        experts: dict[str, torch.Tensor],
+        return_features: bool = False 
+    ) -> dict[str, torch.Tensor]: 
+        feats = self.forward_features(experts)
+        mu_deep, log_var_deep = self.head(feats["embedding"])
+
+        out = {
+            "mu_deep": mu_deep, 
+            "log_var_deep": log_var_deep
+        }
+
+        if return_features: 
+            out.update(feats)
+        return out 
+
+# ---------------------------------------------------------
+# Wide Model - log-log ridge regressor 
+# ---------------------------------------------------------
+
+class WideRidgeRegressor(nn.Module): 
+    '''
+    
+    '''
+    def __init__(
+        self,
+        in_dim: int, 
+        *,
+        bias: bool = True, 
+        l2_alpha: float = 1e-2, 
+        init_log_var: float = -1.0, 
+        log_var_min: float = -9.0, 
+        log_var_max: float =  9.0, 
+    ):
+        super().__init__()
+        
+        self.in_dim        = in_dim 
+        self.l2_alpha      = l2_alpha
+        self.log_var_min   = log_var_min 
+        self.log_var_max   = log_var_max 
+        self.linear        = nn.Linear(self.in_dim, 1, bias=bias)
+        self.log_var_param = nn.Parameter(
+            torch.tensor(float(init_log_var), dtype=torch.float32)
+        )
+
+        self.reset_parameters() 
+
+    def reset_parameters(self): 
+        nn.init.zeros_(self.linear.weight)
+        if self.linear.bias is not None: 
+            nn.init.zeros_(self.linear.bias)
+
+    def ridge_penalty(self) -> torch.Tensor: 
+        return 0.5 * self.l2_alpha * self.linear.weight.pow(2).sum()
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]: 
+        mu      = self.linear(x).squeeze(-1)
+        lv      = self.log_var_param.clamp(self.log_var_min, self.log_var_max)
+        log_var = lv.expand_as(mu)
+
+        return {
+            "mu_wide": mu, 
+            "log_var_wide": log_var 
+        }
