@@ -71,8 +71,7 @@ def cv_config(folds: int, random_state: int) -> CVConfig:
 def normalize_spatial_params(params, *, random_state: int, collate_fn): 
     params.setdefault("random_state", random_state)
     params.setdefault("collate_fn", collate_fn)
-    params.setdefault("soft_epochs", 200)
-    params.setdefault("hard_epochs", 200)
+    params.setdefault("epochs", 400)
     params.setdefault("early_stopping_rounds", 15)
     params.setdefault("eval_fraction", 0.2)
     params.setdefault("min_delta", 1e-4)

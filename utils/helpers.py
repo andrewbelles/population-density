@@ -6,15 +6,18 @@
 # 
 # 
 
-import os, re, yaml
+import os, re, yaml, torch
 
 import pandas as pd 
 
 from pathlib import Path
 
 import numpy as np 
+
 from numpy.typing import ArrayLike, NDArray
+
 from typing import Any, Callable, Sequence, Dict  
+
 from sklearn.preprocessing import StandardScaler
 
 from functools import partial 
@@ -33,6 +36,46 @@ MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "o
 
 def to_num(s: pd.Series) -> pd.Series: 
     return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False), errors="coerce")
+
+def as_1d_f64(x: NDArray) -> NDArray: 
+    arr  = np.asarray(x, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(arr)
+    if not mask.all(): 
+        raise ValueError("array contains non-finite values")
+    return arr 
+
+def as_2d_f64(x: NDArray) -> NDArray: 
+    arr  = np.asarray(x, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2: 
+        raise ValueError("array must be shape (N, 2+), got {arr.shape}")
+    mask = np.isfinite(arr)
+    if not mask.all(): 
+        raise ValueError("array contains non-finite values")
+    return arr 
+
+def to_batch_tensor(
+    x,
+    *,
+    n: int,
+    device: torch.device, 
+    dtype: torch.dtype, 
+): 
+    if torch.is_tensor(x): 
+        t = x.to(device=device, dtype=dtype).reshape(-1)
+    else: 
+        t = torch.as_tensor(x, device=device, dtype=dtype).reshape(-1)
+
+    if t.numel() == 1: 
+        return t.expand(n)
+    if t.numel() != n: 
+        raise ValueError(f"numel={t.numel()} expected 1 or {n}")
+    return t 
+
+def weighted_mean(per_sample: torch.Tensor, sample_weight: torch.Tensor | None) -> torch.Tensor: 
+    if sample_weight is None: 
+        return per_sample.mean() 
+    w = sample_weight.to(device=per_sample.device, dtype=per_sample.dtype).reshape(-1)
+    return (per_sample * w).sum() / w.sum().clamp_min(1e-9)
 
 def bind(fn, **kwargs):
     return partial(fn, **kwargs)
