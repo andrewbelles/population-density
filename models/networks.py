@@ -21,7 +21,7 @@ import torch
 
 import torch.nn.functional as F 
 
-from torch import nn, reshape 
+from torch import nn, reshape, wait 
 
 import torchvision.models as tvm
 
@@ -956,11 +956,9 @@ class SemanticMLP(nn.Module):
 
 class MoETransformerGate(nn.Module): 
     '''
-    Flexible expert transformer gate with intrinsic explainability: 
-    - per-expert projection into shared latent space 
-    - per-expert type embedding 
-    - per-expert learnable reliability gate 
-    - CLS-token aggregation 
+    Gateway-token transformer: 
+    - predicts per-expert reliability from concatenated expert features 
+    - compresses all experts into a fixed number of latent tokens
     '''
 
     def __init__(
@@ -974,36 +972,45 @@ class MoETransformerGate(nn.Module):
         dropout: float, 
         attn_dropout: float, 
         pre_norm: bool = True, 
-        gate_floor: float = 0.0 
+        gate_floor: float = 0.0,
+        num_tokens: int = 4, 
+        gateway_hidden_dim: int 
     ): 
         super().__init__()
         if not expert_dims: 
             raise ValueError("expert_dims must be non-empty.")
         if d_model <= 0: 
             raise ValueError("d_model must be > 0.")
+        if num_tokens <= 0: 
+            raise ValueError("num_tokens must be > 0.")
 
-        self.expert_names = tuple(expert_dims.keys())
+        self.expert_names = tuple(expert_dims.keys()) 
+        self.expert_dims  = {k: int(v) for k, v in expert_dims.items()} 
         self.n_experts    = len(self.expert_names)
         self.d_model      = d_model 
         self.gate_floor   = gate_floor
+        self.num_tokens   = num_tokens
+        self.input_dim    = int(sum(self.expert_dims.values()))
+        
+        self.gateway_hidden_dim = gateway_hidden_dim
 
-        self.adapters     = nn.ModuleDict({
-            name: nn.Sequential(
-                nn.LayerNorm(int(dim)),
-                nn.Linear(int(dim), self.d_model)
-            )
-            for name, dim in expert_dims.items() 
-        })
-
-        self.type_embed   = nn.Parameter(torch.zeros(self.n_experts, self.d_model))
+        self.token_embed  = nn.Parameter(torch.zeros(self.num_tokens, self.d_model))
         self.cls_token    = nn.Parameter(torch.zeros(1, 1, self.d_model))
 
-        # reliability gate 
-        self.gate_mlp     = nn.Sequential(
-            nn.LayerNorm(self.d_model),
-            nn.Linear(self.d_model, self.d_model),
+        self.expert_gate_mlp = nn.Sequential(
+            nn.LayerNorm(self.input_dim),
+            nn.Linear(self.input_dim, self.gateway_hidden_dim),
+            nn.GELU(), 
+            nn.Linear(self.gateway_hidden_dim, self.n_experts)
+        )
+
+        self.gateway = nn.Sequential(
+            nn.LayerNorm(self.input_dim),
+            nn.Linear(self.input_dim, self.gateway_hidden_dim),
+            nn.LayerNorm(self.gateway_hidden_dim),
             nn.GELU(),
-            nn.Linear(self.d_model, 1)
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(), 
+            nn.Linear(self.gateway_hidden_dim, self.num_tokens * self.d_model)
         )
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -1030,16 +1037,12 @@ class MoETransformerGate(nn.Module):
         self, 
         experts: dict[str, torch.Tensor],
     ):
-        tokens = self.stack_expert_tokens(experts)
-        gate   = self.compute_gates(tokens)
-
-        # reliability gating 
-        gated_tokens = tokens * gate.unsqueeze(-1)
+        tokens, gate = self.stack_expert_tokens(experts)
 
         # pass through transformer block 
-        bsz = gated_tokens.size(0)
+        bsz = tokens.size(0) 
         cls = self.cls_token.expand(bsz, -1, -1)
-        seq = torch.cat([cls, gated_tokens], dim=1)
+        seq = torch.cat([cls, tokens], dim=1)
         enc = self.encoder(seq)
         enc = self.out_norm(enc)
 
@@ -1048,29 +1051,31 @@ class MoETransformerGate(nn.Module):
         return cls_out, token_out, gate
 
     def reset_parameters(self): 
-        nn.init.trunc_normal_(self.type_embed, std=0.02)
+        nn.init.trunc_normal_(self.token_embed, std=0.02)
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
-        for mod in self.adapters.values(): 
-            for m in mod.modules(): 
-                if isinstance(m, nn.Linear): 
-                    nn.init.xavier_uniform_(m.weight)
-                    nn.init.zeros_(m.bias)
-
-        for m in self.gate_mlp.modules(): 
-            if isinstance(m, nn.Linear): 
+        for m in self.expert_gate_mlp.modules():
+            if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def stack_expert_tokens(self, experts: dict[str, torch.Tensor]) -> torch.Tensor: 
+        for m in self.gateway.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def stack_expert_tokens(
+        self, 
+        experts: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]: 
         missing = [k for k in self.expert_names if k not in experts]
-        extra   = [k for k in experts.keys() if k not in self.adapters]
+        extra   = [k for k in experts.keys() if k not in self.expert_dims]
         if missing: 
             raise KeyError(f"missing experts: {missing}")
         if extra: 
-            raise KeyError(f"missing experts: {extra}")
+            raise KeyError(f"unexpected experts: {extra}")
 
-        tokens = []
+        parts  = []
         bsz    = None 
         device = None 
         dtype  = None 
@@ -1088,18 +1093,27 @@ class MoETransformerGate(nn.Module):
                 if x.size(0) != bsz or x.device != device or x.dtype != dtype: 
                     raise ValueError("expert mismatch.")
 
-            t = self.adapters[name](x)
-            t = t + self.type_embed[idx].unsqueeze(0)
-            tokens.append(t)
+            parts.append(x)
 
-        return torch.stack(tokens, dim=1)
-    
-    def compute_gates(self, tokens: torch.Tensor) -> torch.Tensor: 
-        g_logits = self.gate_mlp(tokens).squeeze(-1)
-        g        = torch.sigmoid(g_logits)
+        x_cat = torch.cat(parts, dim=1)
+        g_logits = self.expert_gate_mlp(x_cat)
+        g = torch.sigmoid(g_logits)
         if self.gate_floor > 0.0: 
             g = self.gate_floor + (1.0 - self.gate_floor) * g 
-        return g 
+
+        s = 0 
+        gated_parts = []
+        for i, name in enumerate(self.expert_names): 
+            d = self.expert_dims[name]
+            chunk = x_cat[:, s:s+d]
+            gated_parts.append(chunk * g[:, i:i+1])
+            s += d 
+        x_gated = torch.cat(gated_parts, dim=1)
+
+        tokens_flat = self.gateway(x_gated)
+        tokens = tokens_flat.view(x_cat.size(0), self.num_tokens, self.d_model)
+        tokens = tokens + self.token_embed.unsqueeze(0)
+        return tokens, g
 
 # ---------------------------------------------------------
 # Probabilistic Head (ordinal probit estimation) 
@@ -1137,6 +1151,8 @@ class ProbabilisticRankHead(nn.Module):
         self.mu_head = nn.Linear(d, 1)
         self.lv_head = nn.Linear(d, 1)
 
+        nn.init.zeros_(self.mu_head.weight)
+        nn.init.zeros_(self.mu_head.bias)
         nn.init.zeros_(self.lv_head.weight)
         nn.init.constant_(self.lv_head.bias, 5.0)
 
@@ -1170,6 +1186,8 @@ class DeepFusionMLP(nn.Module):
         transformer_attn_dropout: float, 
         pre_norm: bool = True, 
         gate_floor: float = 0.05, 
+        gate_num_tokens: int, 
+        gateway_hidden_dim: int, 
 
         hidden_dim: int, 
         depth: int, 
@@ -1192,7 +1210,9 @@ class DeepFusionMLP(nn.Module):
             dropout=transformer_dropout,
             attn_dropout=transformer_attn_dropout,
             pre_norm=pre_norm,
-            gate_floor=gate_floor 
+            gate_floor=gate_floor,
+            num_tokens=gate_num_tokens,
+            gateway_hidden_dim=gateway_hidden_dim
         )
 
         self.trunk = ResidualMLP(
@@ -1283,12 +1303,20 @@ class WideRidgeRegressor(nn.Module):
     def ridge_penalty(self) -> torch.Tensor: 
         return 0.5 * self.l2_alpha * self.linear.weight.pow(2).sum()
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]: 
+    def forward(
+        self, 
+        x: torch.Tensor,
+        *, 
+        return_features: bool = False
+    ) -> dict[str, torch.Tensor]: 
         mu      = self.linear(x).squeeze(-1)
         lv      = self.log_var_param.clamp(self.log_var_min, self.log_var_max)
         log_var = lv.expand_as(mu)
 
-        return {
+        out = {
             "mu_wide": mu, 
             "log_var_wide": log_var 
         }
+        if return_features:
+            out["h_wide"] = x 
+        return out  

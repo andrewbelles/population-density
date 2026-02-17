@@ -280,6 +280,8 @@ def define_deep_moe_space(trial: optuna.Trial):
         "transformer_attn_dropout": trial.suggest_float("transformer_attn_dropout", 0.0, 0.2),
         "transformer_dropout": trial.suggest_float("transformer_dropout", 0.0, 0.2), 
         "gate_floor": trial.suggest_float("gate_floor", 0.0, 0.15), 
+        "gate_num_tokens": trial.suggest_categorical("gate_num_tokens", [2, 4, 6]),
+        "gateway_hidden_dim": trial.suggest_categorical("gateway_hidden_dim", [128, 256, 512]),
 
         "trunk_hidden_dim": trial.suggest_categorical("trunk_hidden_dim", [128, 256, 512]), 
         "trunk_depth": trial.suggest_int("trunk_depth", 1, 6), 
@@ -327,6 +329,9 @@ def define_fusion_joint_space(trial: optuna.Trial):
         "aux_wide_weight": trial.suggest_float("aux_wide_weight", 3e-2, 5e-1, log=True),
         "aux_hard_scale": trial.suggest_float("aux_hard_scale", 0.1, 0.7),
         "aux_decay_power": trial.suggest_float("aux_decay_power", 0.5, 3.0),
+
+        "hsic_weight": trial.suggest_float("hsic_weight", 1e-2, 5e-1, log=True),
+        "hsic_sigma": 0.0, # median heuristic  
         
         "batch_size": trial.suggest_categorical("batch_size", [128]),
 

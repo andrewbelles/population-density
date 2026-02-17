@@ -119,3 +119,35 @@ models:
     lr: 0.00048601134629409144
     weight_decay: 8.192520081656103e-07
     n_prototypes: 16
+  Fusion/2013:
+    d_model: 128
+    transformer_heads: 2
+    transformer_layers: 3
+    transformer_ff_mult: 2
+    transformer_attn_dropout: 0.10575311890857272
+    transformer_dropout: 0.10168544155662132
+    gate_floor: 0.004402205093299439
+    trunk_hidden_dim: 256
+    trunk_depth: 3
+    trunk_dropout: 0.24317990290672417
+    trunk_out_dim: null
+    head_hidden_dim: 128
+    head_dropout: 0.12662334654831214
+    wide_l2_alpha: 7.037021609753234e-06
+    wide_init_log_var: -0.747361091725793
+    ridge_scale: 0.025966378443080335
+    grad_ema_one_minus: 0.001287763741090115
+    mix_alpha: 0.2626497515567353
+    mix_mult: 2
+    mix_min_lambda: 0.21464721337482634
+    lr_deep: 0.0012582950989182674
+    lr_wide: 1.0516184145338938e-05
+    weight_decay: 3.7075614028748853e-07
+    grad_beta: 0.7631265196745705
+    grad_min_scale: 0.509346553589162
+    grad_max_scale: 2.2467331243080766
+    grad_warmup_epochs: 9
+    aux_wide_weight: 0.2441929398953075
+    aux_hard_scale: 0.15473279806283707
+    aux_decay_power: 2.7355754582010077
+    batch_size: 128

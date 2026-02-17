@@ -713,6 +713,8 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         transformer_dropout: float, 
         transformer_attn_dropout: float, 
         gate_floor: float = 0.05, 
+        gate_num_tokens: int, 
+        gateway_hidden_dim: int, 
 
         trunk_hidden_dim: int, 
         trunk_depth: int, 
@@ -752,6 +754,9 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         aux_decay_power: float, 
         aux_warmup_epochs: int = 0,  
 
+        hsic_weight: float, 
+        hsic_sigma: Optional[float] = None, 
+
         soft_epochs: int = 300, 
         hard_epochs: int = 200, 
         batch_size: int = 256, 
@@ -775,6 +780,8 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         self.transformer_dropout      = transformer_dropout
         self.transformer_attn_dropout = transformer_attn_dropout
         self.gate_floor               = gate_floor
+        self.gate_num_tokens          = gate_num_tokens 
+        self.gateway_hidden_dim       = gateway_hidden_dim
 
         self.trunk_hidden_dim         = trunk_hidden_dim
         self.trunk_depth              = trunk_depth
@@ -813,6 +820,9 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         self.aux_hard_scale           = aux_hard_scale
         self.aux_decay_power          = aux_decay_power
         self.aux_warmup_epochs        = aux_warmup_epochs
+
+        self.hsic_weight              = hsic_weight 
+        self.hsic_sigma               = hsic_sigma
 
         self.soft_epochs              = soft_epochs
         self.hard_epochs              = hard_epochs
@@ -1094,13 +1104,19 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
             wide    = wide_b 
             lam, idx_a, idx_b = None, None, None 
 
-        deep_out = self.deep_(experts, return_features=False)
-        wide_out = self.wide_(wide)
+        hsic_active = with_aux and self.hsic_weight > 0.0
+
+        deep_out = self.deep_(experts, return_features=hsic_active)
+        wide_out = self.wide_(wide, return_features=hsic_active)
+
+        mu_resid    = deep_out["mu_deep"]
+        mu_wide     = wide_out["mu_wide"]
+        mu_deep_abs = mu_wide + mu_resid 
 
         context = {
-            "mu_deep": deep_out["mu_deep"], 
+            "mu_deep": mu_deep_abs, 
             "log_var_deep": deep_out["log_var_deep"], 
-            "mu_wide": wide_out["mu_wide"], 
+            "mu_wide": mu_wide, 
             "log_var_wide": wide_out["log_var_wide"], 
             "w_ordinal": self.w_ordinal, 
             "w_uncertainty": self.w_uncertainty
@@ -1125,6 +1141,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         if with_aux and aux_scale > 0.0: 
 
             y_ref = yb.reshape(-1)
+            mu_w_det = mu_wide.detach().reshape(-1)
             if with_mixing: 
                 y_a = yb[idx_a].reshape(-1)
                 y_b = yb[idx_b].reshape(-1)
@@ -1132,17 +1149,18 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
                 q   = 1.0 - p 
 
             if self.aux_deep_weight > 0.0: 
-                mu_d = deep_out["mu_deep"].reshape(-1)
+                mu_r = mu_resid.reshape(-1)
                 if with_mixing: 
                     deep_aux = (
-                        p * torch.abs(mu_d - y_a) + q * torch.abs(mu_d - y_b)
+                        p * torch.abs(mu_r - (y_a - mu_w_det)) + 
+                        q * torch.abs(mu_r - (y_b - mu_w_det))
                     ).mean() 
                 else: 
-                    deep_aux = torch.abs(mu_d - y_ref).mean() 
+                    deep_aux = torch.abs(mu_r - (y_ref - mu_w_det)).mean() 
                 total = total + (aux_scale * self.aux_deep_weight) * deep_aux
 
             if self.aux_wide_weight > 0.0: 
-                mu_w = wide_out["mu_wide"].reshape(-1)
+                mu_w = mu_wide.reshape(-1)
                 if with_mixing: 
                     wide_aux = (
                         p * torch.abs(mu_w - y_a) + q * torch.abs(mu_w - y_b)
@@ -1150,6 +1168,12 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
                 else: 
                     wide_aux = torch.abs(mu_w - y_ref).mean() 
                 total = total + (aux_scale * self.aux_wide_weight) * wide_aux
+
+        if hsic_active:
+            h_deep = deep_out["embedding"]
+            h_wide = wide_out["h_wide"].detach() 
+            hsic   = self.hsic_rbf(h_deep, h_wide, sigma=self.hsic_sigma)
+            total  = total + self.hsic_weight * hsic 
 
         ord_raw = float(comp.raw["ordinal"].detach().item())
         unc_raw = float(comp.raw["uncertainty"].detach().item())
@@ -1212,6 +1236,8 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
             transformer_attn_dropout=self.transformer_attn_dropout,
             pre_norm=True,
             gate_floor=self.gate_floor,
+            gate_num_tokens=self.gate_num_tokens,
+            gateway_hidden_dim=self.gateway_hidden_dim,
             hidden_dim=self.trunk_hidden_dim,
             depth=self.trunk_depth,
             dropout=self.trunk_dropout,
@@ -1412,6 +1438,32 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         return {"g_deep": g_deep, "g_wide": g_wide, "s_deep": s_deep, "s_wide": s_wide}
 
+    def rbf_kernel(self, x: torch.Tensor, sigma: Optional[float]) -> torch.Tensor:
+        x = x.reshape(x.size(0), -1)
+        d2 = torch.cdist(x, x, p=2).pow(2)
+        n  = d2.size(0)
+        if sigma is None or float(sigma) <= 0.0:
+            if n > 1:
+                i, j = torch.triu_indices(n, n, offset=1, device=d2.device)
+                tri = d2[i, j]
+                med = tri.median() if tri.numel() > 0 else d2.new_tensor(1.0)
+            else:
+                med = d2.new_tensor(1.0)
+            sigma2 = med.clamp_min(1e-6)
+        else:
+            sigma2 = d2.new_tensor(float(sigma) ** 2)
+        return torch.exp(-0.5 * d2 / sigma2.clamp_min(1e-6))
+
+    def hsic_rbf(self, x: torch.Tensor, y: torch.Tensor, sigma: Optional[float]) -> torch.Tensor:
+        n = int(x.size(0))
+        if n < 3:
+            return x.new_tensor(0.0)
+        k = self.rbf_kernel(x, sigma=sigma)
+        l = self.rbf_kernel(y, sigma=sigma)
+        k = k - k.mean(0, keepdim=True) - k.mean(1, keepdim=True) + k.mean()
+        l = l - l.mean(0, keepdim=True) - l.mean(1, keepdim=True) + l.mean()
+        return (k * l).sum() / float((n - 1) ** 2)
+
     def aux_epoch_scale(self, *, ep: int, epochs: int, mixing: bool) -> float: 
         if self.aux_deep_weight <= 0.0 and self.aux_wide_weight <= 0.0: 
             return 0.0 
@@ -1439,6 +1491,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         self.wide_.eval() 
 
         keys = (
+            "mu_resid", 
             "mu_deep", "log_var_deep",
             "mu_wide", "log_var_wide",
             "mu_fused", "log_var_fused",
@@ -1464,18 +1517,21 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
     ) -> dict[str, torch.Tensor]: 
         deep_out = self.deep_(experts_b, return_features=False)
         wide_out = self.wide_(wide_b) 
+        mu_resid = deep_out["mu_deep"]
+        mu_deep_abs = wide_out["mu_wide"] + mu_resid 
 
         fuse_term = self.loss_fn_.terms[0]
         mu_fused, log_var_fused, alpha_d, alpha_w = fuse_term.fuse({
-            "y": deep_out["mu_deep"], # for shape 
-            "mu_deep": deep_out["mu_deep"],
+            "y": mu_deep_abs,
+            "mu_deep": mu_deep_abs,
             "log_var_deep": deep_out["log_var_deep"],
             "mu_wide": wide_out["mu_wide"],
             "log_var_wide": wide_out["log_var_wide"],
         })
 
         return {
-            "mu_deep": deep_out["mu_deep"],
+            "mu_resid": mu_resid,
+            "mu_deep": mu_deep_abs,
             "log_var_deep": deep_out["log_var_deep"],
             "mu_wide": wide_out["mu_wide"],
             "log_var_wide": wide_out["log_var_wide"],
