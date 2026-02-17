@@ -36,6 +36,7 @@ from sklearn.metrics           import (
 
 from sklearn.model_selection   import (
     StratifiedShuffleSplit, 
+    KFold, 
 )
 
 from torch.utils.data          import (
@@ -70,6 +71,10 @@ from utils.helpers             import (
     make_train_mask,
     align_on_fips,
     load_probs_for_fips
+)
+
+from scipy.special             import (
+    ndtr 
 )
 
 from utils.resources           import (
@@ -138,7 +143,8 @@ class HierarchicalFusionEvaluator(OptunaEvaluator):
         param_space: Callable[[optuna.Trial], Dict[str, Any]],
         fixed_params: Optional[Dict[str, Any]] = None, 
         random_state: int = 0, 
-        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False)
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+        cv_folds: int = 3 
     ): 
         self.X                = X 
         self.model_factory    = model_factory
@@ -146,6 +152,7 @@ class HierarchicalFusionEvaluator(OptunaEvaluator):
         self.fixed_params     = dict(fixed_params or {})
         self.random_state     = random_state 
         self.compute_strategy = compute_strategy
+        self.cv_folds         = cv_folds 
 
     def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         return self.param_space_fn(trial)
@@ -154,16 +161,71 @@ class HierarchicalFusionEvaluator(OptunaEvaluator):
         kwargs = dict(self.fixed_params)
         kwargs.update(params)
 
-        model = self.model_factory(**kwargs)
-        try: 
-            model.fit(self.X)
-            score = float(model.best_val_score_)
-            if not np.isfinite(score): 
-                return float("inf")
-            return score 
-        finally: 
-            del model 
-            _cleanup_cuda()
+        y_all = np.asarray(self.X["y"], dtype=np.float64).reshape(-1)
+        n     = y_all.shape[0] 
+
+        splitter = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        fold_scores: list[float] = []
+        for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(np.arange(n))): 
+            model = self.model_factory(**kwargs)
+
+            try: 
+                model.fit(self.subset_inputs(train_idx, include_y=True)) 
+                comp  = model.predict_components(self.subset_inputs(val_idx, include_y=False))
+                score = self.score_from_components(y_all[val_idx], comp) 
+                if not np.isfinite(score): 
+                    return float("inf")
+                fold_scores.append(float(score))
+                if trial is not None: 
+                    trial.report(float(np.mean(fold_scores)), step=fold_idx)
+                    if trial.should_prune(): 
+                        raise optuna.TrialPruned() 
+            finally: 
+                del model 
+                _cleanup_cuda()
+
+        return float(np.mean(fold_scores))
+
+    @staticmethod
+    def gaussian_crps(
+        y: NDArray, 
+        mu: NDArray, 
+        log_var: NDArray, 
+        var_floor: float = 1e-6
+    ) -> float:
+        y  = np.asarray(y, dtype=np.float64).reshape(-1)
+        mu = np.asarray(mu, dtype=np.float64).reshape(-1)
+        lv = np.asarray(log_var, dtype=np.float64).reshape(-1)
+        sigma = np.exp(0.5 * lv)
+        sigma = np.clip(sigma, var_floor, None)
+
+        z = (y - mu) / sigma
+        inv_sqrt_2pi = 1.0 / np.sqrt(2.0 * np.pi)
+        inv_sqrt_pi  = 1.0 / np.sqrt(np.pi)
+        cdf = ndtr(z)
+        pdf = np.exp(-0.5 * z * z) * inv_sqrt_2pi
+        per = sigma * (z * (2.0 * cdf - 1.0) + 2.0 * pdf - inv_sqrt_pi)
+        return float(np.mean(np.clip(per, 0.0, None)))
+
+    def subset_inputs(self, idx: NDArray, *, include_y: bool) -> Dict[str, Any]:
+        idx = np.asarray(idx, dtype=np.int64)
+        out = {
+            "experts": {k: np.asarray(v)[idx] for k, v in self.X["experts"].items()},
+            "wide": np.asarray(self.X["wide"])[idx],
+        }
+        if include_y:
+            out["y"] = np.asarray(self.X["y"])[idx]
+            if "coords" in self.X and self.X["coords"] is not None:
+                out["coords"] = np.asarray(self.X["coords"])[idx]
+        return out
+
+    def score_from_components(self, y_true: NDArray, comp: Dict[str, NDArray]) -> float:
+        y  = np.asarray(y_true, dtype=np.float64).reshape(-1)
+        mu = np.asarray(comp["mu_fused"], dtype=np.float64).reshape(-1)
+        lv = np.asarray(comp["log_var_fused"], dtype=np.float64).reshape(-1)
+        l1 = float(np.mean(np.abs(y - mu)))
+        crps = self.gaussian_crps(y, mu, lv)
+        return l1 + crps
 
 # ---------------------------------------------------------
 # Evaluator for Self-Supervised Feature Extractor 

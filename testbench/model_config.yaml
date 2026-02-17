@@ -119,27 +119,3 @@ models:
     lr: 0.00048601134629409144
     weight_decay: 8.192520081656103e-07
     n_prototypes: 16
-  Fusion/2013:
-    d_model: 128
-    transformer_heads: 2
-    transformer_layers: 2
-    transformer_ff_mult: 4
-    transformer_attn_dropout: 0.17025236132046834
-    transformer_dropout: 0.036965932092926625
-    gate_floor: 0.09499590213053635
-    trunk_hidden_dim: 128
-    trunk_depth: 5
-    trunk_dropout: 0.23408642325380463
-    trunk_out_dim: 128
-    head_hidden_dim: 64
-    head_dropout: 0.2381059376178958
-    wide_l2_alpha: 1.0215546938419416e-05
-    wide_init_log_var: -0.6768643658018281
-    ridge_scale: -0.959698488529011
-    mix_alpha: 0.4946273198784844
-    mix_mult: 4
-    mix_min_lambda: 0.3667451499323021
-    lr_deep: 7.940089439961979e-05
-    lr_wide: 0.00022703224810464835
-    weight_decay: 2.276906902189982e-06
-    batch_size: 128

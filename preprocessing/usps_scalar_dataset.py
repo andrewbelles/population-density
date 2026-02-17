@@ -59,16 +59,8 @@ class UspsScalarDataset:
         self.layer         = layer 
         self.area_crs      = area_crs
         
-        if label_year == 2013: 
-            self.label_map, _ = build_label_map(2013, census_dir=census_dir)
-        else: 
-            _, edges          = build_label_map(2013, census_dir=census_dir)
-            self.label_map, _ = build_label_map(
-                label_year, 
-                train_edges=edges, 
-                census_dir=census_dir
-            )
-        self.df            = self.build() 
+        self.label_map = build_label_map(label_year, census_dir=census_dir)
+        self.df         = self.build() 
 
     def save(self, out_path: str, csv_path: str | None = None): 
         if self.df is None or self.df.empty: 

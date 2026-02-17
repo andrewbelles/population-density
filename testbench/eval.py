@@ -484,6 +484,7 @@ def test_fusion_opt(
         X=X,
         model_factory=model_factory,
         param_space=define_fusion_joint_space,
+        cv_folds=3,
         random_state=random_state,
         compute_strategy=strategy
     )

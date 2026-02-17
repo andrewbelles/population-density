@@ -61,15 +61,7 @@ class WideScalarDataset:
         self.saipe_csv = Path(saipe_csv)
         self.ir_csv    = Path(ir_csv)
 
-        if year == 2013: 
-            self.label_map, _ = build_label_map(2013, census_dir=census_dir)
-        else: 
-            _, edges          = build_label_map(2013, census_dir=census_dir)
-            self.label_map, _ = build_label_map(
-                year, 
-                train_edges=edges, 
-                census_dir=census_dir
-            )
+        self.label_map = build_label_map(year, census_dir=census_dir)
 
     def build(self, *, n2_col: int) -> dict: 
         povc = self.load_poverty_counts()

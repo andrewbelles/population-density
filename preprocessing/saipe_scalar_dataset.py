@@ -67,14 +67,10 @@ class SaipeScalarDataset:
         if csv_path is None: 
             csv_path = project_path("data", "saipe", "saipe_2013.csv")
 
-        if label_year == 2013: 
-            self.labels_map, _ = build_label_map(2013, census_dir=census_dir)
-        else: 
-            _, edges           = build_label_map(2013, census_dir=census_dir)
-            self.labels_map, _ = build_label_map(label_year, train_edges=edges, census_dir=census_dir)
-        self.label_year        = int(label_year)
-        self.csv_path          = csv_path 
-        self.data              = self._build()
+        self.labels_map = build_label_map(label_year, census_dir=census_dir)
+        self.label_year = int(label_year)
+        self.csv_path   = csv_path 
+        self.data       = self._build()
 
     def save(self, out_path: str): 
         out = Path(out_path)

@@ -10,7 +10,7 @@ import numpy as np
 
 import pandas as pd 
 
-from typing        import Iterable 
+from typing        import Iterable, Optional 
 
 from pathlib       import Path 
 
@@ -105,6 +105,7 @@ class PopulationLabels:
         return {
             str(fid).zfill(5): float(r) for fid, r in zip(df.index, df["soft_rank"].to_numpy())
         }
+
 
     def fit(
         self, 
@@ -249,27 +250,12 @@ class PopulationLabels:
 def build_label_map(
     year: int,  
     *, 
-    train_year: int = 2013, 
     census_dir: str | Path = project_path("data", "census"), 
-    train_edges: np.ndarray | None = None
 ): 
+    pop = PopulationLabels(year=year, census_dir=census_dir).load_population_table()
+    log_pop = pop["log_pop"].to_numpy(np.float64)
+    fips    = pop.index.to_numpy()
 
-    if year != train_year: 
-        if train_edges is None: 
-            train = PopulationLabels(year=train_year, census_dir=census_dir).fit()
-            train_edges = train.edges_ 
-            assert train_edges is not None 
-
-        pop_target = PopulationLabels(year=year, census_dir=census_dir).load_population_table()
-        y_target   = PopulationLabels.rank_from_edges(
-            pop_target["log_pop"].to_numpy(np.float64), train_edges
-        )
-
-        label_map = {
-            str(f).zfill(5): float(r)
-            for f, r in zip(pop_target.index.to_numpy(), y_target)
-        }
-        return label_map, train_edges 
-    
-    fitted = PopulationLabels(year=year, census_dir=census_dir).fit()
-    return fitted.to_soft_rank_map(), fitted.edges_ 
+    return {
+        str(fid).zfill(5): float(lp) for fid, lp in zip(fips, log_pop)
+    }

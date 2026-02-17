@@ -641,11 +641,7 @@ class SpatialTensorDataset(ABC, TileStreamSource):
         if self.tile_hw[0] % self.patch_size != 0 or self.tile_hw[1] % self.patch_size != 0: 
             raise ValueError("tile_hw must be divisible by patch_size")
         
-        if label_year == 2013: 
-            self.label_map, _ = build_label_map(2013, census_dir=census_dir)
-        else: 
-            _, edges          = build_label_map(2013, census_dir=census_dir)
-            self.label_map, _ = build_label_map(label_year, train_edges=edges, census_dir=census_dir)
+        self.label_map = build_label_map(label_year, census_dir=census_dir)
     
     def save(
         self,

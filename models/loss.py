@@ -14,15 +14,29 @@ import numpy               as np
 
 import torch.nn.functional as F 
 
-from scipy.spatial         import KDTree
+from scipy.spatial         import (
+    KDTree
+) 
 
-from abc                   import ABC, abstractmethod 
+from abc                   import (
+    ABC, 
+    abstractmethod 
+) 
 
-from dataclasses           import dataclass, field 
+from dataclasses           import (
+    dataclass, 
+    field 
+) 
 
-from typing                import Any, Callable, Mapping 
+from typing                import (
+    Any, 
+    Callable, 
+    Mapping 
+) 
 
-from numpy.typing          import NDArray
+from numpy.typing          import (
+    NDArray
+) 
 
 from utils.helpers         import (
     as_1d_f64,
@@ -826,6 +840,113 @@ class GaussianNNLFusionLoss(WeightedLossTerm, FusionGaussianMixin):
         }
         return raw, metrics 
 
+
+class FusionCRPSLoss(WeightedLossTerm, FusionGaussianMixin): 
+    '''
+    Continuous ranked probability score for Gaussian predictive distributions 
+    '''
+
+    required_keys = ("mu_deep", "log_var_deep", "mu_wide", "log_var_wide")
+
+    def __init__(
+        self,
+        *,
+        log_var_min: float = -9.0, 
+        log_var_max: float =  9.0, 
+        var_floor: float   = 1e-6, 
+        weight: WeightSpec = 1.0, 
+        name: str = "crps"
+    ): 
+        WeightedLossTerm.__init__(
+            self,
+            name=name,
+            weight=weight,
+            reduction="mean"
+        )
+
+        FusionGaussianMixin.__init__(
+            self, 
+            log_var_min=log_var_min, 
+            log_var_max=log_var_max, 
+            var_floor=var_floor
+        )
+
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        y_true = context["y"]
+        mu, log_var, alpha_d, alpha_w = self.fuse({**context, "y": y_true})
+
+        sigma = torch.exp(0.5 * log_var).clamp_min(self.var_floor)
+
+        z = (y_true - mu) / sigma 
+
+        inv_sqrt_2pi = torch.as_tensor(1.0 / np.sqrt(2.0 * np.pi), device=z.device, dtype=z.dtype)
+        inv_sqrt_pi  = torch.as_tensor(1.0 / np.sqrt(np.pi), device=z.device, dtype=z.dtype)  
+
+        cdf = torch.special.ndtr(z)
+        pdf = torch.exp(-0.5 * z * z) * inv_sqrt_2pi 
+        per = sigma * (z * (2.0 * cdf - 1.0) + 2.0 * pdf - inv_sqrt_pi) 
+        per = per.clamp_min(0.0)
+
+        sw  = context.get("sample_weight", None)
+        if sw is not None: 
+            sw = to_batch_tensor(sw, n=per.numel(), device=per.device, dtype=per.dtype)
+
+        raw = weighted_mean(per, sw)
+        metrics = {
+            "sigma_mean": sigma.mean().detach(), 
+            "alpha_deep_mean": alpha_d.mean().detach(),
+            "alpha_wide_mean": alpha_w.mean().detach(),
+            "z_abs_mean": z.abs().mean().detach() 
+        }
+        return raw, metrics 
+
+class FusionL1Loss(WeightedLossTerm, FusionGaussianMixin): 
+    '''
+    Point-estimation alignment using fused mean 
+    '''
+
+    required_keys = ("mu_deep", "log_var_deep", "mu_wide", "log_var_wide")
+
+    def __init__(
+        self,
+        *,
+        log_var_min: float = -9.0, 
+        log_var_max: float =  9.0, 
+        var_floor: float   = 1e-6, 
+        weight: WeightSpec = 1.0, 
+        name: str = "L1"
+    ): 
+        WeightedLossTerm.__init__(
+            self,
+            name=name,
+            weight=weight,
+            reduction="mean"
+        )
+
+        FusionGaussianMixin.__init__(
+            self, 
+            log_var_min=log_var_min, 
+            log_var_max=log_var_max, 
+            var_floor=var_floor
+        )
+
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        y_true = context["y"]
+        mu, _, alpha_d, alpha_w = self.fuse({**context, "y": y_true})
+        
+        per = torch.abs(y_true - mu)
+        sw  = context.get("sample_weight", None)
+        if sw is not None: 
+            sw = to_batch_tensor(sw, n=per.numel(), device=per.device, dtype=per.dtype)
+
+        raw = weighted_mean(per, sw)
+        metrics = {
+            "mae": raw.detach(),
+            "alpha_deep_mean": alpha_d.mean().detach(),
+            "alpha_wide_mean": alpha_w.mean().detach(),
+        }
+        return raw, metrics 
+
 # ---------------------------------------------------------
 # Loss Helpers 
 # ---------------------------------------------------------
@@ -888,24 +1009,20 @@ def build_ssfe_loss(
 
 def build_wide_deep_loss(
     *,
-    cut_edges,
     log_var_min: float = -9.0, 
     log_var_max: float = 9.0, 
     var_floor: float = 1e-6,
-    prob_eps: float = 1e-9, 
 ): 
 
     return LossComposer(
-        OrderedProbitFusionLoss(
-            cut_edges=cut_edges,
-            prob_eps=prob_eps,
+        FusionCRPSLoss(
             log_var_min=log_var_min,
             log_var_max=log_var_max,
             var_floor=var_floor,
             weight="w_ordinal",
             name="ordinal"
         ),
-        GaussianNNLFusionLoss(
+        FusionL1Loss(
             log_var_min=log_var_min,
             log_var_max=log_var_max,
             var_floor=var_floor,

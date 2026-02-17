@@ -313,7 +313,7 @@ def define_fusion_joint_space(trial: optuna.Trial):
         "mix_mult": trial.suggest_categorical("mix_mult", [2, 4]), 
         "mix_min_lambda": trial.suggest_float("mix_min_lambda", 0.1, 0.4),  
 
-        "lr_deep": trial.suggest_float("lr_deep", 1e-5, 5e-4, log=True),
+        "lr_deep": trial.suggest_float("lr_deep", 1e-4, 5e-3, log=True),
         "lr_wide": trial.suggest_float("lr_wide", 1e-5, 5e-4, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True),
 
@@ -323,12 +323,12 @@ def define_fusion_joint_space(trial: optuna.Trial):
         "grad_max_scale": trial.suggest_float("grad_max_scale", 1.5, 3.5),
         "grad_warmup_epochs": trial.suggest_int("grad_warmup_epochs", 0, 40),
 
-        "aux_deep_weight": trial.suggest_float("aux_deep_weight", 3e-2, 5e-1, log=True),
+        "aux_deep_weight": 0.6,#trial.suggest_float("aux_deep_weight", 3e-2, 5e-1, log=True),
         "aux_wide_weight": trial.suggest_float("aux_wide_weight", 3e-2, 5e-1, log=True),
         "aux_hard_scale": trial.suggest_float("aux_hard_scale", 0.1, 0.7),
         "aux_decay_power": trial.suggest_float("aux_decay_power", 0.5, 3.0),
         
-        "batch_size": trial.suggest_categorical("batch_size", [64, 128]),
+        "batch_size": trial.suggest_categorical("batch_size", [128]),
 
         "w_ordinal": 1.0, 
         "w_uncertainty": 1.0, 

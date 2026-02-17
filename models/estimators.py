@@ -78,7 +78,8 @@ from models.loss               import (
 from sklearn.model_selection import (
     StratifiedShuffleSplit,
     StratifiedKFold,
-    cross_val_predict
+    cross_val_predict,
+    ShuffleSplit
 )
 
 from preprocessing.loaders   import (
@@ -743,13 +744,13 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         grad_ema: float, 
         grad_min_scale: float = 0.5, 
         grad_max_scale: float = 2.0, 
-        grad_warmup_epochs: int = 10, 
+        grad_warmup_epochs: int = 20, 
 
         aux_deep_weight: float, 
         aux_wide_weight: float, 
         aux_hard_scale: float, 
         aux_decay_power: float, 
-        aux_warmup_epochs: int = 10, 
+        aux_warmup_epochs: int = 0,  
 
         soft_epochs: int = 300, 
         hard_epochs: int = 200, 
@@ -857,7 +858,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
                 emb = self.deep_.extract(experts_b)
                 chunks.append(emb.detach().cpu())
 
-        return torch.cat(chunks, dim=0).numpy() 
+        return torch.cat(chunks, dim=0).numpy()
 
     # -----------------------------------------------------
     # Training 
@@ -866,13 +867,13 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
     def fit(self, X, y=None, coords=None): 
         experts = X["experts"]
         wide    = X["wide"]
-        y_rank  = np.asarray(X["y_rank"] if y is None else y, dtype=np.float32).reshape(-1)
+        y       = np.asarray(X["y"] if y is None else y, dtype=np.float32).reshape(-1)
         coords  = X.get("coords", coords)
 
         experts = {k: np.asarray(v, dtype=np.float32) for k, v in experts.items()}
         wide    = np.asarray(wide, dtype=np.float32)
 
-        tr_idx, va_idx = self.split_indices(y_rank)
+        tr_idx, va_idx = self.split_indices(y)
 
         self.grad_step_     = 0 
         self.deep_grad_ema_ = None 
@@ -889,29 +890,28 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         if wide.ndim == 1: 
             wide = wide.reshape(-1, 1)
 
-        self.wide_scaler_ = StandardScaler() 
-        self.wide_scaler_.fit(wide[tr_idx])
+        use_sample_weights = False 
+        sw = np.ones(y.shape[0], dtype=np.float32)
+        if use_sample_weights: 
+            if coords is None: 
+                raise ValueError("coords are required for sample weight")
 
-        wide = self.wide_scaler_.transform(wide).astype(np.float32, copy=False)
-
-        sw = np.ones(y_rank.shape[0], dtype=np.float32)
-        if coords is None: 
-            raise ValueError("coords are required for sample weight")
-
-        coords       = np.asarray(coords, dtype=np.float64)
-        sw_tr, sw_va = self.build_sample_weights(y_rank, coords, tr_idx, va_idx)
-        sw[tr_idx]   = sw_tr 
-        sw[va_idx]   = sw_va
+            coords       = np.asarray(coords, dtype=np.float64)
+            sw_tr, sw_va = self.build_sample_weights(y, coords, tr_idx, va_idx)
+            sw[tr_idx]   = sw_tr 
+            sw[va_idx]   = sw_va
+        else: 
+            sw_tr = sw[tr_idx]
 
         train_loader = self.build_fusion_loader(
-            experts, wide, y_rank, sw, 
+            experts, wide, y, sw, 
             tr_idx, shuffle=True, drop_last=True)
         val_loader   = self.build_fusion_loader(
-            experts, wide, y_rank, sw, 
+            experts, wide, y, sw, 
             va_idx, shuffle=False, drop_last=False)
 
         self.build_model() 
-        self.initialize_wide(wide[tr_idx], y_rank[tr_idx], sw_tr)
+        self.initialize_wide(wide[tr_idx], y[tr_idx], sw_tr)
 
         best_soft = self.run_phase(
             name="Soft-Labels",
@@ -970,6 +970,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
             aux_scale = self.aux_epoch_scale(ep=ep, epochs=epochs, mixing=mixing)
             _ = self.train_epoch(train_loader, mixing=mixing, aux_scale=aux_scale)
             val   = self.validate(val_loader)  
+            # crps and l1 loss 
             score = val.ordinal + val.uncertainty 
 
             if score < best_val - self.min_delta:
@@ -987,16 +988,16 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
             if ep % 5 == 0: 
                 avg_dt = (time.perf_counter() - t0) / (ep + 1)
-                
+
                 print(
                     f"[epoch {ep:3d}] {avg_dt:.2f}s avg | "
-                    f"val_loss={val.loss:.4f} | val_ord={val.ordinal:.4f} | " 
-                    f"val_unc={val.uncertainty:.4f}",
+                    f"val_loss={val.loss:.4f} | val_crps={val.ordinal:.4f} | " 
+                    f"val_l1={val.uncertainty:.4f}",
                     file=sys.stderr,
                     flush=True,
                 )
 
-        return best_state 
+        return best_state
 
     def train_epoch(self, loader: DataLoader, *, mixing: bool, aux_scale: float) -> PhaseStats:
         self.deep_.train() 
@@ -1108,47 +1109,47 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         if with_mixing: 
             # no sample weights in mixed loss 
             context.update({
-                "y_rank_a": yb[idx_a], 
-                "y_rank_b": yb[idx_b],
+                "y_a": yb[idx_a], 
+                "y_b": yb[idx_b],
                 "mix_lambda": lam, 
-                "sample_weight_a": swb[idx_a],
-                "sample_weight_b": swb[idx_b]
             })
         else: 
             context.update({
-                "y_rank": yb, 
-                "sample_weight": swb 
+                "y": yb, 
             })
+
         comp  = self.mix_loss_fn_(**context) if with_mixing else self.loss_fn_(**context)
         ridge = self.ridge_scale * self.wide_.ridge_penalty()
         total = comp.total + ridge
 
         if with_aux and aux_scale > 0.0: 
+
+            y_ref = yb.reshape(-1)
+            if with_mixing: 
+                y_a = yb[idx_a].reshape(-1)
+                y_b = yb[idx_b].reshape(-1)
+                p   = lam.reshape(-1).to(device=yb.device, dtype=yb.dtype)
+                q   = 1.0 - p 
+
             if self.aux_deep_weight > 0.0: 
-                deep_context = dict(context)
-                lv_d = deep_out["log_var_deep"] + log2 
-                deep_context.update({
-                    "mu_deep": deep_out["mu_deep"],
-                    "log_var_deep": lv_d,
-                    "mu_wide": deep_out["mu_deep"],
-                    "log_var_wide": lv_d,
-                })
-                deep_comp = (self.mix_loss_fn_(**deep_context) if with_mixing else 
-                             self.loss_fn_(**deep_context))
-                total     = total + (aux_scale * self.aux_deep_weight) * deep_comp.total
+                mu_d = deep_out["mu_deep"].reshape(-1)
+                if with_mixing: 
+                    deep_aux = (
+                        p * torch.abs(mu_d - y_a) + q * torch.abs(mu_d - y_b)
+                    ).mean() 
+                else: 
+                    deep_aux = torch.abs(mu_d - y_ref).mean() 
+                total = total + (aux_scale * self.aux_deep_weight) * deep_aux
 
             if self.aux_wide_weight > 0.0: 
-                wide_context = dict(context)
-                lv_w = wide_out["log_var_wide"] + log2 
-                wide_context.update({
-                    "mu_deep": wide_out["mu_wide"],
-                    "log_var_deep": lv_w,
-                    "mu_wide": wide_out["mu_wide"],
-                    "log_var_wide": lv_w,
-                })
-                wide_comp = (self.mix_loss_fn_(**wide_context) if with_mixing else 
-                             self.loss_fn_(**wide_context))
-                total     = total + (aux_scale * self.aux_wide_weight) * wide_comp.total
+                mu_w = wide_out["mu_wide"].reshape(-1)
+                if with_mixing: 
+                    wide_aux = (
+                        p * torch.abs(mu_w - y_a) + q * torch.abs(mu_w - y_b)
+                    ).mean() 
+                else: 
+                    wide_aux = torch.abs(mu_w - y_ref).mean() 
+                total = total + (aux_scale * self.aux_wide_weight) * wide_aux
 
         ord_raw = float(comp.raw["ordinal"].detach().item())
         unc_raw = float(comp.raw["uncertainty"].detach().item())
@@ -1233,16 +1234,14 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         # self.wide_ = torch.compile(self.wide_, mode="reduce-overhead", fullgraph=False)
 
         self.loss_fn_ = build_wide_deep_loss(
-            cut_edges=self.cut_edges,
             log_var_min=self.log_var_min,
             log_var_max=self.log_var_max,
             var_floor=self.var_floor,
-            prob_eps=self.prob_eps,
         )
 
         self.mix_loss_fn_ = MixedLossAdapter(
             self.loss_fn_,
-            target_pairs={"y_rank": ("y_rank_a", "y_rank_b")},
+            target_pairs={"y": ("y_a", "y_b")},
         )
 
         self.mixer_ = Mixer(
@@ -1284,7 +1283,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
         self,
         experts: dict[str, NDArray],
         wide: NDArray,
-        y_rank: NDArray,
+        y: NDArray,
         sw: NDArray,
         idx: NDArray,
         *,
@@ -1293,7 +1292,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
     ) -> DataLoader:
         experts_t = {k: torch.from_numpy(v[idx]).float() for k, v in experts.items()}
         wide_t    = torch.from_numpy(wide[idx]).float() 
-        y_t       = torch.from_numpy(y_rank[idx]).float() 
+        y_t       = torch.from_numpy(y[idx]).float() 
         sw_t      = torch.from_numpy(sw[idx]).float() 
 
         ds = FusionDataset(experts_t, wide_t, y_t, sw_t)
@@ -1311,9 +1310,6 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
                 k: self.expert_scalers_[k].transform(v).astype(np.float32, copy=False)
                 for k, v in experts.items()
             }
-
-        if hasattr(self, "wide_scaler_"):
-            wide = self.wide_scaler_.transform(wide).astype(np.float32, copy=False)
 
         experts_t = {k: torch.from_numpy(v).float() for k, v in experts.items()}
         wide_t    = torch.from_numpy(wide).float() 
@@ -1335,7 +1331,7 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
     def build_sample_weights(
         self,
-        y_rank: NDArray,
+        y: NDArray,
         coords: NDArray, 
         tr_idx: NDArray,
         va_idx: NDArray
@@ -1345,24 +1341,25 @@ class HierarchicalFusionModel(BaseEstimator, RegressorMixin):
 
         self.kes_ = KernelEffectiveSamples(self.kes_config)
 
-        sw_train  = (self.kes_.fit_transform(y_rank[tr_idx], coords[tr_idx])
+        sw_train  = (self.kes_.fit_transform(y[tr_idx], coords[tr_idx])
                      .astype(np.float32, copy=False)) 
-        sw_val    = self.kes_.transform(y_rank[va_idx]).astype(np.float32, copy=False)
+        sw_val    = self.kes_.transform(y[va_idx]).astype(np.float32, copy=False)
         return sw_train, sw_val 
 
-    def split_indices(self, y_rank: NDArray) -> tuple[NDArray, NDArray]: 
-        n = y_rank.shape[0]
-        if self.eval_fraction <= 0.0: 
-            idx = np.arange(n) 
+    def split_indices(self, y: NDArray) -> tuple[NDArray, NDArray]: 
+        n = y.shape[0]
+        if n < 2 or self.eval_fraction <= 0: 
+            idx = np.arange(n)
             return idx, idx 
 
-        y_bucket = np.floor(y_rank).astype(np.int64)
-        splitter = StratifiedShuffleSplit(
+        test_size = float(np.clip(self.eval_fraction, 1.0 / n, 1.0 - (1.0 / n)))
+        splitter  = ShuffleSplit(
             n_splits=1,
-            test_size=self.eval_fraction,
+            test_size=test_size,
             random_state=self.random_state
         )
-        return next(splitter.split(np.zeros((n, 1)), y_bucket))
+
+        return next(splitter.split(np.empty((n, 1), dtype=np.float32)))
 
     def resolve_device(self, device: Optional[str]) -> torch.device: 
         if device is not None: 

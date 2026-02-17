@@ -1074,7 +1074,7 @@ class FusionDataset(Dataset):
 class WideDeepInputs(TypedDict): 
     experts: dict[str, NDArray[np.float32]]
     wide: NDArray[np.float32]
-    y_rank: NDArray[np.float32]
+    y: NDArray[np.float32]
     coords: NDArray[np.float32]
     sample_ids: NDArray[np.str_]
     expert_dims: dict[str, int]
@@ -1135,11 +1135,11 @@ def load_wide_deep_inputs(
 ) -> WideDeepInputs: 
     wide_ds  = load_wide_dataset(wide_path)
     wide_ids = wide_ds["sample_ids"] 
-    wide_x   = np.asarray(wide_ds["features"], dtype=np.float32)
+    wide_x   = np.log1p(np.asarray(wide_ds["features"], dtype=np.float32))
     if wide_x.ndim != 2: 
         raise ValueError(f"wide features must be 2d, got {wide_x.shape}")
 
-    y_rank = np.asarray(wide_ds["labels"], dtype=np.float32).reshape(-1)
+    y      = np.asarray(wide_ds["labels"], dtype=np.float32).reshape(-1)
     coords = np.asarray(wide_ds["coords"], dtype=np.float32)
 
     expert_x_raw: dict[str, NDArray[np.float32]] = {}
@@ -1170,7 +1170,7 @@ def load_wide_deep_inputs(
     idx_w = align_on_fips(sample_ids, wide_ids)
 
     wide   = wide_x[idx_w]
-    y      = y_rank[idx_w]
+    y      = y[idx_w]
     coords = coords[idx_w]
 
     experts: dict[str, NDArray[np.float32]] = {}
@@ -1192,7 +1192,7 @@ def load_wide_deep_inputs(
     return {
         "experts": experts, 
         "wide": wide.astype(np.float32, copy=False), 
-        "y_rank": y.astype(np.float32, copy=False),
+        "y": y.astype(np.float32, copy=False),
         "coords": coords.astype(np.float32, copy=False), 
         "sample_ids": sample_ids, 
         "expert_dims": {k: int(v.shape[1]) for k, v in experts.items()},
