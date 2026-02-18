@@ -31,7 +31,8 @@ from dataclasses           import (
 from typing                import (
     Any, 
     Callable, 
-    Mapping 
+    Mapping,
+    Optional 
 ) 
 
 from numpy.typing          import (
@@ -647,6 +648,92 @@ class ReconstructionLoss(WeightedLossTerm):
         }
         return raw, metrics 
 
+class HSICOrthogonalityLoss(WeightedLossTerm): 
+    '''
+    Penalizes statistical dependence between embeddings and condition variables via RBF HSIC
+    '''
+
+    required_keys = ("deep_bag", "wide_cond")
+
+    def __init__(
+        self,
+        *,
+        sigma: Optional[float] = None, 
+        eps: float = 1e-6, 
+        weight: WeightSpec = 1.0, 
+        name: str = "hsic"
+    ): 
+        super().__init__(name=name, weight=weight, reduction="mean")
+        self.sigma = sigma 
+        self.eps   = eps 
+
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        deep = context["deep_bag"]
+        wide = context["wide_cond"]
+
+        if wide is None: 
+            raise ValueError("hsic requires wide_cond.")
+
+        if wide.ndim == 1: 
+            wide = wide.unsqueeze(1)
+
+        if deep.ndim != 2 or wide.ndim != 2: 
+            raise ValueError("wide_cond or deep_bag were an unexpected shape.")
+
+        if wide.shape[0] != deep.shape[0]: 
+            raise ValueError("row mismastch "
+                             f"deep_bag={deep.shape[0]} != wide_cond={wide.shape[0]}")
+
+        wide = wide.detach() 
+        n = int(deep.size(0))
+        if n < 3: 
+            raw = deep.new_tensor(0.0)
+            return raw, {"n": deep.new_tensor(float(n))}
+
+        K = self.rbf_kernel(deep, sigma=self.sigma, eps=self.eps)
+        L = self.rbf_kernel(wide, sigma=self.sigma, eps=self.eps)
+
+        Kc = self.center_gram(K)
+        Lc = self.center_gram(L)
+
+        denom = float((n - 1)**2)
+        hsic  = (Kc * Lc).sum() / denom 
+
+        k_var = (Kc * Kc).sum() / denom 
+        l_var = (Lc * Lc).sum() / denom 
+        hsic  = hsic / torch.sqrt(k_var.clamp_min(self.eps) * l_var.clamp_min(self.eps))
+
+        raw   = hsic.abs() 
+        metrics = {
+            "hsic": raw.detach(), 
+            "n": deep.new_tensor(float(n)), 
+            "deep_norm": deep.norm(dim=1).mean().detach(), 
+            "wide_norm": wide.norm(dim=1).mean().detach(), 
+        }
+        return raw, metrics 
+
+    @staticmethod 
+    def rbf_kernel(x: torch.Tensor, sigma: Optional[float], eps: float) -> torch.Tensor: 
+        x  = x.reshape(x.size(0), -1)
+        d2 = torch.cdist(x, x, p=2).pow(2)
+        n  = int(d2.size(0))
+
+        if sigma is None or float(sigma) <= 0.0: 
+            if n > 1: 
+                i, j = torch.triu_indices(n, n, offset=1, device=d2.device)
+                tri  = d2[i, j]
+                med  = tri.median() if tri.numel() > 0 else d2.new_tensor(1.0)
+            else: 
+                med  = d2.new_tensor(1.0)
+            sigma2 = med.clamp_min(eps)
+        else: 
+            sigma2 = d2.new_tensor(float(sigma)**2).clamp_min(eps)
+        return torch.exp(-0.5 * d2 / sigma2)
+
+    @staticmethod 
+    def center_gram(K: torch.Tensor) -> torch.Tensor: 
+        return K - K.mean(0, keepdim=True) - K.mean(1, keepdim=True) + K.mean()
+
 # ---------------------------------------------------------
 # Ordinal and Heteroscedastic Regression Loss  
 # ---------------------------------------------------------
@@ -699,146 +786,6 @@ class FusionGaussianMixin:
         log_var = torch.log(var) 
 
         return mu, log_var, alpha_d, alpha_w
-
-class OrderedProbitFusionLoss(WeightedLossTerm, FusionGaussianMixin): 
-
-    '''
-    PoE fusion loss term that leverages ordinal-like nature of log-population problem
-    to penalize with uncertainty (for explainability)
-    '''
-
-    required_keys = ("mu_deep", "log_var_deep", "mu_wide", "log_var_wide", "y_rank")
-
-    def __init__(
-        self,
-        *,
-        cut_edges, 
-        prob_eps: float = 1e-9, 
-        log_var_min: float = -9.0, 
-        log_var_max: float =  9.0, 
-        var_floor: float = 1e-6, 
-        weight: WeightSpec = 1.0, 
-        name: str = "ordinal"
-    ): 
-        WeightedLossTerm.__init__(
-            self, 
-            name=name, 
-            weight=weight, 
-            reduction="mean"
-        )
-        
-        FusionGaussianMixin.__init__(
-            self, 
-            log_var_min=log_var_min, 
-            log_var_max=log_var_max, 
-            var_floor=var_floor
-        )
-
-        edges = torch.as_tensor(cut_edges, dtype=torch.float32).reshape(-1)
-        if edges.numel() < 3: 
-            raise ValueError("cut_edges must have at least 3 values")
-        if torch.any(edges[1:] <= edges[:-1]): 
-            raise ValueError("cut_edges must be strictly increasing")
-        self.register_buffer("cut_edges", edges)
-        self.prob_eps = prob_eps
-   
-    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        y_rank = context["y_rank"].reshape(-1).to(dtype=torch.float32)
-        mu, log_var, alpha_d, alpha_w = self.fuse({**context, "y": y_rank})
-
-        K = self.cut_edges.numel() - 1 
-        max_rank = torch.nextafter(
-            torch.tensor(float(K), device=y_rank.device, dtype=y_rank.dtype),
-            torch.tensor(0.0, device=y_rank.device, dtype=y_rank.dtype)
-        )
-        y_rank   = y_rank.clamp(0.0, max_rank)
-
-        k0   = torch.floor(y_rank).long().clamp(0, K - 1)
-        k1   = torch.clamp(k0 + 1, max=K - 1)
-        frac = (y_rank - k0.to(y_rank.dtype)).clamp(0.0, 1.0)
-        
-        has_upper = (k0 < (K - 1)).to(frac.dtype)
-        frac = frac * has_upper 
-
-        q0   = 1.0 - frac 
-        q1   = frac 
-
-        edges = self.cut_edges.to(device=mu.device, dtype=mu.dtype)
-        sigma = torch.exp(0.5 * log_var).clamp_min(self.var_floor)
-
-        z_lo  = (edges[:-1].unsqueeze(0) - mu.unsqueeze(1)) / sigma.unsqueeze(1)
-        z_hi  = (edges[1:].unsqueeze(0) - mu.unsqueeze(1)) / sigma.unsqueeze(1)
-
-        p = (torch.special.ndtr(z_hi) - torch.special.ndtr(z_lo)).clamp_min(self.prob_eps)
-        p = p / p.sum(dim=1, keepdim=True).clamp_min(self.prob_eps)
-
-        p0 = p.gather(1, k0.unsqueeze(1)).squeeze(1).clamp_min(self.prob_eps)
-        p1 = p.gather(1, k1.unsqueeze(1)).squeeze(1).clamp_min(self.prob_eps)
-
-        per = -(q0 * torch.log(p0) + q1 * torch.log(p1))
-
-        sw  = context.get("sample_weight", None) 
-        if sw is not None: 
-            sw = to_batch_tensor(sw, n=per.numel(), device=per.device, dtype=per.dtype)
-
-        raw = weighted_mean(per, sw)
-        metrics = {
-            "sigma_mean": sigma.mean().detach(), 
-            "alpha_deep_mean": alpha_d.mean().detach(),
-            "alpha_wide_mean": alpha_w.mean().detach(),
-            "frac_interp_mean": q1.mean().detach()
-        }
-        return raw, metrics 
-
-class GaussianNNLFusionLoss(WeightedLossTerm, FusionGaussianMixin): 
-    '''
-    GaussianNNL loss over fused wide and deep architecture  
-    '''
-
-    required_keys = ("mu_deep", "log_var_deep", "mu_wide", "log_var_wide", "y_rank")
-
-    def __init__(
-        self, 
-        *,
-        log_var_min: float = -9.0, 
-        log_var_max: float =  9.0, 
-        var_floor: float = 1e-6, 
-        weight: WeightSpec = 1.0, 
-        name: str = "uncertainty"
-    ):
-        WeightedLossTerm.__init__(
-            self,
-            name=name,
-            weight=weight,
-            reduction="mean"
-        )
-        
-        FusionGaussianMixin.__init__(
-            self, 
-            log_var_min=log_var_min, 
-            log_var_max=log_var_max, 
-            var_floor=var_floor
-        )
-
-    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        y_rank = context["y_rank"].reshape(-1).to(dtype=torch.float32)
-        mu, log_var, alpha_d, alpha_w = self.fuse({**context, "y": y_rank})
-
-        inv_var = torch.exp(-log_var)
-        per     = 0.5 * (torch.pow((y_rank - mu), 2) * inv_var + log_var)
-
-        sw = context.get("sample_weight", None)
-        if sw is not None: 
-            sw = to_batch_tensor(sw, n=per.numel(), device=per.device, dtype=per.dtype)
-
-        raw  = weighted_mean(per, sw)
-
-        metrics = {
-            "sigma_mean": torch.exp(0.5 * log_var).mean().detach(), 
-            "alpha_deep_mean": alpha_d.mean().detach(),
-            "alpha_wide_mean": alpha_w.mean().detach()
-        }
-        return raw, metrics 
 
 
 class FusionCRPSLoss(WeightedLossTerm, FusionGaussianMixin): 
@@ -971,14 +918,16 @@ def sinkhorn_assign(scores: torch.Tensor, epsilon: float = 0.05) -> torch.Tensor
 
 def build_ssfe_loss(
     *,
-        sem_proj: nn.Module, 
-        st_proj: nn.Module,
+    sem_proj: nn.Module, 
+    st_proj: nn.Module,
     proto: nn.Module,
     sem_recon: nn.Module,
     st_recon: nn.Module, 
     contrast_temperature: float, 
     cluster_temperature: float, 
     contrast_active_eps: float = 1e-6, 
+    hsic_weight: WeightSpec, 
+    hsic_sigma: Optional[float] = None, 
     sinkhorn_epsilon: float = 0.05
 ):
     return LossComposer(
@@ -1004,6 +953,11 @@ def build_ssfe_loss(
             st_recon=st_recon,
             weight="w_recon",
             name="recon"
+        ),
+        HSICOrthogonalityLoss(
+            sigma=hsic_sigma,
+            weight=hsic_weight,
+            name="hsic"
         )
     )
 

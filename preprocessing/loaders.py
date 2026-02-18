@@ -954,13 +954,17 @@ SpatialDatasetLoader = Callable[[str], SpatialDatasetDict]
 
 def dynamic_tile_collate(batch): 
 
-    tiles_list, stats_list, labels, num_tiles_list = [], [], [], []
+    tiles_list, stats_list, labels, num_tiles_list, wide_list = [], [], [], [], []
 
     for item in batch: 
+        if len(item) < 4:
+            raise ValueError("tile sample missing wide_cond in final slot")
+
         tiles, stats, label, = item[:3]
 
         t   = torch.from_numpy(np.array(tiles, dtype=np.float32).copy())
         s   = torch.from_numpy(np.array(stats, dtype=np.float32).copy())
+        wide_list.append(np.asarray(item[-1], dtype=np.float32))
 
         if s.ndim != 3: 
             raise ValueError(f"expected stats shape (T, L, D), got {tuple(s.shape)}")
@@ -979,7 +983,10 @@ def dynamic_tile_collate(batch):
     sections    = torch.tensor(num_tiles_list, dtype=torch.long)
     batch_idx   = torch.repeat_interleave(torch.arange(len(batch)), sections)
 
-    return flat_inputs, labels, batch_idx, flat_stats 
+    if len(wide_list) != len(batch): 
+        raise ValueError("every tile sample must include wide_cond")
+    wide_cond = torch.from_numpy(np.stack(wide_list, axis=0))
+    return flat_inputs, labels, batch_idx, flat_stats, wide_cond
 
 def load_spatial_mmap_manifest(
     root_dir: str, 
@@ -987,6 +994,8 @@ def load_spatial_mmap_manifest(
     tile_shape: tuple[int, int, int], 
     patch_size: int = 32, 
     random_state: int = 0, 
+    wide_mat_path: Optional[str] = None, 
+    year: int = 2013, 
     should_validate_index: bool = False,
     **_ 
 ) -> SpatialDatasetDict:
@@ -994,6 +1003,9 @@ def load_spatial_mmap_manifest(
     index_csv  = root / "index.csv"
     bin_path   = root / "dataset.bin"
     stats_path = root / "stats.bin" 
+    
+    if wide_mat_path is None: 
+        wide_mat_path = project_path("data", "datasets", f"wide_scalar_{year}.mat")
 
     if not index_csv.exists() or not bin_path.exists(): 
         raise FileNotFoundError(f"missing dataset.bin/index.csv in {root}")
@@ -1002,6 +1014,7 @@ def load_spatial_mmap_manifest(
         index_csv=str(index_csv),
         bin_path=str(bin_path),
         stats_bin_path=str(stats_path),
+        wide_mat_path=wide_mat_path,
         tile_shape=tile_shape,
         patch_size=patch_size,
         random_state=random_state,
@@ -1020,25 +1033,6 @@ def load_spatial_mmap_manifest(
         "collate_fn": dynamic_tile_collate, 
         "in_channels": int(tile_shape[0])
     }
-
-# Convenience wrapper over loader 
-def mmap_loader(
-    path,
-    *,
-    tile_shape,
-    patch_size=32, 
-    random_state=0,
-    shuffle_tiles=True,
-    should_validate_index=False
-):
-    return load_spatial_mmap_manifest(
-        path,
-        tile_shape=tile_shape,
-        patch_size=patch_size, 
-        random_state=random_state,
-        shuffle_tiles=shuffle_tiles,
-        should_validate_index=should_validate_index
-    )
 
 # ---------------------------------------------------------
 # Fusion Dataset Definition  
@@ -1135,7 +1129,7 @@ def load_wide_deep_inputs(
 ) -> WideDeepInputs: 
     wide_ds  = load_wide_dataset(wide_path)
     wide_ids = wide_ds["sample_ids"] 
-    wide_x   = np.log1p(np.asarray(wide_ds["features"], dtype=np.float32))
+    wide_x   = np.asarray(wide_ds["features"], dtype=np.float32)
     if wide_x.ndim != 2: 
         raise ValueError(f"wide features must be 2d, got {wide_x.shape}")
 

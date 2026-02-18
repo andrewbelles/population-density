@@ -207,6 +207,8 @@ def define_spatial_ssfe_space(trial: optuna.Trial):
         "w_contrast": 1.5,#trial.suggest_float("w_contrast", 1.0, 2.0),
         "w_cluster": 0.9,#trial.suggest_float("w_cluster", 0.75, 2.0),
         "w_recon": 0.9,#trial.suggest_float("w_recon", 0.5, 2.0),
+        "w_hsic": 1.0, 
+
         "contrast_temperature": trial.suggest_float("contrast_temperature", 0.05, 0.5, log=True),
         "cluster_temperature": trial.suggest_float("cluster_temperature", 0.05, 0.5, log=True),
         "n_prototypes": 16,#trial.suggest_categorical("n_prototypes", [16, 32, 64]),
@@ -251,6 +253,8 @@ def define_tabular_ssfe_space(trial: optuna.Trial):
         "w_contrast": 1.5,
         "w_cluster": 0.9,
         "w_recon": 0.9,
+        "w_hsic": 1.0, 
+
         "contrast_temperature": trial.suggest_float("contrast_temperature", 0.05, 0.5, log=True),
         "cluster_temperature": trial.suggest_float("cluster_temperature", 0.05, 0.5, log=True),
         "n_prototypes": 16,

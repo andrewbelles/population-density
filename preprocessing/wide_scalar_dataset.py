@@ -1,100 +1,104 @@
-#!/usr/bin/env python3 
-# 
-# wide_scalar_dataset.py  Andrew Belles  Feb 10th 
-# 
-# 2-feature Scalar Dataset for wide model 
-# - poverty counts from saipe estimates  
-# - n2_returns (from IRS csv)
-# 
+#!/usr/bin/env python3
+#
+# wide_scalar_dataset.py  Andrew Belles  Feb 10th
+#
+# Proxy scalar dataset for wide model.
+# Uses poverty counts + poverty rates from SAIPE only.
+#
 
-import argparse 
+import argparse
+import re
 
-from pathlib import Path 
+from pathlib import Path
 
-import pandas as pd 
-
+import pandas as pd
 import numpy as np
 
-from scipy.io import savemat 
+from scipy.io import savemat
 
-from utils.helpers import (
-    project_path,
-    to_num
-)
-
+from utils.helpers import project_path, to_num
 from preprocessing.labels import build_label_map
 
 
 YEAR_SPECS = {
     2013: {
-        "saipe_csv": project_path("data", "saipe", "saipe_2013.csv"), 
-        "ir_csv":    project_path("data", "saipe", "13incyall.csv"),
-        "n2_col":    4 
+        "saipe_csv": project_path("data", "saipe", "saipe_2013.csv"),
     },
     2019: {
-        "saipe_csv": project_path("data", "saipe", "saipe_2019.csv"), 
-        "ir_csv":    project_path("data", "saipe", "19incyall.csv"),
-        "n2_col":    4 
-    }
+        "saipe_csv": project_path("data", "saipe", "saipe_2019.csv"),
+    },
 }
 
 POVERTY_COUNT_COLS = [
     "all_ages__poverty_estimate_all_ages",
-    "all_0_17__poverty_estimate_age_0_17",
-    "age_5_17_in_families__poverty_estimate_age_5_17_in_familes"
+    "age_0_17__poverty_estimate_age_0_17",
+    "age_5_17_in_families__poverty_estimate_age_5_17_in_families",
 ]
 
-class WideScalarDataset: 
+POVERTY_RATE_COLS = [
+    "all_ages__poverty_percent_all_ages",
+    "age_0_17__poverty_percent_age_0_17",
+    "age_5_17_in_families__poverty_percent_age_5_17_in_families",
+]
+
+INCY_LAYOUT = {
+    2013: {
+        "file": "13incyall.csv",
+        "total_returns": 4,
+    },
+    2019: {
+        "file": "19incyall.csv",
+        "total_returns": 4,
+    },
+}
+
+LOG_N2_RETURNS_COL = "log_n2_returns"
+
+PROXY_FEATURE_COLS = [*POVERTY_COUNT_COLS, LOG_N2_RETURNS_COL, *POVERTY_RATE_COLS]
+
+
+class WideScalarDataset:
 
     def __init__(
         self,
         *,
-        year: int, 
+        year: int,
         saipe_csv: str,
-        ir_csv: str,
-        census_dir: str | Path
-    ): 
+        census_dir: str | Path,
+    ):
         if year not in YEAR_SPECS:
             raise ValueError(f"unsupported year={year}, expected {sorted(YEAR_SPECS)}")
 
-        self.year      = year 
+        self.year = year
         self.saipe_csv = Path(saipe_csv)
-        self.ir_csv    = Path(ir_csv)
-
         self.label_map = build_label_map(year, census_dir=census_dir)
 
-    def build(self, *, n2_col: int) -> dict: 
-        povc = self.load_poverty_counts()
-        n2   = self.load_n2_returns(n2_col=n2_col)
-
-        df = povc.merge(n2, on="fips", how="inner")
-        df = df[df["fips"].isin(self.label_map.keys())].copy() 
+    def build(self) -> dict:
+        df = self.load_poverty_proxy()
+        df = self.merge_log_n2_returns(df)
+        df = df[df["fips"].isin(self.label_map.keys())].copy()
         df["label"] = df["fips"].map(self.label_map)
-        df = df.dropna(
-            subset=[*POVERTY_COUNT_COLS, "n2_returns", "label"]
-        ).reset_index(drop=True)
+        df = df.dropna(subset=[*PROXY_FEATURE_COLS, "label"]).reset_index(drop=True)
 
-        feature_cols = ["n2_returns", *POVERTY_COUNT_COLS]
-        X     = df[feature_cols].to_numpy(np.float64)
-        y     = df["label"].to_numpy(np.float64).reshape(-1, 1)
-        fips  = df["fips"].to_numpy(dtype="U5")
-        names = np.array(feature_cols, dtype="U64")
+        X = df[PROXY_FEATURE_COLS].to_numpy(np.float64)
+        y = df["label"].to_numpy(np.float64).reshape(-1, 1)
+        fips = df["fips"].to_numpy(dtype="U5")
+        names = np.asarray(PROXY_FEATURE_COLS, dtype="U64")
 
         return {
             "features": X,
-            "labels": y, 
-            "fips_codes": fips, 
-            "feature_names": names, 
+            "labels": y,
+            "fips_codes": fips,
+            "feature_names": names,
         }
 
-    def load_poverty_counts(self) -> pd.DataFrame: 
-
+    def load_poverty_proxy(self) -> pd.DataFrame:
         raw = pd.read_csv(self.saipe_csv, header=None, dtype=str)
         if raw.shape[0] < 5:
             raise ValueError(f"invalid SAIPE csv format: {self.saipe_csv}")
 
         row_group = raw.iloc[2].tolist()
-        row_sub   = raw.iloc[3].tolist()
+        row_sub = raw.iloc[3].tolist()
 
         groups = []
         last = ""
@@ -103,41 +107,36 @@ class WideScalarDataset:
                 last = g.strip()
             groups.append(last)
 
+        def slug(text: str) -> str:
+            s = str(text).strip().lower()
+            s = re.sub(r"[^a-z0-9]+", "_", s)
+            return s.strip("_")
+
         name_to_idx = {}
         for i, sub in enumerate(row_sub):
             if i < 4:
                 continue
-            group_slug = (
-                str(groups[i]).strip().lower()
-                .replace(",", "")
-                .replace("/", "_")
-                .replace("-", "_")
-            )
-            group_slug = "_".join(group_slug.split())
-
-            sub_raw = str(sub).strip()
-            sub_low = sub_raw.lower()
-            if sub_low.startswith("poverty estimate"):
-                metric = (
-                    sub_low
-                    .replace(",", "")
-                    .replace("/", "_")
-                    .replace("-", "_")
-                )
-                metric = "_".join(metric.split())
-                name = f"{group_slug}__{metric}"
-                name_to_idx[name] = i
+            group_slug = slug(groups[i])
+            metric_slug = slug(sub)
+            if metric_slug.startswith("poverty_estimate") or metric_slug.startswith("poverty_percent"):
+                name_to_idx[f"{group_slug}__{metric_slug}"] = i
 
         required_source = {
             "all_ages__poverty_estimate_all_ages": "all_ages__poverty_estimate_all_ages",
-            "all_0_17__poverty_estimate_age_0_17": "age_0_17__poverty_estimate_age_0_17",
-            "age_5_17_in_families__poverty_estimate_age_5_17_in_familes":
-                "age_5_17_in_families__poverty_estimate_age_5_17_in_families",
+            "age_0_17__poverty_estimate_age_0_17": "age_0_17__poverty_estimate_age_0_17",
+            "age_5_17_in_families__poverty_estimate_age_5_17_in_families": (
+                "age_5_17_in_families__poverty_estimate_age_5_17_in_families"
+            ),
+            "all_ages__poverty_percent_all_ages": "all_ages__poverty_percent_all_ages",
+            "age_0_17__poverty_percent_age_0_17": "age_0_17__poverty_percent_age_0_17",
+            "age_5_17_in_families__poverty_percent_age_5_17_in_families": (
+                "age_5_17_in_families__poverty_percent_age_5_17_in_families"
+            ),
         }
 
         missing = [src for src in required_source.values() if src not in name_to_idx]
         if missing:
-            raise ValueError(f"missing poverty estimate columns in {self.saipe_csv}: {missing}")
+            raise ValueError(f"missing poverty proxy columns in {self.saipe_csv}: {missing}")
 
         data = raw.iloc[4:].reset_index(drop=True)
         state = data.iloc[:, 0].astype(str).str.strip().str.zfill(2)
@@ -148,64 +147,80 @@ class WideScalarDataset:
         for out_name, src_name in required_source.items():
             out[out_name] = to_num(data.iloc[:, name_to_idx[src_name]])
 
+        agg_map = {c: "sum" for c in POVERTY_COUNT_COLS}
+        agg_map.update({c: "mean" for c in POVERTY_RATE_COLS})
+
         out = out[(out["fips"] != "00000") & (~out["fips"].str.endswith("000"))].copy()
-        out = out.groupby("fips", as_index=False)[POVERTY_COUNT_COLS].sum()
-        out[POVERTY_COUNT_COLS] = out[POVERTY_COUNT_COLS].replace([np.inf, -np.inf], np.nan)
-        out = out.dropna(subset=POVERTY_COUNT_COLS).reset_index(drop=True)
-        if not isinstance(out, pd.DataFrame): 
-            raise RuntimeError 
+        out = out.groupby("fips", as_index=False).agg(agg_map)
+
+        # Counts follow a heavy-tailed distribution; compressing with log1p
+        # improves conditioning for downstream HSIC/RBF distances.
+        for c in POVERTY_COUNT_COLS:
+            v = pd.to_numeric(out[c], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+            v = np.clip(v, a_min=0.0, a_max=None)
+            out[c] = np.log1p(v)
+
+        base_cols = [*POVERTY_COUNT_COLS, *POVERTY_RATE_COLS]
+        out[base_cols] = out[base_cols].replace([np.inf, -np.inf], np.nan)
+        out = out.dropna(subset=base_cols).reset_index(drop=True)
         return out
 
-    def load_n2_returns(self, *, n2_col: int) -> pd.DataFrame: 
-        df = pd.read_csv(self.ir_csv, header=None, dtype=str, encoding="latin-1")
-        df = df.iloc[6:].reset_index(drop=True)
+    def merge_log_n2_returns(self, df: pd.DataFrame) -> pd.DataFrame:
+        spec = INCY_LAYOUT[self.year]
+        incy_path = Path(self.saipe_csv).with_name(spec["file"])
+        if not incy_path.exists():
+            raise FileNotFoundError(f"missing IRS county file: {incy_path}")
 
-        state_raw  = df.iloc[:, 0].astype(str).str.strip() 
-        county_raw = df.iloc[:, 2].astype(str).str.strip() 
-        valid      = state_raw.str.fullmatch(r"\d{1,2}") & county_raw.str.fullmatch(r"\d{1,3}")
-        df         = df.loc[valid].reset_index(drop=True)
+        raw = pd.read_csv(incy_path, header=None, dtype=str, encoding="latin-1")
+        raw = raw.iloc[6:].reset_index(drop=True)
 
-        state  = df.iloc[:, 0].astype(str).str.zfill(2)
-        county = df.iloc[:, 2].astype(str).str.zfill(3)
-        fips   = (state + county).astype(str)
-        keep   = (~fips.str.endswith("000"))
+        state_raw = raw.iloc[:, 0].astype(str).str.strip()
+        county_raw = raw.iloc[:, 2].astype(str).str.strip()
+        valid = state_raw.str.fullmatch(r"\d{1,2}") & county_raw.str.fullmatch(r"\d{1,3}")
+        raw = raw.loc[valid].reset_index(drop=True)
 
-        df     = df.loc[keep].reset_index(drop=True)
-        fips   = fips[keep].reset_index(drop=True)
+        state = raw.iloc[:, 0].astype(str).str.zfill(2)
+        county = raw.iloc[:, 2].astype(str).str.zfill(3)
+        fips = (state + county).astype(str)
 
-        n2  = to_num(df.iloc[:, n2_col])
-        out = pd.DataFrame({"fips": fips.to_numpy(), "n2_returns": n2.to_numpy(np.float64)})
-        out = out.groupby("fips", as_index=False)["n2_returns"].sum() 
-        out = out[out["n2_returns"] > 0.0].copy() 
-        if not isinstance(out, pd.DataFrame): 
-            raise RuntimeError 
-        return out 
+        keep = (fips != "00000") & (~fips.str.endswith("000"))
+        raw = raw.loc[keep].reset_index(drop=True)
+        fips = fips[keep].reset_index(drop=True)
+
+        n2_returns = to_num(raw.iloc[:, spec["total_returns"]]).astype(np.float64)
+        n2_df = pd.DataFrame({
+            "fips": fips.to_numpy(dtype="U5"),
+            "n2_returns": n2_returns.to_numpy(dtype=np.float64),
+        })
+        n2_df = n2_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["n2_returns"])
+        n2_df = n2_df.groupby("fips", as_index=False)["n2_returns"].mean()
+
+        vals = np.clip(n2_df["n2_returns"].to_numpy(dtype=np.float64, copy=False), a_min=0.0, a_max=None)
+        n2_df[LOG_N2_RETURNS_COL] = np.log1p(vals)
+        n2_df = n2_df[["fips", LOG_N2_RETURNS_COL]]
+
+        out = df.merge(n2_df, on="fips", how="left")
+        return out
 
 
-def main(): 
-    parser = argparse.ArgumentParser() 
+def main():
+    parser = argparse.ArgumentParser()
     parser.add_argument("--year", type=int, required=True, choices=[2013, 2019])
     parser.add_argument("--out-mat", required=True)
     parser.add_argument("--out-csv", default=None)
     args = parser.parse_args()
 
-    spec      = YEAR_SPECS[args.year]
-    saipe_csv = spec["saipe_csv"]
-    ir_csv    = spec["ir_csv"]
-    n2_col    = spec["n2_col"]
-
+    spec = YEAR_SPECS[args.year]
     ds = WideScalarDataset(
         year=args.year,
-        saipe_csv=saipe_csv,
-        ir_csv=ir_csv,
-        census_dir=project_path("data", "census")
+        saipe_csv=spec["saipe_csv"],
+        census_dir=project_path("data", "census"),
     )
-    data = ds.build(n2_col=n2_col)
+    data = ds.build()
 
     out = Path(args.out_mat)
-    savemat(out, data) 
-    print(f"[wide] saved {out} ({data['features'].shape[0]} rows, "
-          f"{data['features'].shape[1]} feats)")
+    savemat(out, data)
+    print(f"[wide] saved {out} ({data['features'].shape[0]} rows, {data['features'].shape[1]} feats)")
 
     if args.out_csv:
         df = pd.DataFrame(data["features"], columns=[str(c) for c in data["feature_names"]])
@@ -216,5 +231,5 @@ def main():
         print(f"[wide] saved {csv_out}")
 
 
-if __name__ == "__main__": 
-    main() 
+if __name__ == "__main__":
+    main()

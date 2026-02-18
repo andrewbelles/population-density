@@ -6,6 +6,7 @@
 # canvas counties together so that they are on uniform images for SpatialClassifier to use. 
 # 
 
+from pandas.core.frame import ndarray_to_mgr
 import fiona, csv, rasterio, rasterio.mask, argparse, sys, os, time
 
 import numpy                as np 
@@ -98,6 +99,7 @@ class TileLoader(Dataset):
         index_csv: str, 
         bin_path: str, 
         stats_bin_path: str, 
+        wide_mat_path: str, 
         tile_shape: tuple[int, int, int], 
         patch_size: int = 32, 
         dtype=np.float32,
@@ -110,6 +112,7 @@ class TileLoader(Dataset):
         self.index_csv             = index_csv
         self.bin_path              = bin_path
         self.stats_bin_path        = stats_bin_path
+        self.wide_mat_path         = wide_mat_path
 
         self.tile_shape            = tuple(int(x) for x in tile_shape)
         self.tile_elems            = int(np.prod(self.tile_shape))
@@ -132,6 +135,13 @@ class TileLoader(Dataset):
         self.epoch = 0
 
         self.fips, self.labels, self.offset_bytes, self.num_tiles = self.load_index() 
+        self.wide_features, keep, dropped = self.load_wide_features(self.wide_mat_path)
+        if dropped: 
+            print(f"[loader] dropped {dropped} rows for unmatched fips.", file=sys.stderr)
+            self.fips         = self.fips[keep]
+            self.labels       = self.labels[keep]
+            self.offset_bytes = self.offset_bytes[keep]
+            self.num_tiles    = self.num_tiles[keep]
         self.offset_elements = self.offset_bytes // self.dtype.itemsize 
 
         self.stats_mmap = None 
@@ -201,12 +211,14 @@ class TileLoader(Dataset):
             pass 
 
     def format_output(self, tiles, stats, label, idx, n_tiles): 
+        wide = np.asarray(self.wide_features[idx], dtype=np.float32)
         out = [tiles, stats, label]
         if self.return_fips or self.return_num_tiles:
             if self.return_fips:
                 out.append(self.fips[idx])
             if self.return_num_tiles:
                 out.append(int(n_tiles))
+        out.append(wide)
         return tuple(out)
 
     def set_epoch(self, epoch: int): 
@@ -282,6 +294,34 @@ class TileLoader(Dataset):
             stats_end   = (tile_start + n_tiles) * self.stats_elems_per_tile 
             if stats_end > stats_file_elems: 
                 raise ValueError(f"index row {i} points past end of stats.bin")
+
+    def load_wide_features(self, mat_path: str) -> tuple[np.ndarray, np.ndarray, int]:
+        mat = loadmat(mat_path)
+        if "features" not in mat or "fips_codes" not in mat: 
+            raise ValueError(f"{mat_path} missing features/fips_codes")
+
+        X = np.asarray(mat["features"], np.float32) 
+        wide_fips = _mat_str_vector(mat["fips_codes"]).astype("U5")
+        if X.ndim != 2 or X.shape[0] != wide_fips.shape[0]: 
+            raise ValueError(f"invalid wide mat shape.")
+
+        idx     = {str(fid).strip().zfill(5): i for i, fid in enumerate(wide_fips)}
+        keep    = np.zeros(len(self.fips), dtype=bool)
+        out_rows: list[np.ndarray] = []
+        dropped = 0 
+
+        for i, fid in enumerate(self.fips): 
+            j = idx.get(str(fid).strip().zfill(5))
+            if j is None: 
+                dropped += 1 
+                continue 
+            keep[i] = True 
+            out_rows.append(X[j]) 
+
+        if not out_rows: 
+            raise ValueError("no aligned rows")
+        out = np.asarray(out_rows, dtype=np.float32)
+        return out, keep, dropped 
 
 # ---------------------------------------------------------
 # Geospatially Aware Sampler 

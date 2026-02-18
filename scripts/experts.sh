@@ -2,7 +2,7 @@
 # 
 # experts.sh  Andrew Belles  Feb 9th, 2026 
 #
-# Creates VIIRS, SAIPE, and USPS datasets for 2013 and 2020 
+# Creates VIIRS, USPS/SAIPE, and Wide datasets for 2013 and 2020 
 #
 #
 
@@ -34,7 +34,7 @@ check_file() {
   }
 }
 
-mkdir -p "data/datasets" "data/tensors" 
+mkdir -p "data/datasets" "data/tensors" "data/csv" 
 
 check_file "$counties" 
 for y in 2013 2019; do 
@@ -51,12 +51,18 @@ for y in 2013 2019; do
     --out "data/datasets/saipe_scalar_${y}.mat" \
     --out-csv "data/csv/saipe_scalar_${y}.csv"
 
+  python preprocessing/wide_scalar_dataset.py \
+    --year "$y" \
+    --out-mat "data/datasets/wide_scalar_${y}.mat" \
+    --out-csv "data/csv/wide_scalar_${y}.csv"
+
   python preprocessing/usps_scalar_dataset.py \
     --usps-gpkg "${USPS_GPKG[$y]}" \
     --year "$y" \
     --census-dir "$census" \
     --counties-path "$counties" \
     --out-path "data/datasets/usps_scalar_${y}.mat" \
+    --admin-mat "data/datasets/saipe_scalar_${y}.mat" \
     --csv-path "data/csv/usps_scalar_${y}.csv"
 
   python preprocessing/tensors.py \

@@ -36,6 +36,7 @@ from models.loss import (
 from torch.utils.data import (
     DataLoader,
     TensorDataset, 
+    Dataset, 
     random_split
 )
 
@@ -66,6 +67,7 @@ class SSFEBatch:
     stats_z: torch.Tensor | None 
     stats_raw: torch.Tensor | None  # stats for structural branch 
     batch_idx: torch.Tensor         # node -> bag  
+    wide_cond: torch.Tensor 
 
 
 class ProjectionHead(nn.Module): 
@@ -112,12 +114,15 @@ class SSFEBase(BaseEstimator, ABC):
         w_contrast: float = 1.0, 
         w_cluster: float = 1.0, 
         w_recon: float = 1.0, 
+        w_hsic: float = 1.0, 
         contrast_temperature: float, 
         cluster_temperature: float,
+        hsic_sigma: Optional[float] = None, 
+        hsic_view: str = "concat", 
         n_prototypes: int, 
         proj_dim: int, 
         device: str | None = None,
-        compile_model: bool = True
+        compile_model: bool = False
     ): 
         self.anchor_n_samples      = anchor_n_samples 
         self.anchor_min_norm       = anchor_min_norm
@@ -136,11 +141,18 @@ class SSFEBase(BaseEstimator, ABC):
         self.w_contrast            = w_contrast
         self.w_cluster             = w_cluster
         self.w_recon               = w_recon
+        self.w_hsic                = w_hsic
 
         self.contrast_temperature  = contrast_temperature
         self.cluster_temperature   = cluster_temperature
+        self.hsic_sigma            = hsic_sigma
         self.n_prototypes          = n_prototypes
         self.proj_dim              = proj_dim
+
+        if hsic_view not in {"concat", "semantic", "structural"}: 
+            raise ValueError(f"unknown embeddings view for hsic loss: {hsic_view}")
+
+        self.hsic_view             = hsic_view 
 
         self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         self.device    = torch.device(device) if device else torch.device(
@@ -318,6 +330,8 @@ class SSFEBase(BaseEstimator, ABC):
             proto=self.model_["proto"],
             sem_recon=self.model_["sem_recon"],
             st_recon=self.model_["st_recon"], 
+            hsic_sigma=self.hsic_sigma,
+            hsic_weight=self.w_hsic,
             contrast_temperature=self.contrast_temperature,
             cluster_temperature=self.cluster_temperature,
             contrast_active_eps=1e-6, 
@@ -412,9 +426,10 @@ class SSFEBase(BaseEstimator, ABC):
                     print(
                         f"[epoch {ep:3d}] {dt:.2f}s avg | "
                         f"val_ssl={val_loss:.4f} | "
-                        f"val_con={val_parts['contrast']:.4f} | "
-                        f"val_kl={val_parts['cluster']:.4f} | "
-                        f"val_rec={val_parts['recon']:.4f}", 
+                        f"val_con={val_parts.get('contrast', 0.0):.4f} | "
+                        f"val_kl={val_parts.get('cluster', 0.0):.4f} | "
+                        f"val_rec={val_parts.get('recon', 0.0):.4f} | " 
+                        f"val_hsic={val_parts.get('hsic', 0.0):.4f}", 
                         file=sys.stderr
                     )
 
@@ -429,7 +444,7 @@ class SSFEBase(BaseEstimator, ABC):
         count = 0 
 
         for batch in loader: 
-            loss, _, _, _, bsz = self.process_batch(batch)
+            loss, _, bsz = self.process_batch(batch)
 
             self.opt_.zero_grad(set_to_none=True)
             loss.backward()
@@ -448,28 +463,20 @@ class SSFEBase(BaseEstimator, ABC):
             return None, {}
 
         self.model_.eval()
-        con   = 0.0 
-        clu   = 0.0 
-        rec   = 0.0 
+        sums: dict[str, float] = {}
         count = 0 
 
         with torch.no_grad(): 
             for batch in loader: 
-                _, l_con, l_kl, l_rec, bsz = self.process_batch(batch)
-
-                con   += float(l_con.item()) * bsz 
-                clu   += float(l_kl.item())  * bsz 
-                rec   += float(l_rec.item()) * bsz
+                _, terms, bsz = self.process_batch(batch)
+                for name, val in terms.items(): 
+                    sums[name] = sums.get(name, 0.0) + float(val.item()) * bsz
                 count += bsz 
 
         denom = max(1, count)
-        total = (con + clu + rec) / denom  
-
-        return total, {
-            "contrast": con / denom, 
-            "cluster": clu / denom, 
-            "recon": rec / denom
-        }
+        parts = {k: (v / denom) for k, v in sums.items()}
+        total = float(sum(parts.values()))
+        return total, parts 
 
     # -----------------------------------------------------
     # Batching 
@@ -479,6 +486,16 @@ class SSFEBase(BaseEstimator, ABC):
         if self.loss_ is None: 
             raise RuntimeError("loss_ not initializaed. Call init_fit() first.")
 
+        def bag_mean(x: torch.Tensor, idx: torch.Tensor, n: int) -> torch.Tensor: 
+            '''
+            GatedAttentionPooling per row for hsic loss
+            '''
+            out   = x.new_zeros((n, x.size(1))) 
+            count = x.new_zeros((n, 1))
+            out.index_add_(0, idx, x)
+            count.index_add_(0, idx, x.new_ones((x.size(0), 1)))
+            return out / count.clamp_min(1.0)
+
         with self.amp_ctx(): 
             prep = self.forward_preprocess(batch)
 
@@ -487,6 +504,19 @@ class SSFEBase(BaseEstimator, ABC):
             node_batch_idx    = self.resolve_contrast_node_batch_idx(
                 prep, bag_count=sem_bag.shape[0]
             )
+            n_bags = sem_bag.shape[0]
+
+            deep_node = self.get_view_for_hsic(sem_node, st_node)
+            deep_bag  = bag_mean(deep_node, node_batch_idx, n_bags)
+
+            wide_bag  = prep.wide_cond.to(device=deep_bag.device, dtype=deep_bag.dtype)
+            if wide_bag.ndim == 1: 
+                wide_bag = wide_bag.unsqueeze(1)
+            if wide_bag.shape[0] != n_bags: 
+                raise ValueError(f"wide_cond must be bag-level")
+
+            wide_node = wide_bag[node_batch_idx]
+            wide_bag  = bag_mean(wide_node, node_batch_idx, n_bags)
 
             pack = self.loss_(
                 sem_bag=sem_bag, 
@@ -498,16 +528,24 @@ class SSFEBase(BaseEstimator, ABC):
                 node_batch_idx=node_batch_idx,
                 w_contrast=self.w_contrast,
                 w_cluster=self.w_cluster,
-                w_recon=self.w_recon
+                w_recon=self.w_recon,
+                w_hsic=self.w_hsic,
+                deep_bag=deep_bag,
+                wide_cond=wide_bag
             )
 
             loss  = pack.total 
-            l_con = pack.raw["contrast"]
-            l_kl  = pack.raw["cluster"]
-            l_rec = pack.raw["recon"]
-
+            terms = dict(pack.raw)
             bsz   = sem_bag.shape[0]
-        return loss, l_con, l_kl, l_rec, bsz 
+        return loss, terms, bsz 
+
+    def get_view_for_hsic(self, sem_bag: torch.Tensor, st_bag: torch.Tensor) -> torch.Tensor: 
+        if self.hsic_view == "semantic": 
+            return sem_bag 
+        elif self.hsic_view == "structural": 
+            return st_bag 
+        else: 
+            return torch.cat([sem_bag, st_bag], dim=1)
 
     # -----------------------------------------------------
     # Loader Utils    
@@ -711,6 +749,7 @@ class SpatialPatchPreprocessor(nn.Module):
         self,
         tiles: torch.Tensor,
         stats: torch.Tensor, 
+        wide_cond: torch.Tensor, 
         tile_batch_idx: torch.Tensor | None = None,
     ) -> SpatialPatchBatch: 
         if tiles.ndim != 4: 
@@ -719,6 +758,9 @@ class SpatialPatchPreprocessor(nn.Module):
             raise ValueError(f"expected stats (T, L, D), got {tuple(stats.shape)}")
 
         T, C, _, _ = tiles.shape
+
+        if wide_cond.ndim == 1: 
+            wide_cond = wide_cond.unsqueeze(1)
         
         embc = self.encoder(tiles)
         K    = stats.shape[1]
@@ -745,10 +787,19 @@ class SpatialPatchPreprocessor(nn.Module):
 
         patch_batch_idx = torch.arange(T, device=tiles.device).repeat_interleave(K)
         if tile_batch_idx is None: 
-            tile_batch_idx = torch.arange(T, device=tiles.device)
+            tile_batch_idx = torch.arange(T, device=tiles.device, dtype=torch.long)
         else: 
             tile_batch_idx = tile_batch_idx.to(
-                device=tiles.device, dtype=torch.long, non_blocking=True)
+                device=tiles.device, dtype=torch.long, non_blocking=True).view(-1)
+
+        if tile_batch_idx.numel() != T: 
+            raise ValueError("tile_batch_idx length must match number of tiles.")
+
+        n_bags = int(tile_batch_idx.max().item()) + 1 if tile_batch_idx.numel() else 0 
+        if wide_cond.shape[0] != n_bags: 
+            raise ValueError("wide_cond must be bag-level with one row per bag")
+
+        wide_cond = wide_cond.to(device=tiles.device, dtype=torch.float32, non_blocking=True)
 
         return SpatialPatchBatch(
             repr_target=repr_target,
@@ -757,6 +808,7 @@ class SpatialPatchPreprocessor(nn.Module):
             stats_raw=stats_raw_f,
             batch_idx=patch_batch_idx,
             tile_batch_idx=tile_batch_idx,
+            wide_cond=wide_cond,
             patch_idx=idx, 
             n_tiles=T,
             n_patches_per_tile=K 
@@ -914,6 +966,9 @@ class SpatialSSFE(SSFEBase):
         w_contrast: float = 1.0, 
         w_cluster: float = 1.0, 
         w_recon: float = 1.0, 
+        w_hsic: float = 1.0, 
+        hsic_sigma: Optional[float] = None, 
+        hsic_view: str = "concat", 
         contrast_temperature: float, 
         cluster_temperature: float,
         n_prototypes: int, 
@@ -934,6 +989,9 @@ class SpatialSSFE(SSFEBase):
             w_contrast=w_contrast,
             w_cluster=w_cluster,
             w_recon=w_recon,
+            w_hsic=w_hsic,
+            hsic_sigma=hsic_sigma,
+            hsic_view=hsic_view,
             contrast_temperature=contrast_temperature,
             cluster_temperature=cluster_temperature,
             n_prototypes=n_prototypes,
@@ -1008,17 +1066,20 @@ class SpatialSSFE(SSFEBase):
         )
 
     def forward_preprocess(self, batch) -> SSFEBatch:
-        if not isinstance(batch, (list, tuple)) or len(batch) < 4: 
-            raise ValueError("expected spatial batch as (tiles, labels, tile_batch_idx)")
+        if not isinstance(batch, (list, tuple)) or len(batch) < 5: 
+            raise ValueError("expected spatial batch as "
+                             "(tiles, labels, tile_batch_idx, tile_stats, wide_cond)")
 
         tiles          = batch[0].to(self.device, non_blocking=True, 
                                      memory_format=torch.channels_last)
         tile_batch_idx = batch[2].to(self.device, non_blocking=True)
         stats          = batch[3].to(self.device, non_blocking=True)
+        wide_cond      = batch[4].to(self.device, non_blocking=True)
 
         return self.model_["preprocess"](
             tiles, 
             stats=stats, 
+            wide_cond=wide_cond, 
             tile_batch_idx=tile_batch_idx,
         )
 
@@ -1127,6 +1188,7 @@ class TabularPreprocessor(nn.Module):
     def forward(
         self,
         x: torch.Tensor, 
+        wide_cond: torch.Tensor, 
         bag_idx: torch.Tensor | None = None, 
         graph_group_idx: torch.Tensor | None = None,
         node_ids: torch.Tensor | None = None 
@@ -1137,6 +1199,8 @@ class TabularPreprocessor(nn.Module):
         xc = x.to(dtype=torch.float32)
         n  = x.shape[0]
 
+        if wide_cond.ndim == 1: 
+            wide_cond = wide_cond.unsqueeze(1)
 
         if bag_idx is None: 
             bag_idx = torch.arange(n, device=x.device, dtype=torch.long)
@@ -1144,6 +1208,9 @@ class TabularPreprocessor(nn.Module):
             bag_idx = self.normalize_index(bag_idx, n, x.device)
 
         n_bags = int(bag_idx.max().item()) + 1 if n > 0 else 0 
+
+        if wide_cond.shape[0] != n_bags: 
+            raise ValueError("wide_cond must be bag-level")
 
         if graph_group_idx is None: 
             graph_group_idx = torch.zeros(n, device=x.device, dtype=torch.long)
@@ -1182,6 +1249,7 @@ class TabularPreprocessor(nn.Module):
             n_nodes=n,
             n_bags=n_bags,
             graph_group_idx=graph_group_idx,
+            wide_cond=wide_cond,
             node_ids=node_ids 
         )
 
@@ -1434,9 +1502,12 @@ class TabularSSFE(SSFEBase):
         min_delta: float = 0.0001, 
         random_state: int = 0, 
         collate_fn=None, 
-        w_contrast: float = 1, 
-        w_cluster: float = 1, 
-        w_recon: float = 1, 
+        w_contrast: float = 1.0, 
+        w_cluster: float = 1.0, 
+        w_recon: float = 1.0, 
+        w_hsic: float = 1.0, 
+        hsic_sigma: Optional[float] = None, 
+        hsic_view: str = "concat", 
         contrast_temperature: float, 
         cluster_temperature: float, 
         n_prototypes: int, 
@@ -1458,6 +1529,9 @@ class TabularSSFE(SSFEBase):
             w_contrast=w_contrast, 
             w_cluster=w_cluster, 
             w_recon=w_recon, 
+            w_hsic=w_hsic,
+            hsic_sigma=hsic_sigma,
+            hsic_view=hsic_view,
             contrast_temperature=contrast_temperature, 
             cluster_temperature=cluster_temperature, 
             n_prototypes=n_prototypes, 
@@ -1541,19 +1615,27 @@ class TabularSSFE(SSFEBase):
         bag_idx         = None 
         graph_group_idx = None 
         node_ids        = None 
+        wide_cond       = None 
 
         if isinstance(batch, (list, tuple)): 
             if len(batch) < 1: 
                 raise ValueError("empty tabular batch")
             x = batch[0]
-            if len(batch) >= 3: 
-                bag_idx = batch[2]
-            if len(batch) >= 4: 
-                graph_group_idx = batch[3]
-            if len(batch) >= 5: 
-                node_ids = batch[4]
-            elif len(batch) >= 2 and self.is_index_like(batch[1]): 
-                node_ids = batch[1]
+            if (len(batch) == 3 and self.is_index_like(batch[1]) and 
+                not self.is_index_like(batch[2])): 
+                node_ids  = batch[1]
+                wide_cond = batch[2]
+            else: 
+                if len(batch) >= 3:
+                    bag_idx = batch[2]
+                if len(batch) >= 4:
+                    graph_group_idx = batch[3]
+                if len(batch) >= 5:
+                    node_ids = batch[4]
+                elif len(batch) >= 2 and self.is_index_like(batch[1]):
+                    node_ids = batch[1]
+                if len(batch) >= 6:
+                    wide_cond = batch[5]
         else: 
             x = batch 
 
@@ -1582,10 +1664,18 @@ class TabularSSFE(SSFEBase):
         else: 
             node_ids = torch.as_tensor(node_ids, dtype=torch.long, device=self.device).view(-1)
 
+        if wide_cond is None: 
+            raise ValueError("tabular batch missing wide_cond")
+        if isinstance(wide_cond, torch.Tensor): 
+            wide_cond = wide_cond.to(self.device, dtype=torch.float32, non_blocking=True) 
+        else: 
+            wide_cond = torch.as_tensor(wide_cond, dtype=torch.float32, device=self.device)
+
         return self.model_["preprocess"](
             x, 
             bag_idx=bag_idx,
             graph_group_idx=graph_group_idx,
+            wide_cond=wide_cond,
             node_ids=node_ids
         )
 
@@ -1718,15 +1808,26 @@ class TabularSSFE(SSFEBase):
         return local_flat.view(n, k)
 
     def make_loader(self, dataset, shuffle: bool):
+        if isinstance(dataset, dict) and "features" in dataset:
+            x = torch.from_numpy(np.asarray(dataset["features"], dtype=np.float32))
+            ids_np = dataset.get("node_ids", np.arange(x.shape[0], dtype=np.int64))
+            ids = torch.from_numpy(np.asarray(ids_np, dtype=np.int64))
+
+            w_np = dataset.get("wide_cond", dataset["features"])
+            w = torch.from_numpy(np.asarray(w_np, dtype=np.float32))
+            if w.shape[0] != x.shape[0]: 
+                raise ValueError("wide_cond row count must match features")
+            dataset = TensorDataset(x, ids, w)
+
         if isinstance(dataset, np.ndarray): 
             x   = torch.from_numpy(np.asarray(dataset, dtype=np.float32))
             ids = torch.arange(x.shape[0], dtype=torch.long)
-            dataset = TensorDataset(x, ids) 
+            dataset = TensorDataset(x, ids, x.clone()) 
 
         elif isinstance(dataset, torch.Tensor): 
             x   = dataset.detach().cpu().to(torch.float32)
             ids = torch.arange(x.shape[0], dtype=torch.long)
-            dataset = TensorDataset(x, ids)
+            dataset = TensorDataset(x, ids, x.clone())
 
         return DataLoader(
             dataset,
