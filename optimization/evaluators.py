@@ -27,6 +27,7 @@ from typing                    import (
     Any, 
     Callable, 
     Dict,
+    Mapping,
     Optional 
 )
 
@@ -41,7 +42,8 @@ from sklearn.model_selection   import (
 
 from torch.utils.data          import (
     DataLoader, 
-    Subset 
+    Subset,
+    TensorDataset
 )
 
 from optimization.engine       import (
@@ -346,6 +348,228 @@ class SSFEEvaluator(OptunaEvaluator):
         if not hasattr(model, "best_val_score_"): 
             raise AttributeError("model must retain best validation score")
         return float(model.best_val_score_)
+
+
+class _MappedZipLoader: 
+    '''
+    Credit Codex 5.3 High: Converts expert loaders into a zipped loader accessable as a mapping 
+    '''
+
+    def __init__(
+        self,
+        loaders: Mapping[str, DataLoader]
+    ): 
+        if not loaders: 
+            raise ValueError("at least one expert loader is required.")
+        self.expert_ids_ = list(loaders.keys())
+        self.loaders_    = {k: loaders[k] for k in self.expert_ids_}
+
+    def __iter__(self): 
+        iters = [iter(self.loaders_[k]) for k in self.expert_ids_]
+        for batches in zip(*iters): 
+            yield {k: b for k, b in zip(self.expert_ids_, batches)}
+    
+    def __len__(self): 
+        return min(len(self.loaders_[k]) for k in self.expert_ids_)
+
+
+class MultiviewSSFEEEvaluator(OptunaEvaluator): 
+    '''
+    Evaluator for multiview SSFE optimization. 
+    '''
+
+    def __init__(
+        self,
+        filepath: str,
+        loader_func: Callable,
+        model_factory: Callable,
+        param_space: Callable[[optuna.Trial], Dict[str, Any]],
+        *,
+        random_state: int = 0,
+        eval_fraction: float = 0.2,
+        n_runs: int = 1,
+        batch_size: int = 32,
+        compute_strategy: ComputeStrategy = ComputeStrategy.create(greedy=False),
+    ):
+        self.filepath           = filepath
+        self.loader             = loader_func
+        self.factory            = model_factory
+        self.param_space_fn     = param_space
+        self.random_state       = random_state
+        self.eval_fraction      = eval_fraction
+        self.n_runs             = max(1, int(n_runs))
+        self.batch_size         = batch_size
+        self.compute_strategy   = compute_strategy
+        self.cache_             = None
+
+    def suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        return self.param_space_fn(trial)
+
+    def load_data_once(self):
+        if self.cache_ is None:
+            self.cache_ = self.loader(self.filepath)
+        return self.cache_
+
+    def evaluate(self, params: Dict[str, Any], trial: optuna.Trial | None = None) -> float:
+        data = self.load_data_once()
+        n = int(np.asarray(data["sample_ids"]).shape[0])
+        if n < 4:
+            raise ValueError("need at least 4 aligned samples for train/val split")
+
+        scores: list[float] = []
+        for run_idx in range(self.n_runs):
+            seed = self.random_state + run_idx
+            train_idx, val_idx = self.holdout_split(n=n, seed=seed)
+            model = self.build_model(params=params, run_seed=seed)
+
+            try:
+                train_expert, val_expert = self.build_expert_loaders(
+                    data=data, train_idx=train_idx, val_idx=val_idx, params=params
+                )
+                cache_expert = self.build_cache_loaders(data=data, params=params)
+                self.initialize_experts(model, cache_expert)
+                model.fit(_MappedZipLoader(train_expert), _MappedZipLoader(val_expert))
+                score = float(getattr(model, "best_val_score_", np.inf))
+                if not np.isfinite(score):
+                    return float("inf")
+                scores.append(score)
+                if trial is not None:
+                    trial.report(float(np.mean(scores)), step=run_idx)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+            finally:
+                del model
+                _cleanup_cuda()
+
+        return float(np.mean(scores))
+
+    def build_cache_loaders(
+        self,
+        *,
+        data: Dict[str, Any],
+        params: Dict[str, Any],
+    ) -> Dict[str, DataLoader]:
+        admin = data["admin"]
+        viirs = data["viirs"]
+
+        x = np.asarray(admin["features"], dtype=np.float32)
+        w = np.asarray(admin["wide_cond"], dtype=np.float32)
+        node_ids = np.asarray(admin.get("node_ids", np.arange(x.shape[0])), dtype=np.int64)
+        if x.shape[0] != w.shape[0]:
+            raise ValueError("admin features/wide_cond row mismatch")
+
+        viirs_ds = viirs["dataset"]
+        if len(viirs_ds) != x.shape[0]:
+            raise ValueError("aligned admin/viirs row mismatch")
+
+        admin_ds = TensorDataset(
+            torch.from_numpy(x),
+            torch.from_numpy(node_ids),
+            torch.from_numpy(w),
+        )
+        viirs_collate = viirs.get("collate_fn")
+
+        bs = int(params.get("batch_size", self.batch_size))
+        pin = str(self.compute_strategy.device).startswith("cuda")
+        common = dict(
+            batch_size=bs,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=pin,
+            drop_last=False,
+        )
+
+        return {
+            "admin": DataLoader(admin_ds, **common),
+            "viirs": DataLoader(viirs_ds, collate_fn=viirs_collate, **common),
+        }
+
+    def build_model(self, *, params: Dict[str, Any], run_seed: int):
+        kwargs = dict(params)
+        kwargs.setdefault("random_state", run_seed)
+        try:
+            model = self.factory(compute_strategy=self.compute_strategy, **kwargs)
+        except TypeError:
+            model = self.factory(**kwargs)
+        if callable(model) and not hasattr(model, "fit"):
+            model = model()
+        if not hasattr(model, "fit"):
+            raise AttributeError("multiview model must implement fit(train_loader, val_loader)")
+        return model
+
+    def holdout_split(self, *, n: int, seed: int) -> tuple[NDArray, NDArray]:
+        rng = np.random.default_rng(seed)
+        idx = np.arange(n, dtype=np.int64)
+        rng.shuffle(idx)
+        n_val = int(round(n * self.eval_fraction))
+        n_val = min(max(1, n_val), n - 1)
+        return idx[n_val:], idx[:n_val]
+
+    def build_expert_loaders(
+        self,
+        *,
+        data: Dict[str, Any],
+        train_idx: NDArray,
+        val_idx: NDArray,
+        params: Dict[str, Any],
+    ) -> tuple[Dict[str, DataLoader], Dict[str, DataLoader]]:
+        admin = data["admin"]
+        viirs = data["viirs"]
+
+        x = np.asarray(admin["features"], dtype=np.float32)
+        w = np.asarray(admin["wide_cond"], dtype=np.float32)
+        node_ids = np.asarray(admin.get("node_ids", np.arange(x.shape[0])), dtype=np.int64)
+        if x.shape[0] != w.shape[0]:
+            raise ValueError("admin features/wide_cond row mismatch")
+
+        viirs_ds = viirs["dataset"]
+        if len(viirs_ds) != x.shape[0]:
+            raise ValueError("aligned admin/viirs row mismatch")
+
+        admin_ds = TensorDataset(
+            torch.from_numpy(x),
+            torch.from_numpy(node_ids),
+            torch.from_numpy(w),
+        )
+        viirs_collate = viirs.get("collate_fn")
+
+        bs = int(params.get("batch_size", self.batch_size))
+        pin = str(self.compute_strategy.device).startswith("cuda")
+        common = dict(
+            batch_size=bs, 
+            shuffle=False, 
+            num_workers=0, 
+            pin_memory=pin, 
+            drop_last=False
+        )
+
+        train_expert = {
+            "admin": DataLoader(Subset(admin_ds, train_idx.tolist()), **common),
+            "viirs": DataLoader(
+                Subset(viirs_ds, train_idx.tolist()),
+                collate_fn=viirs_collate,
+                **common,
+            ),
+        }
+        val_expert = {
+            "admin": DataLoader(Subset(admin_ds, val_idx.tolist()), **common),
+            "viirs": DataLoader(
+                Subset(viirs_ds, val_idx.tolist()),
+                collate_fn=viirs_collate,
+                **common,
+            ),
+        }
+        return train_expert, val_expert
+
+    @staticmethod
+    def initialize_experts(model, train_expert: Dict[str, DataLoader]):
+        if not hasattr(model, "experts"):
+            raise AttributeError("multiview model must expose .experts mapping")
+        for eid, expert in model.experts.items():
+            loader = train_expert.get(eid)
+            if loader is None:
+                raise KeyError(f"missing train loader for expert='{eid}'")
+            expert.init_fit(loader, state_loader=loader)
 
 # ---------------------------------------------------------
 # Evaluator for Standard Models (xgb, rf, logistic, svm, etc) 

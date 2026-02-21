@@ -231,10 +231,6 @@ def define_tabular_ssfe_space(trial: optuna.Trial):
 
         # semantic branch
         "semantic_out_dim": trial.suggest_categorical("semantic_out_dim", [64, 128, 256]),
-        "transformer_dim": trial.suggest_categorical("transformer_dim", [64, 128]),
-        "transformer_heads": trial.suggest_categorical("transformer_heads", [4, 8]),
-        "transformer_layers": trial.suggest_int("transformer_layers", 1, 3),
-        "transformer_attn_dropout": trial.suggest_float("transformer_attn_dropout", 0.0, 0.2),
         "semantic_proj_dim": trial.suggest_categorical("semantic_proj_dim", [64, 128, 256]),
         "semantic_hidden_dim": trial.suggest_categorical("semantic_hidden_dim", [128, 256, 512]),
         "semantic_depth": trial.suggest_int("semantic_depth", 1, 4),
@@ -351,6 +347,32 @@ def define_fusion_joint_space(trial: optuna.Trial):
         "mix_with_replacement": True
     })
     return p 
+
+def define_multiview_ssfe_space(trial): 
+    return {
+        "global_dim": trial.suggest_categorical("global_dim", [64, 128, 256]),
+        "gate_floor": trial.suggest_float("gate_floor", 0.0, 0.15),
+        "lr": trial.suggest_float("lr", 1e-5, 3e-4, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-8, 1e-4, log=True),
+        "semantic_depth": 2,#trial.suggest_int("semantic_depth", 2, 5), 
+        "w_recon": 1.0,#trial.suggest_float("w_recon", 0.5, 2.0),
+        "w_align": 1.0,#trial.suggest_float("w_align", 0.5, 2.0),
+        "w_privacy": 1.2,#trial.suggest_float("w_privacy", 0.5, 2.0),
+
+        "align_start_pct": 0.10,
+        "align_end_pct": 0.35,
+        "privacy_start_pct": 0.15,
+        "privacy_end_pct": 0.60,
+        "privacy_ramp_power": 1.2,
+
+        "sinkhorn_epsilon": 0.05,
+        "recon_cross_scale": 1.0,#trial.suggest_float("recon_cross_scale", 0.5, 2.0),
+        "align_l2_scale": 1.0,#trial.suggest_float("align_l2_scale", 0.5, 2.0),
+        "align_kl_scale": 1.0,#trial.suggest_float("align_kl_scale", 0.5, 2.0),
+        "epochs": 300,
+        "early_stopping_rounds": 30,
+        "batch_size": 64,
+    }
 
 # ---------------------------------------------------------
 # MLP Projector  
