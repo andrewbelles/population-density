@@ -32,7 +32,8 @@ from typing                import (
     Any, 
     Callable, 
     Mapping,
-    Optional 
+    Optional,
+    Sequence,
 ) 
 
 from numpy.typing          import (
@@ -43,8 +44,16 @@ from utils.helpers         import (
     as_1d_f64,
     as_2d_f64,
     to_batch_tensor,
-    weighted_mean
+    weighted_mean,
+    ordered_expert_tensors,
+    normalize_attention
 )
+
+# ---------------------------------------------------------
+# Loss Constants
+# ---------------------------------------------------------
+
+HSIC_SIGMA_GRID_DEFAULT: tuple[float, ...] = (0.1, 1.0, 5.0, 10.0)
 
 # --------------------------------------------------------- 
 # Class Weighting Methods 
@@ -658,7 +667,7 @@ class HSICOrthogonalityLoss(WeightedLossTerm):
     def __init__(
         self,
         *,
-        sigma: Optional[float] = None, 
+        sigma: Optional[float | Sequence[float] | torch.Tensor] = None, 
         eps: float = 1e-6, 
         weight: WeightSpec = 1.0, 
         name: str = "hsic"
@@ -690,11 +699,11 @@ class HSICOrthogonalityLoss(WeightedLossTerm):
             raw = deep.new_tensor(0.0)
             return raw, {"n": deep.new_tensor(float(n))}
 
-        K = self.rbf_kernel(deep, sigma=self.sigma, eps=self.eps)
-        L = self.rbf_kernel(wide, sigma=self.sigma, eps=self.eps)
+        K = rbf_kernel(deep, sigma=self.sigma, eps=self.eps)
+        L = rbf_kernel(wide, sigma=self.sigma, eps=self.eps)
 
-        Kc = self.center_gram(K)
-        Lc = self.center_gram(L)
+        Kc = center_gram(K)
+        Lc = center_gram(L)
 
         denom = float((n - 1)**2)
         hsic  = (Kc * Lc).sum() / denom 
@@ -711,28 +720,6 @@ class HSICOrthogonalityLoss(WeightedLossTerm):
             "wide_norm": wide.norm(dim=1).mean().detach(), 
         }
         return raw, metrics 
-
-    @staticmethod 
-    def rbf_kernel(x: torch.Tensor, sigma: Optional[float], eps: float) -> torch.Tensor: 
-        x  = x.reshape(x.size(0), -1)
-        d2 = torch.cdist(x, x, p=2).pow(2)
-        n  = int(d2.size(0))
-
-        if sigma is None or float(sigma) <= 0.0: 
-            if n > 1: 
-                i, j = torch.triu_indices(n, n, offset=1, device=d2.device)
-                tri  = d2[i, j]
-                med  = tri.median() if tri.numel() > 0 else d2.new_tensor(1.0)
-            else: 
-                med  = d2.new_tensor(1.0)
-            sigma2 = med.clamp_min(eps)
-        else: 
-            sigma2 = d2.new_tensor(float(sigma)**2).clamp_min(eps)
-        return torch.exp(-0.5 * d2 / sigma2)
-
-    @staticmethod 
-    def center_gram(K: torch.Tensor) -> torch.Tensor: 
-        return K - K.mean(0, keepdim=True) - K.mean(1, keepdim=True) + K.mean()
 
 # ---------------------------------------------------------
 # Ordinal and Heteroscedastic Regression Loss  
@@ -894,6 +881,233 @@ class FusionL1Loss(WeightedLossTerm, FusionGaussianMixin):
         }
         return raw, metrics 
 
+class MultiviewReconstructionLoss(WeightedLossTerm): 
+
+    '''
+    For each expert i: 
+    - self-reconstruction:  x_i := Dec([S_i, P_i])
+    - cross-reconstruction: x_i := Dec([S_global, P_i])
+    '''
+
+    required_keys = ("shared_bags", "private_bags", "shared_global", "repr_targets")
+
+    def __init__(
+        self,
+        *,
+        expert_ids: list[str],
+        self_recon_heads: nn.ModuleDict,
+        cross_recon_heads: nn.ModuleDict,
+        cross_scale: float = 1.0, 
+        weight: WeightSpec = 1.0, 
+        name: str = "recon"
+    ): 
+        super().__init__(name=name, weight=weight, reduction="mean")
+
+        self.expert_ids        = expert_ids
+        self.self_recon_heads  = self_recon_heads
+        self.cross_recon_heads = cross_recon_heads
+        self.cross_scale       = cross_scale
+
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        s_list = ordered_expert_tensors(
+            context["shared_bags"], 
+            self.expert_ids, 
+            key="shared_bags"
+        )
+        p_list = ordered_expert_tensors(
+            context["private_bags"], 
+            self.expert_ids, 
+            key="private_bags"
+        )
+        t_list = ordered_expert_tensors(
+            context["repr_targets"], 
+            self.expert_ids, 
+            key="repr_targets"
+        )
+        s_glob = context["shared_global"]
+
+        rec_vals, rec_self_vals, rec_cross_vals = [], [], []
+        metrics: dict[str, torch.Tensor]        = {}
+
+        for eid, si, pi, xi in zip(self.expert_ids, s_list, p_list, t_list): 
+            z_self  = torch.cat([si, pi], dim=1)
+            z_cross = torch.cat([s_glob, pi], dim=1)
+
+            x_hat_self  = self.self_recon_heads[eid](z_self)
+            x_hat_cross = self.cross_recon_heads[eid](z_cross)
+
+            l_self  = F.mse_loss(x_hat_self, xi)
+            l_cross = F.mse_loss(x_hat_cross, xi)
+            l_i     = l_self + self.cross_scale * l_cross 
+
+            rec_self_vals.append(l_self)
+            rec_cross_vals.append(l_cross)
+            rec_vals.append(l_i)
+
+            metrics[f"{eid}_self"]  = l_self.detach()
+            metrics[f"{eid}_cross"] = l_cross.detach()
+
+        raw = torch.stack(rec_vals).sum() 
+        return raw, metrics 
+
+class MultiviewAlignmentLoss(WeightedLossTerm): 
+
+    '''
+    Alignment refers to L2 distance for each public embedding against pooled global as well 
+    as kl-divergence per sinkhorn assignment against topologically pooled assignment. 
+    '''
+
+    required_keys = ("shared_bags", "shared_global", "attention_weights", "sinkhorn_logits")
+
+    def __init__(
+        self,
+        *,
+        expert_ids: list[str], 
+        sinkhorn_epsilon: float = 0.05, 
+        l2_scale: float = 1.0, 
+        kl_scale: float = 1.0, 
+        weight: WeightSpec = 1.0, 
+        name: str = "align"
+    ): 
+        super().__init__(name=name, weight=weight, reduction="mean")
+
+        self.expert_ids         = expert_ids
+        self.sinkhorn_epsilon   = sinkhorn_epsilon
+        self.l2_scale           = l2_scale
+        self.kl_scale           = kl_scale
+
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        s_list = ordered_expert_tensors(
+            context["shared_bags"], 
+            self.expert_ids, 
+            key="shared_bags"
+        )
+        l_list = ordered_expert_tensors(
+            context["sinkhorn_logits"],
+            self.expert_ids,
+            key="sinkhorn_logits"
+        )
+        s_glob = context["shared_global"]
+
+        n_experts = len(self.expert_ids)
+        n_bags    = s_glob.shape[0]
+        attn      = normalize_attention(
+            context["attention_weights"].to(device=s_glob.device, dtype=s_glob.dtype),
+            n_bags=n_bags, n_experts=n_experts 
+        )
+
+        a_list = [sinkhorn_assign(logits, epsilon=self.sinkhorn_epsilon) for logits in l_list]
+        a_glob = a_list[0].new_zeros(a_list[0].shape)
+        for i, ai in enumerate(a_list): 
+            a_glob = a_glob + attn[:, i:i+1] * ai 
+        a_glob = a_glob / a_glob.sum(dim=1, keepdim=True).clamp_min(1e-9)
+
+        l2_vals, kl_vals = [], []
+        metrics: dict[str, torch.Tensor] = {}
+
+        for eid, si, ai in zip(self.expert_ids, s_list, a_list): 
+            ai = ai.clamp_min(1e-9)
+            a_ref = a_glob.clamp_min(1e-9)
+
+            l2_i = F.mse_loss(si, s_glob) 
+            kl_i = F.kl_div(a_ref.log(), ai, reduction="batchmean")
+
+            l2_vals.append(l2_i)
+            kl_vals.append(kl_i)
+
+            metrics[f"{eid}_l2"] = l2_i.detach()
+            metrics[f"{eid}_kl"] = kl_i.detach()
+
+        l2_sum = torch.stack(l2_vals).sum()
+        kl_sum = torch.stack(kl_vals).sum()
+
+        raw = self.l2_scale * l2_sum + self.kl_scale * kl_sum 
+        return raw, metrics 
+
+class MultiviewPrivacyLoss(WeightedLossTerm): 
+
+    '''
+    Privacy/Orthogonality Penalty based on Hilbert-Schmidt Independence Criterion (HSIC) 
+    
+    Computed via: 
+    - HSIC(S_glob, X_wide) + sum(HSIC(P_i, S_glob) + HSIC(P_i, X_wide))
+    '''
+
+    required_keys = ("private_bags", "shared_global", "wide_cond")
+
+    def __init__(
+        self,
+        *,
+        expert_ids: list[str], 
+        sigma: Optional[float | Sequence[float] | torch.Tensor] = None, 
+        eps: float = 1e-6, 
+        weight: WeightSpec = 1.0, 
+        name: str = "privacy"
+    ): 
+        super().__init__(name=name, weight=weight, reduction="mean")
+
+        self.expert_ids = expert_ids
+        self.sigma      = sigma 
+        self.eps        = eps 
+        
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        p_list = ordered_expert_tensors(
+            context["private_bags"], 
+            self.expert_ids, 
+            key="private_bags"
+        )
+        s_glob = context["shared_global"]
+        wide   = context["wide_cond"]
+
+        if wide.ndim == 1: 
+            wide = wide.unsqueeze(1)
+        if wide.shape[0] != s_glob.shape[0]: 
+            raise ValueError("wide_cond and shared_global row mismatch.")
+
+        wide    = wide.detach() 
+        hsic_sw = self.hsic_norm(s_glob, wide)
+
+        terms = [hsic_sw]
+        metrics: dict[str, torch.Tensor] = {"hsic_s_wide": hsic_sw.detach()}
+
+        for eid, pi in zip(self.expert_ids, p_list):
+            if pi.shape[0] != s_glob.shape[0]: 
+                raise ValueError(f"{eid} private_bag rows must match shared_global rows.")
+
+            hsic_ps = self.hsic_norm(pi, s_glob)
+            hsic_pw = self.hsic_norm(pi, wide)
+            terms.extend([hsic_ps, hsic_pw])
+
+            metrics[f"{eid}_hsic_p_s"] = hsic_ps.detach() 
+            metrics[f"{eid}_hsic_p_w"] = hsic_pw.detach() 
+
+        raw = torch.stack(terms).sum() 
+        return raw, metrics 
+
+    def hsic_norm(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor: 
+        if x.ndim != 2 or y.ndim != 2: 
+            raise ValueError("HSIC inputs must 2d.")
+        if x.shape[0] != y.shape[0]: 
+            raise ValueError("HSIC inputs row mismatch.")
+
+        n = x.shape[0]
+        if n < 3: 
+            return x.new_tensor(0.0)
+
+        K  = rbf_kernel(x, sigma=self.sigma, eps=self.eps)
+        L  = rbf_kernel(y, sigma=self.sigma, eps=self.eps)
+
+        Kc = center_gram(K)
+        Lc = center_gram(L)
+
+        denom = float((n - 1)**2)
+        hsic  = (Kc * Lc).sum() / denom 
+
+        k_var = (Kc * Kc).sum() / denom 
+        l_var = (Lc * Lc).sum() / denom 
+        hsic  = hsic / torch.sqrt(k_var.clamp_min(self.eps) * l_var.clamp_min(self.eps))
+        return hsic.abs() 
+
 # ---------------------------------------------------------
 # Loss Helpers 
 # ---------------------------------------------------------
@@ -911,6 +1125,64 @@ def sinkhorn_assign(scores: torch.Tensor, epsilon: float = 0.05) -> torch.Tensor
     Q = Q / Q.sum(dim=0, keepdim=True).clamp_min(1e-9)
 
     return Q.t().detach() 
+
+def resolve_hsic_sigma_grid(
+    sigma: Optional[float | Sequence[float] | torch.Tensor],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    eps: float
+) -> torch.Tensor:
+    default_grid = torch.as_tensor(
+        HSIC_SIGMA_GRID_DEFAULT,
+        device=device,
+        dtype=dtype,
+    )
+
+    if sigma is None:
+        grid = default_grid
+    elif torch.is_tensor(sigma):
+        grid = sigma.detach().to(device=device, dtype=dtype).view(-1)
+    elif isinstance(sigma, (list, tuple, np.ndarray)):
+        grid = torch.as_tensor(sigma, device=device, dtype=dtype).view(-1)
+    else:
+        s = float(sigma)
+        if s <= 0.0:
+            grid = default_grid
+        else:
+            # Retain multi-scale behavior while allowing a scalar scale factor.
+            grid = default_grid * s
+
+    mask = torch.isfinite(grid) & (grid > 0)
+    grid = grid[mask]
+    if grid.numel() == 0:
+        grid = default_grid
+
+    return grid.clamp_min(float(eps))
+
+
+def rbf_kernel(
+    x: torch.Tensor,
+    sigma: Optional[float | Sequence[float] | torch.Tensor],
+    eps: float
+) -> torch.Tensor: 
+    x  = x.reshape(x.size(0), -1)
+    d2 = torch.cdist(x, x, p=2).pow(2)
+
+    sigma_grid = resolve_hsic_sigma_grid(
+        sigma,
+        device=d2.device,
+        dtype=d2.dtype,
+        eps=eps,
+    )
+    sigma2 = sigma_grid.pow(2).view(1, 1, -1).clamp_min(float(eps))
+
+    K = torch.exp(-0.5 * d2.unsqueeze(-1) / sigma2)
+    # Mean over scales keeps magnitude stable across grid sizes.
+    return K.mean(dim=-1)
+
+def center_gram(K: torch.Tensor) -> torch.Tensor: 
+    return K - K.mean(0, keepdim=True) - K.mean(1, keepdim=True) + K.mean()
 
 # ---------------------------------------------------------
 # Loss Build Functions 
@@ -938,6 +1210,7 @@ def build_ssfe_loss(
             active_eps=contrast_active_eps,
             weight="w_contrast", 
             name="contrast"
+
         ),
         SwappedPredictionLoss(
             sem_proj=sem_proj,
@@ -982,5 +1255,41 @@ def build_wide_deep_loss(
             var_floor=var_floor,
             weight="w_uncertainty",
             name="uncertainty"
+        )
+    )
+
+def build_ssfe_multiview_loss(
+    *,
+    expert_ids: list[str], 
+    self_recon_heads: nn.ModuleDict,
+    cross_recon_heads: nn.ModuleDict,
+    sinkhorn_epsilon: float = 0.05,
+    hsic_sigma: Optional[float] = None, 
+    recon_cross_scale: float = 1.0, 
+    align_l2_scale: float = 1.0, 
+    align_kl_scale: float = 1.0 
+): 
+    return LossComposer(
+        MultiviewReconstructionLoss(
+            expert_ids=expert_ids,
+            self_recon_heads=self_recon_heads,
+            cross_recon_heads=cross_recon_heads,
+            cross_scale=recon_cross_scale,
+            weight="w_recon", 
+            name="recon"
+        ),
+        MultiviewAlignmentLoss(
+            expert_ids=expert_ids,
+            sinkhorn_epsilon=sinkhorn_epsilon,
+            l2_scale=align_l2_scale,
+            kl_scale=align_kl_scale,
+            weight="w_align",
+            name="align"
+        ),
+        MultiviewPrivacyLoss(
+            expert_ids=expert_ids,
+            sigma=hsic_sigma,
+            weight="w_privacy",
+            name="privacy"
         )
     )

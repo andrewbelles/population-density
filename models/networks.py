@@ -6,32 +6,488 @@
 # 
 # 
 
-'''
-Thresholds for Hypergraph Heterogeneity (derived from multi-otsu thresholds): 
-    - L: 0.465 
-    - U: 1.855 
-These bounds enforce (32x32 chunks): 
-    - Type 0: ~2,750,000  
-    - Type 1: ~68,500
-    - Type 2: ~21,450 
-'''
+import numpy as np 
 
-from typing import Optional
-import torch 
+import torch, shap  
 
 import torch.nn.functional as F 
 
-from torch import nn, reshape, wait 
+from torch import nn 
 
 import torchvision.models as tvm
 
-from torchvision.models.mobilenet import MobileNet_V3_Small_Weights 
+from typing import (
+    Optional,
+    Any 
+)
+
+from numpy.typing import NDArray
 
 from torch_scatter import (
     scatter_add, 
     scatter_softmax, 
-    scatter_mean 
 )
+
+from sklearn.base import (
+    BaseEstimator,
+    RegressorMixin
+)
+
+from sklearn.ensemble import (
+    GradientBoostingRegressor 
+)
+
+# ---------------------------------------------------------
+# Quantile-GBR triplet module 
+# ---------------------------------------------------------
+
+class QuantileGBRTriplet(BaseEstimator, RegressorMixin): 
+
+    def __init__(
+        self,
+        *,
+        n_estimators: int, 
+        lr: float, 
+        max_depth: int, 
+        min_samples_split: int, 
+        min_samples_leaf: int, 
+        subsample: float, 
+        max_features: Optional[str | int] = None, 
+        alpha_lo: float = 0.16, 
+        alpha_mid: float = 0.50, 
+        alpha_hi: float = 0.84,
+        random_state: int = 0 
+    ):
+        self.n_estimators      = n_estimators
+        self.lr                = lr 
+        self.max_depth         = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf  = min_samples_leaf 
+        self.subsample         = subsample 
+        self.max_features      = max_features
+        self.alpha_lo          = alpha_lo 
+        self.alpha_mid         = alpha_mid 
+        self.alpha_hi          = alpha_hi 
+        self.random_state      = random_state
+
+    def fit(self, X, y): 
+        X, y = self.validate_input(X, y)
+        assert y is not None 
+        
+        self.est_lo_  = self.new(self.alpha_lo)
+        self.est_mid_ = self.new(self.alpha_mid)
+        self.est_hi_  = self.new(self.alpha_hi)
+
+        self.est_lo_.fit(X, y)
+        self.est_mid_.fit(X, y)
+        self.est_hi_.fit(X, y)
+        
+        self.n_features_in_ = X.shape[1]
+        self.is_fitted_ = True 
+        return self 
+
+    def predict(self, X) -> NDArray[np.float64]: 
+        self.check_fitted()
+        X, _ = self.validate_input(X)
+        if X.shape[1] != self.n_features_in_: 
+            raise ValueError("X feature count mismatch")
+        return np.asarray(self.est_mid_.predict(X), dtype=np.float64)
+
+    def predict_distribution(
+        self,
+        X,
+        *,
+        sigma_floor: float = 1e-6, 
+        var_floor: float = 1e-6
+    ) -> dict[str, NDArray[np.float64]]: 
+        q_lo, mu, q_hi = self.predict_quantiles(X)
+        _, sigma       = self.predict_mu_sigma(
+            X, sigma_floor=sigma_floor, 
+            q_lo=q_lo, mu=mu, q_hi=q_hi
+        )
+        var = np.maximum(np.power(sigma, 2), var_floor)
+
+        return {
+            "mu": mu, 
+            "sigma": sigma, 
+            "var": var,
+            "log_var": np.log(var),
+            "q_lo": q_lo,
+            "q_mid": mu,
+            "q_hi": q_hi 
+        }
+
+    def predict_mu_sigma(
+        self,
+        X,
+        *,
+        sigma_floor: float = 1e-6, 
+        q_lo: Optional[NDArray[np.float64]] = None,
+        mu: Optional[NDArray[np.float64]] = None,
+        q_hi: Optional[NDArray[np.float64]] = None
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]: 
+        if q_lo is None or mu is None or q_hi is None: 
+            q_lo, mu, q_hi = self.predict_quantiles(X)
+        q_lo = np.minimum(q_lo, q_hi)
+        q_hi = np.maximum(q_hi, q_lo)
+
+        sigma = (q_hi - q_lo) / 1.988 # normal 
+        sigma = np.maximum(sigma, sigma_floor)
+        return mu, sigma 
+
+    def predict_quantiles(
+        self, 
+        X
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]: 
+        self.check_fitted()
+        X, _ = self.validate_input(X)
+        if X.shape[1] != self.n_features_in_: 
+            raise ValueError("X feature count mismatch")
+        q_lo  = np.asarray(self.est_lo_.predict(X), dtype=np.float64)
+        q_mid = np.asarray(self.est_mid_.predict(X), dtype=np.float64)
+        q_hi  = np.asarray(self.est_hi_.predict(X), dtype=np.float64)
+        return q_lo, q_mid, q_hi 
+
+    def shap(
+        self,
+        X,
+        *,
+        which: str = "mid",
+        feature_names: Optional[list[str]] = None, 
+    ) -> dict[str, Any]:
+        '''
+        SHAP explanation for single branch lo, mid, or hi 
+        '''
+        self.check_fitted()
+        if which not in {"lo", "mid", "hi"}: 
+            raise ValueError("which must be one of {lo, mid, hi}")
+
+        X, _ = self.validate_input(X)
+        if X.shape[1] != self.n_features_in_: 
+            raise ValueError("X feature count mismatch")
+
+        idx    = np.arange(X.shape[0], dtype=np.int64)
+        X_eval = X 
+
+        est = {"lo": self.est_lo_, "mid": self.est_mid_, "hi": self.est_hi_}[which]
+
+        explainer = shap.TreeExplainer(est)
+        values    = np.asarray(explainer.shap_values(X_eval), dtype=np.float64)
+        base      = float(np.asarray(explainer.expected_value).reshape(-1)[0])
+
+        if feature_names is None: 
+            feature_names = [f"f{i}" for i in range(X_eval.shape[1])]
+
+        return {
+            "which": which, 
+            "sample_index": idx, 
+            "values": values, 
+            "base_values": base, 
+            "feature_names": feature_names 
+        }
+
+    def uncertainty(
+        self,
+        X,
+        *,
+        feature_names: Optional[list[str]] = None
+    ) -> dict[str, Any]: 
+        lo = self.shap(X, which="lo", feature_names=feature_names)
+        hi = self.shap(X, which="hi", feature_names=feature_names)
+        
+        values = (np.asarray(hi["values"]) - np.asarray(lo["values"])) / 1.988 
+        base   = (hi["base_values"] - lo["base_values"]) / 1.988 
+
+        return {
+            "which": "sigma_proxy", 
+            "sample_index": hi["sample_index"],
+            "values": values, 
+            "base_values": base, 
+            "feature_names": hi["feature_names"]
+        }
+
+    def new(self, alpha: float) -> GradientBoostingRegressor: 
+        return GradientBoostingRegressor(
+            loss="quantile", 
+            alpha=alpha, 
+            n_estimators=self.n_estimators,
+            learning_rate=self.lr,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            subsample=self.subsample,
+            max_features=self.max_features,
+            random_state=self.random_state
+        )
+
+    def validate_input(
+        self, 
+        X, 
+        y=None
+    ) -> tuple[NDArray[np.float64], Optional[NDArray[np.float64]]]:
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2: 
+            raise ValueError(f"X must be 2d, got {X.shape}")
+
+        if y is not None: 
+            y = np.asarray(y, dtype=np.float64).reshape(-1)
+            if X.shape[0] != y.shape[0]: 
+                raise ValueError("X/y row mismatch.")
+        return X, y 
+
+    def check_fitted(self): 
+        if not getattr(self, "is_fitted_", False): 
+            raise RuntimeError("call fit() first")
+
+# ---------------------------------------------------------
+# Spatial Lag Feature Cache  
+# ---------------------------------------------------------
+
+class SpatialLagFeatures: 
+    '''
+    Caches Haversine distance and row-normalized lag weights + augmented feature dicts. 
+    '''
+
+    def __init__(
+        self,
+        *,
+        k: int = 8, 
+        bandwidth_k: Optional[int] = 8, 
+        self_weight: float = 0.0, 
+        eps: float = 1e-9, 
+    ): 
+        self.k = k 
+        self.bandwidth_k = None if bandwidth_k is None else bandwidth_k 
+        self.self_weight = self_weight 
+        self.eps         = eps 
+
+        self.coords_:     Optional[NDArray[np.float64]] = None 
+        self.sample_ids_: Optional[NDArray[np.str_]]    = None
+        self.id_to_pos_:  Optional[dict[str, int]]      = None 
+        self.dist_km_:    Optional[NDArray[np.float64]] = None 
+        self.W_train_:    Optional[NDArray[np.float64]] = None 
+        self.cached_:     dict[str, dict[str, NDArray]] = {}
+
+    def fit(self, coords, sample_ids=None) -> "SpatialLagFeatures": 
+        c = self.as_coords(coords) 
+        self.coords_  = c 
+        self.dist_km_ = self.haversine(c)
+        self.W_train_ = self.distance_to_weights(self.dist_km_, square=True)
+
+        if sample_ids is not None: 
+            ids = self.canon_fips(sample_ids)
+            if ids.shape[0] != c.shape[0]: 
+                raise ValueError("sample_ids length mismatch.")
+            self.sample_ids_ = ids 
+            self.id_to_pos_  = {fid: i for i, fid in enumerate(ids)}
+        else: 
+            self.sample_ids_ = None  
+            self.id_to_pos_  = None 
+
+        self.cached_.clear() 
+        return self 
+
+    def transform(
+        self,
+        features: dict[str, NDArray],
+        *,
+        sample_ids=None, 
+    ): 
+        self.check_fitted()
+        W = self.W_train_ if sample_ids is None else self.subset(sample_ids)
+        assert W is not None 
+
+        out:   dict[str, NDArray] = {}
+        cache: dict[str, dict[str, NDArray]] = {}
+        for name, mat in features.items(): 
+            X = np.asarray(mat, dtype=np.float64)
+            if X.ndim != 2: 
+                raise ValueError(f"features[{name}] must be 2d")
+            if X.shape[0] != W.shape[0]: 
+                raise ValueError(f"features[{name}] row mismatch: {X.shape[0]} != {W.shape[0]}")
+            pack = self.augment(X, W)
+            cache[name] = pack
+            out[name]   = pack["augmented"]
+
+        self.cached_ = cache 
+        return out
+
+    def query(
+        self,
+        query_features: dict[str, NDArray],
+        query_coords, 
+        *,
+        ref_features: dict[str, NDArray]
+    ): 
+        self.check_fitted()
+
+        qc   = self.as_coords(query_coords)
+        D_qt = self.haversine(qc, self.coords_)
+        W_qt = self.distance_to_weights(D_qt, square=False)
+
+        out:   dict[str, NDArray] = {}
+        cache: dict[str, dict[str, NDArray]] = {}
+
+        for name, qmat in query_features.items(): 
+            if name not in ref_features: 
+                raise KeyError(f"missing reference features for key: {name}")
+
+            Xq = np.asarray(qmat, dtype=np.float64)
+            Xr = np.asarray(ref_features[name], dtype=np.float64)
+            if Xq.ndim != 2 or Xr.ndim != 2: 
+                raise ValueError(f"features[{name}] must be 2d")
+            if Xq.shape[1] != Xr.shape[1]: 
+                raise ValueError(f"features[{name}] col mismatch: "
+                                 f"{Xq.shape[1]} != {Xr.shape[1]}")
+            if W_qt.shape[0] != Xq.shape[0] or W_qt.shape[1] != Xr.shape[0]: 
+                raise ValueError(f"query/reference row mismatch for key: {name}")
+
+            lag  = W_qt @ Xr 
+            xlag = Xq * lag 
+            aug  = np.concatenate([Xq, lag, xlag], axis=1)
+
+            pack = {
+                "base": Xq,
+                "lag": lag, 
+                "interaction": xlag, 
+                "augmented": aug
+            }
+            cache[name] = pack 
+            out[name]   = pack["augmented"]
+
+        self.cached_ = cache 
+        return out 
+
+    def augment(self, X: NDArray[np.float64], W: NDArray[np.float64]) -> dict[str, NDArray]: 
+        lag  = W @ X 
+        xlag = X * lag  
+        aug  = np.concatenate([X, lag, xlag], axis=1, dtype=np.float64)
+        return {
+            "base": X, 
+            "lag": lag, 
+            "interaction": xlag, 
+            "augmented": aug 
+        }
+
+    def subset(self, sample_ids) -> NDArray[np.float64]: 
+        self.check_fitted()
+        if self.id_to_pos_ is None: 
+            raise ValueError("fit() must be called with sample_ids.")
+
+        ids = self.canon_fips(sample_ids)
+        idx = []
+        missing = []
+        for fid in ids: 
+            j = self.id_to_pos_.get(fid)
+            if j is None: 
+                missing.append(fid)
+            else: 
+                idx.append(j)
+        if missing: 
+            raise ValueError(f"missing ids in fitted cache: {len(missing)}")
+        idx_arr = np.asarray(idx, dtype=np.int64)
+        return self.W_train_[np.ix_(idx_arr, idx_arr)]
+
+    def check_fitted(self): 
+        if self.coords_ is None or self.W_train_ is None: 
+            raise RuntimeError("call fit() first")
+
+    def distance_to_weights(
+        self, 
+        D: NDArray[np.float64], 
+        *, 
+        square: bool
+    ) -> NDArray[np.float64]: 
+        if D.ndim != 2: 
+            raise ValueError("distance matrix must be 2d.")
+
+        n, m = D.shape 
+        if m == 0: 
+            raise ValueError("distance matrix has zero columns")
+
+        exclude_self = square and (n == m)
+        max_k = m - 1 if exclude_self else m 
+        if max_k <= 0: 
+            raise ValueError("invalid neighbor count for distance matrix")
+
+        k = min(max(self.k, 1), max_k)
+        W = np.zeros((n, m), dtype=np.float64)
+
+        work = np.asarray(D, dtype=np.float64).copy() 
+        if exclude_self:
+            np.fill_diagonal(work, np.inf)
+
+        nn_idx  = np.argpartition(work, kth=k-1, axis=1)[:, :k]
+        nn_dist = np.take_along_axis(work, nn_idx, axis=1)
+
+        if self.bandwidth_k is None: 
+            finite = nn_dist[np.isfinite(nn_dist)]
+            bw     = float(np.median(finite)) if finite.size else 1.0 
+        else: 
+            k_bw   = min(max(self.bandwidth_k, 1), k) 
+            kth    = np.partition(nn_dist, kth=k_bw - 1, axis=1)[:, k_bw-1]
+            finite = kth[np.isfinite(kth)]
+            bw     = float(np.median(finite)) if finite.size else 1.0 
+
+        if (not np.isfinite(bw)) or bw <= self.eps: 
+            bw = 1.0 
+
+        nn_w = np.exp(-np.square(nn_dist / bw))
+        nn_w[~np.isfinite(nn_w)] = 0.0 
+        np.put_along_axis(W, nn_idx, nn_w, axis=1)
+
+        if exclude_self and self.self_weight > 0.0: 
+            diag = np.arange(n, dtype=np.int64)
+            W[diag, diag] = self.self_weight 
+
+        row_sum = np.clip(W.sum(axis=1, keepdims=True), self.eps, None)
+        return W / row_sum 
+
+    @staticmethod 
+    def haversine(
+        src: NDArray[np.float64], 
+        dst: Optional[NDArray[np.float64]] = None 
+    ) -> NDArray[np.float64]: 
+
+        '''
+        Haversine distance out to KM
+        '''
+
+        src = SpatialLagFeatures.as_coords(src)
+        dst = src if dst is None else SpatialLagFeatures.as_coords(dst)
+
+        lat1 = np.radians(src[:, 0])[:, None]
+        lon1 = np.radians(src[:, 1])[:, None]
+        lat2 = np.radians(dst[:, 0])[None, :]
+        lon2 = np.radians(dst[:, 1])[None, :]
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        h = np.sin(dlat * 0.5) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon * 0.5) ** 2
+        h = np.clip(h, 0.0, 1.0)
+
+        earth_km = 6371.0088
+        return (2.0 * earth_km * np.arcsin(np.sqrt(h))).astype(np.float64, copy=False)
+
+    @staticmethod 
+    def canon_fips(ids) -> NDArray[np.str_]: 
+        arr = np.asarray(ids).reshape(-1)
+        out = []
+        for v in arr: 
+            s = str(v).strip() 
+            if s.isdigit(): 
+                s = s.zfill(5)
+            out.append(s)
+        return np.asarray(out, dtype="U5")
+
+    @staticmethod 
+    def as_coords(coords) -> NDArray[np.float64]: 
+        c = np.asarray(coords, dtype=np.float64)
+        if c.ndim != 2 or c.shape[1] != 2: 
+            raise ValueError(f"coords must be (n, 2), got {c.shape}")
+        if not np.all(np.isfinite(c)): 
+            raise ValueError("coords must be finite")
+        return c 
 
 class GatedAttentionPooling(nn.Module): 
 
@@ -880,7 +1336,8 @@ class ResidualMLP(nn.Module):
         hidden_dim: int = 256, 
         depth: int = 6, 
         dropout: float = 0.1, 
-        out_dim: int | None = None 
+        out_dim: Optional[int] = None, 
+        zero_head_init: bool = True, 
     ):
         super().__init__()
         self.in_dim     = in_dim 
@@ -896,8 +1353,12 @@ class ResidualMLP(nn.Module):
         self.norm   = nn.LayerNorm(hidden_dim)
         self.head   = nn.Linear(hidden_dim, self.out_dim)
 
-        nn.init.zeros_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
+        if zero_head_init: 
+            nn.init.zeros_(self.head.weight)
+            nn.init.zeros_(self.head.bias)
+        else: 
+            nn.init.xavier_uniform_(self.head.weight)
+            nn.init.zeros_(self.head.bias)
 
     def forward(self, x): 
         x = self.proj(x)
@@ -949,171 +1410,6 @@ class SemanticMLP(nn.Module):
         count.index_add_(0, batch_indices, node.new_ones((batch_indices.numel(), 1)))
         bag   = bag / count.clamp_min(1.0)
         return node, bag 
-
-# ---------------------------------------------------------
-# Transfomer Gate for Mixture of Experts 
-# ---------------------------------------------------------
-
-class MoETransformerGate(nn.Module): 
-    '''
-    Gateway-token transformer: 
-    - predicts per-expert reliability from concatenated expert features 
-    - compresses all experts into a fixed number of latent tokens
-    '''
-
-    def __init__(
-        self,
-        *,
-        expert_dims: dict[str, int], 
-        d_model: int, 
-        n_heads: int, 
-        n_layers: int, 
-        ff_mult: int, 
-        dropout: float, 
-        attn_dropout: float, 
-        pre_norm: bool = True, 
-        gate_floor: float = 0.0,
-        num_tokens: int = 4, 
-        gateway_hidden_dim: int 
-    ): 
-        super().__init__()
-        if not expert_dims: 
-            raise ValueError("expert_dims must be non-empty.")
-        if d_model <= 0: 
-            raise ValueError("d_model must be > 0.")
-        if num_tokens <= 0: 
-            raise ValueError("num_tokens must be > 0.")
-
-        self.expert_names = tuple(expert_dims.keys()) 
-        self.expert_dims  = {k: int(v) for k, v in expert_dims.items()} 
-        self.n_experts    = len(self.expert_names)
-        self.d_model      = d_model 
-        self.gate_floor   = gate_floor
-        self.num_tokens   = num_tokens
-        self.input_dim    = int(sum(self.expert_dims.values()))
-        
-        self.gateway_hidden_dim = gateway_hidden_dim
-
-        self.token_embed  = nn.Parameter(torch.zeros(self.num_tokens, self.d_model))
-        self.cls_token    = nn.Parameter(torch.zeros(1, 1, self.d_model))
-
-        self.expert_gate_mlp = nn.Sequential(
-            nn.LayerNorm(self.input_dim),
-            nn.Linear(self.input_dim, self.gateway_hidden_dim),
-            nn.GELU(), 
-            nn.Linear(self.gateway_hidden_dim, self.n_experts)
-        )
-
-        self.gateway = nn.Sequential(
-            nn.LayerNorm(self.input_dim),
-            nn.Linear(self.input_dim, self.gateway_hidden_dim),
-            nn.LayerNorm(self.gateway_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout) if dropout > 0 else nn.Identity(), 
-            nn.Linear(self.gateway_hidden_dim, self.num_tokens * self.d_model)
-        )
-
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=self.d_model,
-            nhead=n_heads,
-            dim_feedforward=ff_mult * self.d_model,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=pre_norm
-        )
-        enc_layer.self_attn.dropout = attn_dropout 
-
-        self.encoder = nn.TransformerEncoder(
-            enc_layer,
-            num_layers=n_layers,
-            enable_nested_tensor=False
-        )
-        self.out_norm = nn.LayerNorm(self.d_model)
-
-        self.reset_parameters() 
-
-    def forward(
-        self, 
-        experts: dict[str, torch.Tensor],
-    ):
-        tokens, gate = self.stack_expert_tokens(experts)
-
-        # pass through transformer block 
-        bsz = tokens.size(0) 
-        cls = self.cls_token.expand(bsz, -1, -1)
-        seq = torch.cat([cls, tokens], dim=1)
-        enc = self.encoder(seq)
-        enc = self.out_norm(enc)
-
-        cls_out   = enc[:, 0, :]
-        token_out = enc[:, 1:, :]
-        return cls_out, token_out, gate
-
-    def reset_parameters(self): 
-        nn.init.trunc_normal_(self.token_embed, std=0.02)
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-        for m in self.expert_gate_mlp.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
-
-        for m in self.gateway.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
-
-    def stack_expert_tokens(
-        self, 
-        experts: dict[str, torch.Tensor]
-    ) -> tuple[torch.Tensor, torch.Tensor]: 
-        missing = [k for k in self.expert_names if k not in experts]
-        extra   = [k for k in experts.keys() if k not in self.expert_dims]
-        if missing: 
-            raise KeyError(f"missing experts: {missing}")
-        if extra: 
-            raise KeyError(f"unexpected experts: {extra}")
-
-        parts  = []
-        bsz    = None 
-        device = None 
-        dtype  = None 
-
-        for idx, name in enumerate(self.expert_names): 
-            x = experts[name]
-            if x.ndim != 2: 
-                raise ValueError(f"expert {name} must be shape (B, d), got {tuple(x.shape)}")
-
-            if bsz is None: 
-                bsz    = x.size(0)
-                device = x.device 
-                dtype  = x.dtype
-            else: 
-                if x.size(0) != bsz or x.device != device or x.dtype != dtype: 
-                    raise ValueError("expert mismatch.")
-
-            parts.append(x)
-
-        x_cat = torch.cat(parts, dim=1)
-        g_logits = self.expert_gate_mlp(x_cat)
-        g = torch.sigmoid(g_logits)
-        if self.gate_floor > 0.0: 
-            g = self.gate_floor + (1.0 - self.gate_floor) * g 
-
-        s = 0 
-        gated_parts = []
-        for i, name in enumerate(self.expert_names): 
-            d = self.expert_dims[name]
-            chunk = x_cat[:, s:s+d]
-            gated_parts.append(chunk * g[:, i:i+1])
-            s += d 
-        x_gated = torch.cat(gated_parts, dim=1)
-
-        tokens_flat = self.gateway(x_gated)
-        tokens = tokens_flat.view(x_cat.size(0), self.num_tokens, self.d_model)
-        tokens = tokens + self.token_embed.unsqueeze(0)
-        return tokens, g
 
 # ---------------------------------------------------------
 # Probabilistic Head (ordinal probit estimation) 

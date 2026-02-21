@@ -6,7 +6,8 @@
 # model architecture (wide & deep)
 # 
 
-from typing import Optional
+from math import sin
+from typing import Any, Mapping, Optional
 import torch, time, copy, sys
 
 import torch.nn as nn 
@@ -30,7 +31,9 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 
 from models.loss import (
-    build_ssfe_loss
+    build_ssfe_loss,
+    build_ssfe_multiview_loss,
+    sinkhorn_assign
 )
 
 from torch.utils.data import (
@@ -45,8 +48,6 @@ from models.networks import (
     HyperGATStack, 
     LightweightBackbone,
     ResidualMLP,
-    SemanticMLP,
-    TransformerProjector
 )
 
 from models.graph.construction import (
@@ -56,6 +57,10 @@ from models.graph.construction import (
 
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True 
+
+# ---------------------------------------------------------
+# Single SSFE Model Contract 
+# ---------------------------------------------------------
 
 @dataclass 
 class SSFEBatch: 
@@ -69,6 +74,29 @@ class SSFEBatch:
     batch_idx: torch.Tensor         # node -> bag  
     wide_cond: torch.Tensor 
 
+@dataclass 
+class SSFEMultiviewState: 
+    '''
+    Full information required for a multiview batch. Specifically the private versus public 
+    channels that embeddings are separated into. 
+    '''
+    prep: SSFEBatch 
+    repr_target_bag: torch.Tensor 
+    node_batch_idx: torch.Tensor 
+    n_bags: int 
+
+    semantic_node: torch.Tensor
+    semantic_bag: torch.Tensor 
+    structural_node: torch.Tensor 
+    structural_bag: torch.Tensor 
+
+    shared_node: torch.Tensor 
+    shared_bag: torch.Tensor 
+    private_node: torch.Tensor 
+    private_bag: torch.Tensor 
+
+    wide_cond_bag: torch.Tensor 
+    shared_sinkhorn_logits: torch.Tensor | None 
 
 class ProjectionHead(nn.Module): 
     def __init__(self, in_dim: int, out_dim: int): 
@@ -119,6 +147,8 @@ class SSFEBase(BaseEstimator, ABC):
         cluster_temperature: float,
         hsic_sigma: Optional[float] = None, 
         hsic_view: str = "concat", 
+        shared_view: str = "structural", 
+        private_view: str = "semantic", 
         n_prototypes: int, 
         proj_dim: int, 
         device: str | None = None,
@@ -151,8 +181,16 @@ class SSFEBase(BaseEstimator, ABC):
 
         if hsic_view not in {"concat", "semantic", "structural"}: 
             raise ValueError(f"unknown embeddings view for hsic loss: {hsic_view}")
+        if shared_view not in {"semantic", "structural"}: 
+            raise ValueError(f"unknown shared view: {shared_view}")
+        if private_view not in {"semantic", "structural"}: 
+            raise ValueError(f"unknown private view: {private_view}")
+        if private_view == shared_view: 
+            raise ValueError("shared_view and private_view must differ")
 
-        self.hsic_view             = hsic_view 
+        self.hsic_view    = hsic_view 
+        self.shared_view  = shared_view
+        self.private_view = private_view
 
         self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         self.device    = torch.device(device) if device else torch.device(
@@ -293,26 +331,44 @@ class SSFEBase(BaseEstimator, ABC):
         self.model_["structural"] = structural 
 
         with torch.no_grad(): 
+            if isinstance(prep, SpatialPatchBatch): 
+                sem_boot   = self.model_["semantic"](prep.semantic_input)
+                d_sem_boot = sem_boot.shape[1]
+
+                _, st_tile_boot = self.model_["structural"](prep)
+                d_st_boot = st_tile_boot.shape[1]
+
+                d_target_boot = prep.repr_target.shape[1] if prep.repr_target.ndim > 1 else 1 
+
+                self.model_["sem_tile_pool"] = GatedAttentionPooling(
+                    in_dim=d_sem_boot, 
+                    attn_dim=max(32, d_sem_boot // 2), 
+                    attn_dropout=getattr(self, "attn_dropout", 0.0)
+                ).to(self.device)
+                self.model_["sem_county_pool"] = GatedAttentionPooling(
+                    in_dim=d_sem_boot,
+                    attn_dim=max(32, d_sem_boot // 2), 
+                    attn_dropout=getattr(self, "attn_dropout", 0.0)  
+                ).to(self.device)
+                self.model_["st_county_pool"] = GatedAttentionPooling(
+                    in_dim=d_st_boot,
+                    attn_dim=max(32, d_st_boot // 2), 
+                    attn_dropout=getattr(self, "attn_dropout", 0.0)  
+                ).to(self.device)
+                self.model_["target_county_pool"] = GatedAttentionPooling(
+                    in_dim=d_target_boot,
+                    attn_dim=max(32, d_target_boot // 2), 
+                    attn_dropout=getattr(self, "attn_dropout", 0.0)
+                ).to(self.device)
+
             sem_node, sem_bag = self.forward_semantic(prep)
             st_node, st_bag   = self.forward_structural(prep)
 
-        d_target   = prep.repr_target.shape[1]
+        d_target   = prep.repr_target.shape[1] if prep.repr_target.ndim > 1 else 1 
         d_sem_node = sem_node.shape[1]
         d_st_node  = st_node.shape[1]
         d_sem_bag  = sem_bag.shape[1]
         d_st_bag   = st_bag.shape[1]
-
-        if hasattr(prep, "tile_batch_idx"): 
-            self.model_["sem_county_pool"] = GatedAttentionPooling(
-                in_dim=d_sem_bag,
-                attn_dim=max(32, d_sem_bag // 2), 
-                attn_dropout=getattr(self, "attn_dropout", 0.0)  
-            ).to(self.device)
-            self.model_["st_county_pool"] = GatedAttentionPooling(
-                in_dim=d_st_bag,
-                attn_dim=max(32, d_st_bag // 2), 
-                attn_dropout=getattr(self, "attn_dropout", 0.0)  
-            ).to(self.device)
 
         self.model_["sem_proj"] = ProjectionHead(d_sem_bag, self.proj_dim).to(self.device)
         self.model_["st_proj"]  = ProjectionHead(d_st_bag, self.proj_dim).to(self.device)
@@ -486,37 +542,15 @@ class SSFEBase(BaseEstimator, ABC):
         if self.loss_ is None: 
             raise RuntimeError("loss_ not initializaed. Call init_fit() first.")
 
-        def bag_mean(x: torch.Tensor, idx: torch.Tensor, n: int) -> torch.Tensor: 
-            '''
-            GatedAttentionPooling per row for hsic loss
-            '''
-            out   = x.new_zeros((n, x.size(1))) 
-            count = x.new_zeros((n, 1))
-            out.index_add_(0, idx, x)
-            count.index_add_(0, idx, x.new_ones((x.size(0), 1)))
-            return out / count.clamp_min(1.0)
-
         with self.amp_ctx(): 
-            prep = self.forward_preprocess(batch)
-
-            sem_node, sem_bag = self.forward_semantic(prep)
-            st_node, st_bag   = self.forward_structural(prep)
-            node_batch_idx    = self.resolve_contrast_node_batch_idx(
-                prep, bag_count=sem_bag.shape[0]
-            )
-            n_bags = sem_bag.shape[0]
-
-            deep_node = self.get_view_for_hsic(sem_node, st_node)
-            deep_bag  = bag_mean(deep_node, node_batch_idx, n_bags)
-
-            wide_bag  = prep.wide_cond.to(device=deep_bag.device, dtype=deep_bag.dtype)
-            if wide_bag.ndim == 1: 
-                wide_bag = wide_bag.unsqueeze(1)
-            if wide_bag.shape[0] != n_bags: 
-                raise ValueError(f"wide_cond must be bag-level")
-
-            wide_node = wide_bag[node_batch_idx]
-            wide_bag  = bag_mean(wide_node, node_batch_idx, n_bags)
+            multi_state       = self.build_multiview_state(batch)
+            prep              = multi_state.prep 
+            sem_node, sem_bag = multi_state.semantic_node, multi_state.semantic_bag
+            st_node, st_bag   = multi_state.structural_node, multi_state.structural_bag
+            node_batch_idx    = multi_state.node_batch_idx 
+            hsic_bag          = self.get_view_for_hsic(sem_bag, st_bag)
+            wide_bag          = multi_state.wide_cond_bag
+            prep.repr_target  = multi_state.prep.repr_target
 
             pack = self.loss_(
                 sem_bag=sem_bag, 
@@ -530,8 +564,12 @@ class SSFEBase(BaseEstimator, ABC):
                 w_cluster=self.w_cluster,
                 w_recon=self.w_recon,
                 w_hsic=self.w_hsic,
-                deep_bag=deep_bag,
-                wide_cond=wide_bag
+                deep_bag=hsic_bag,
+                wide_cond=wide_bag,
+                shared_bag=multi_state.shared_bag,
+                private_bag=multi_state.private_bag,
+                shared_sinkhorn_logits=multi_state.shared_sinkhorn_logits,
+                repr_target_bag=multi_state.repr_target_bag
             )
 
             loss  = pack.total 
@@ -589,7 +627,6 @@ class SSFEBase(BaseEstimator, ABC):
             f"[anchors:init] kept {total_valid}/{total_raw} patches ({keep_ratio:.2%}) | " 
             f"anchors={anchors.shape}", file=sys.stderr
         )
-
 
     def compile_modules(self): 
         if self.compiled_ or not self.compile_model: 
@@ -653,6 +690,140 @@ class SSFEBase(BaseEstimator, ABC):
         if self.device.type == "cuda": 
             return torch.autocast("cuda", dtype=self.amp_dtype)
         return nullcontext()
+
+    def compute_shared_sinkhorn_logits(
+        self,
+        shared_bag: torch.Tensor 
+    ) -> torch.Tensor:  
+        proj_key = "sem_proj" if self.shared_view == "semantic" else "st_proj" 
+        if proj_key not in self.model_ or "proto" not in self.model_: 
+            raise ValueError("model does not have required components for OMVAE")
+
+        z = F.normalize(self.model_[proj_key](shared_bag), dim=1)
+        return self.model_["proto"](z)
+
+    def build_multiview_state(self, batch) -> SSFEMultiviewState: 
+        prep = self.forward_preprocess(batch)
+        sem_node, sem_bag = self.forward_semantic(prep)
+        st_node, st_bag   = self.forward_structural(prep)
+
+        node_batch_idx    = self.resolve_contrast_node_batch_idx(
+            prep, bag_count=sem_bag.shape[0]
+        )
+
+        n_bags = sem_bag.shape[0]
+
+        shared_node, shared_bag = self.select_branch(
+            view=self.shared_view,
+            sem_node=sem_node, sem_bag=sem_bag,
+            st_node=st_node, st_bag=st_bag
+        )
+
+        private_node, private_bag = self.select_branch(
+            view=self.private_view,
+            sem_node=sem_node, sem_bag=sem_bag,
+            st_node=st_node, st_bag=st_bag
+        )
+
+        wide_bag = self.normalize_wide_cond_bag(
+            wide_cond=prep.wide_cond,
+            n_bags=n_bags,
+            device=shared_bag.device,
+            dtype=shared_bag.dtype 
+        )
+
+        self.assert_county_level(
+            sem_bag=sem_bag, st_bag=st_bag, 
+            wide_bag=wide_bag, n_bags=n_bags
+        )
+
+        repr_target_bag = self.forward_repr_target_bag(
+            prep,
+            n_bags=n_bags,
+            device=shared_bag.device,
+            dtype=shared_bag.dtype
+        )
+
+        shared_logits = self.compute_shared_sinkhorn_logits(shared_bag)
+
+        return SSFEMultiviewState(
+            prep=prep,
+            repr_target_bag=repr_target_bag, 
+            node_batch_idx=node_batch_idx,
+            n_bags=n_bags,
+            semantic_bag=sem_bag,
+            semantic_node=sem_node,
+            structural_bag=st_bag,
+            structural_node=st_node,
+            shared_node=shared_node,
+            shared_bag=shared_bag,
+            private_node=private_node,
+            private_bag=private_bag,
+            wide_cond_bag=wide_bag,
+            shared_sinkhorn_logits=shared_logits,
+        )
+
+    def normalize_wide_cond_bag(
+        self,
+        *,
+        wide_cond: torch.Tensor, 
+        n_bags: int, 
+        device: torch.device, 
+        dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor: 
+        wide = wide_cond.to(device=device, dtype=dtype)
+        if wide.ndim == 1: 
+            wide = wide.unsqueeze(1)
+        if wide.ndim != 2: 
+            raise ValueError(f"wide_cond must be 2d, got {wide.shape}")
+
+        if wide.shape[0] == n_bags: 
+            return wide 
+        else: 
+            raise ValueError("wide_cond must be county level")
+
+    def select_branch(
+        self,
+        *,
+        view: str, 
+        sem_node: torch.Tensor, 
+        sem_bag: torch.Tensor, 
+        st_node: torch.Tensor, 
+        st_bag: torch.Tensor 
+    ) -> tuple[torch.Tensor, torch.Tensor]: 
+        if view == "semantic": 
+            return sem_node, sem_bag 
+        else:  
+            return st_node, st_bag # hard checked at init 
+
+    def forward_repr_target_bag(
+        self,
+        prep: SSFEBatch,
+        *,
+        n_bags: int, 
+        device: torch.device, 
+        dtype: torch.dtype
+    ) -> torch.Tensor: 
+        t = prep.repr_target.to(device=device, dtype=dtype)
+        if t.ndim == 1: 
+            t = t.unsqueeze(1)
+        if t.shape[0] == n_bags: 
+            return t 
+        raise ValueError("target is not county level")
+
+    @staticmethod 
+    def assert_county_level(
+        *,
+        sem_bag: torch.Tensor, 
+        st_bag: torch.Tensor, 
+        wide_bag: torch.Tensor, 
+        n_bags: int 
+    ): 
+        if sem_bag.ndim != 2 or st_bag.ndim != 2 or wide_bag.ndim != 2: 
+            raise ValueError("county-level tensors must be 2d.")
+        if (sem_bag.shape[0] != n_bags or st_bag.shape[0] != n_bags or 
+            wide_bag.shape[0] != n_bags):
+            raise ValueError("bags are not county-level.")
 
     @staticmethod 
     def fit_anchors(
@@ -915,6 +1086,38 @@ class SpatialStructuralEmbedder(nn.Module):
         h_bag   = self.bag_norm(h_all[meta.readout_node_ids])
         return h_node, h_bag 
 
+class SpatialSemanticEmbedder(nn.Module): 
+    '''
+    Residual semantic encoder for SpatialSSFE. 
+    '''
+
+    def __init__(
+        self,
+        *,
+        in_dim: int, 
+        hidden_dim: int, 
+        out_dim: int,
+        depth: int, 
+        dropout: float 
+    ): 
+        super().__init__()
+        self.backbone = ResidualMLP(
+            in_dim=in_dim,
+            hidden_dim=hidden_dim, 
+            out_dim=out_dim, 
+            depth=depth, 
+            dropout=dropout, 
+            zero_head_init=False 
+        )
+
+        self.norm = nn.LayerNorm(out_dim)
+        self.out_dim = out_dim 
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor: 
+        if x.ndim != 2: 
+            raise ValueError(f"expected (N, d), got {tuple(x.shape)}")
+        return self.norm(self.backbone(x))
+
 # ---------------------------------------------------------
 # Spatial Self-Supervised Feature Extractor 
 # ---------------------------------------------------------
@@ -943,6 +1146,7 @@ class SpatialSSFE(SSFEBase):
         semantic_hidden_dim: int, 
         semantic_out_dim: int, 
         semantic_dropout: float, 
+        semantic_depth: int = 2, 
 
         # structural branch
         gnn_dim: int, 
@@ -951,7 +1155,7 @@ class SpatialSSFE(SSFEBase):
         dropout: float, 
         attn_dropout: float, 
         global_active_eps: float = 1e-6, 
-        swap_noise_prob: float = 0.15, 
+        swap_noise_prob: float = 0.10, 
 
         # parent class 
         epochs: int = 400, 
@@ -969,6 +1173,8 @@ class SpatialSSFE(SSFEBase):
         w_hsic: float = 1.0, 
         hsic_sigma: Optional[float] = None, 
         hsic_view: str = "concat", 
+        shared_view: str = "structural", 
+        private_view: str = "semantic", 
         contrast_temperature: float, 
         cluster_temperature: float,
         n_prototypes: int, 
@@ -992,6 +1198,8 @@ class SpatialSSFE(SSFEBase):
             w_hsic=w_hsic,
             hsic_sigma=hsic_sigma,
             hsic_view=hsic_view,
+            shared_view=shared_view,
+            private_view=private_view, 
             contrast_temperature=contrast_temperature,
             cluster_temperature=cluster_temperature,
             n_prototypes=n_prototypes,
@@ -1007,6 +1215,7 @@ class SpatialSSFE(SSFEBase):
         self.semantic_hidden_dim = semantic_hidden_dim
         self.semantic_out_dim    = semantic_out_dim
         self.semantic_dropout    = semantic_dropout
+        self.semantic_depth      = semantic_depth 
 
         self.gnn_dim             = gnn_dim
         self.gnn_layers          = gnn_layers
@@ -1034,11 +1243,12 @@ class SpatialSSFE(SSFEBase):
     def build_semantic_embed(self, sample: SSFEBatch) -> nn.Module:
         d_in = sample.semantic_input.shape[1]
 
-        return SemanticMLP(
+        return SpatialSemanticEmbedder(
             in_dim=d_in,
             hidden_dim=self.semantic_hidden_dim,
             out_dim=self.semantic_out_dim,
-            dropout=self.semantic_dropout
+            dropout=self.semantic_dropout,
+            depth=self.semantic_depth 
         )
 
     def build_structural_embed(self, sample: SSFEBatch) -> nn.Module:
@@ -1086,18 +1296,18 @@ class SpatialSSFE(SSFEBase):
     def forward_semantic(self, prep: SSFEBatch) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(prep, SpatialPatchBatch):
             raise TypeError("SpatialSSFE expects SpatialPatchBatch in semantic path")
-        sem_node, sem_tile = self.model_["semantic"](
-            prep.semantic_input,
-            prep.batch_idx,
-            batch_size=prep.n_tiles
+        if "sem_tile_pool" not in self.model_ or "sem_county_pool" not in self.model_: 
+            raise RuntimeError("semantic pooling modules are not initialized")
+
+        sem_node = self.model_["semantic"](prep.semantic_input)
+
+        sem_tile = self.model_["sem_tile_pool"](
+            sem_node, 
+            prep.batch_idx.to(self.device, dtype=torch.long), 
+            prep.n_tiles 
         )
 
-        if "sem_county_pool" not in self.model_: 
-            return sem_node, sem_tile
-
-        tidx = prep.tile_batch_idx.to(self.device, dtype=torch.long).view(-1)
-        _, inv = torch.unique(tidx, sorted=True, return_inverse=True)
-        n_county = int(inv.max().item()) + 1 if inv.numel() else 0 
+        inv, n_county = self.resolve_county_index(prep.tile_batch_idx, device=self.device)
         sem_county = self.model_["sem_county_pool"](sem_tile, inv, n_county)
         return sem_node, sem_county 
 
@@ -1109,11 +1319,37 @@ class SpatialSSFE(SSFEBase):
         if "st_county_pool" not in self.model_: 
             return st_node, st_tile
 
-        tidx = prep.tile_batch_idx.to(self.device, dtype=torch.long).view(-1)
-        _, inv = torch.unique(tidx, sorted=True, return_inverse=True)
-        n_county = int(inv.max().item()) + 1 if inv.numel() else 0 
+        inv, n_county = self.resolve_county_index(prep.tile_batch_idx, device=self.device)
         st_county = self.model_["st_county_pool"](st_tile, inv, n_county)
         return st_node, st_county 
+
+    def forward_repr_target_bag(
+        self, 
+        prep: SSFEBatch, 
+        *, 
+        n_bags: int, 
+        device: torch.device, 
+        dtype: torch.dtype
+    ) -> torch.Tensor:
+
+        if not isinstance(prep, SpatialPatchBatch): 
+            raise TypeError("SpatialSSFE expects SpatialPatchBatch for repr target pooling")
+        target = prep.repr_target.to(device=device, dtype=dtype)
+        if target.ndim == 1: 
+            target = target.unsqueeze(1)
+        if target.shape[0] == n_bags: 
+            return target 
+
+        patch_to_tile = prep.batch_idx.to(device=device, dtype=torch.long).view(-1)
+        tile_to_cty, n_county = self.resolve_county_index(prep.tile_batch_idx, device=device)
+        if n_county != n_bags: 
+            raise ValueError(f"county count mismatch: {n_county} != {n_bags}")
+
+        patch_to_cty = tile_to_cty[patch_to_tile]
+        
+        if "target_county_pool" in self.model_: 
+            return self.model_["target_county_pool"](target, patch_to_cty, n_bags)
+        raise ValueError("must use gated attention pooling.")
 
     def anchor_features_from_batch(self, batch) -> np.ndarray: 
         if not isinstance(batch, (list, tuple)) or len(batch) < 4:
@@ -1139,6 +1375,19 @@ class SpatialSSFE(SSFEBase):
 
     def initialize_structural_state(self, train_loader: DataLoader):
         return super().initialize_structural_state(train_loader)
+
+    @staticmethod 
+    def resolve_county_index(
+        tile_batch_idx: torch.Tensor, 
+        *, 
+        device: torch.device 
+    ) -> tuple[torch.Tensor, int]: 
+
+        tidx = tile_batch_idx.to(device=device, dtype=torch.long, non_blocking=True).view(-1)
+        if tidx.numel() == 0: 
+            return tidx, 0 
+        _, inv = torch.unique(tidx, sorted=True, return_inverse=True)
+        return inv, int(inv.max().item()) + 1
 
 # --------------------------------------------------------- 
 # Tabular SSFE Modules 
@@ -1289,37 +1538,16 @@ class TabularSemanticEmbedder(nn.Module):
         *,
         in_dim: int, 
         out_dim: int, 
-        
-        # transformer 
-        transformer_dim: int, 
-        transformer_heads: int, 
-        transformer_layers: int, 
-        transformer_attn_dropout: float, 
-
-        # projector 
         proj_dim: int, 
-
-        # residual mlp 
         refine_hidden_dim: int, 
         refine_depth: int, 
         dropout: float, 
     ): 
         super().__init__() 
 
-        self.tokenizer = TransformerProjector(
-            in_dim=in_dim, 
-            out_dim=transformer_dim, 
-            d_model=transformer_dim,
-            n_heads=transformer_heads,
-            n_layers=transformer_layers,
-            dropout=dropout, 
-            attn_dropout=transformer_attn_dropout,
-            pre_norm=True 
-        )
-
         self.projector = nn.Sequential(
-            nn.LayerNorm(transformer_dim), 
-            nn.Linear(transformer_dim, proj_dim),
+            nn.LayerNorm(in_dim), 
+            nn.Linear(in_dim, proj_dim),
             nn.GELU(), 
             nn.Dropout(dropout) if dropout > 0 else nn.Identity() 
         )
@@ -1337,15 +1565,12 @@ class TabularSemanticEmbedder(nn.Module):
         self.out_dim   = out_dim 
 
     def forward(self, prep: TabularBatch) -> tuple[torch.Tensor, torch.Tensor]: 
-        if prep.stats_raw is None: 
-            raise ValueError("Tabular semantic path requires prep.stats_raw")
-        if prep.batch_idx.numel() != prep.stats_raw.size(0): 
-            raise ValueError("batch_idx/feature length mismatch")
+        if prep.batch_idx.numel() != prep.semantic_input.size(0): 
+            raise ValueError("batch_idx/feature length mismatch.")
 
-        x    = prep.stats_raw 
-        tok  = self.tokenizer(x)
-        proj = self.projector(tok)
-        node = self.node_norm(self.refine(proj))
+        x     = prep.semantic_input 
+        proj  = self.projector(x)
+        node  = self.node_norm(self.refine(proj))
 
         bag   = node.new_zeros((prep.n_bags, node.size(1)))
         count = node.new_zeros((prep.n_bags, 1))
@@ -1470,17 +1695,13 @@ class TabularSSFE(SSFEBase):
         # tabular metadata 
         in_dim: int, 
         embed_dim: int, 
-        swap_noise_prob: float = 0.15, 
+        swap_noise_prob: float = 0.10, 
 
         # semantic branch 
         semantic_out_dim: int, 
-        transformer_dim: int, 
-        transformer_heads: int, 
-        transformer_layers: int, 
-        transformer_attn_dropout: float, 
         semantic_proj_dim: int, 
         semantic_hidden_dim: int, 
-        semantic_depth: int, 
+        semantic_depth: int = 2, 
         semantic_dropout: float, 
 
         # structural branch 
@@ -1508,6 +1729,8 @@ class TabularSSFE(SSFEBase):
         w_hsic: float = 1.0, 
         hsic_sigma: Optional[float] = None, 
         hsic_view: str = "concat", 
+        shared_view: str = "structural", 
+        private_view: str = "semantic", 
         contrast_temperature: float, 
         cluster_temperature: float, 
         n_prototypes: int, 
@@ -1532,6 +1755,8 @@ class TabularSSFE(SSFEBase):
             w_hsic=w_hsic,
             hsic_sigma=hsic_sigma,
             hsic_view=hsic_view,
+            shared_view=shared_view,
+            private_view=private_view,
             contrast_temperature=contrast_temperature, 
             cluster_temperature=cluster_temperature, 
             n_prototypes=n_prototypes, 
@@ -1544,10 +1769,6 @@ class TabularSSFE(SSFEBase):
         self.embed_dim                = embed_dim
 
         self.semantic_out_dim         = semantic_out_dim
-        self.transformer_dim          = transformer_dim
-        self.transformer_heads        = transformer_heads
-        self.transformer_layers       = transformer_layers
-        self.transformer_attn_dropout = transformer_attn_dropout
         self.semantic_proj_dim        = semantic_proj_dim
         self.semantic_hidden_dim      = semantic_hidden_dim
         self.semantic_depth           = semantic_depth
@@ -1579,14 +1800,10 @@ class TabularSSFE(SSFEBase):
         )
 
     def build_semantic_embed(self, sample: SSFEBatch) -> nn.Module:
-        _ = sample 
+        d_in = sample.semantic_input.shape[1]
         return TabularSemanticEmbedder(
-            in_dim=self.in_dim,
+            in_dim=d_in ,
             out_dim=self.semantic_out_dim,
-            transformer_dim=self.transformer_dim,
-            transformer_heads=self.transformer_heads,
-            transformer_layers=self.transformer_layers,
-            transformer_attn_dropout=self.transformer_attn_dropout,
             proj_dim=self.semantic_proj_dim,
             refine_hidden_dim=self.semantic_hidden_dim,
             refine_depth=self.semantic_depth,
@@ -1694,6 +1911,23 @@ class TabularSSFE(SSFEBase):
 
         neighbors = self.induce_local_neighbors(prep.node_ids)
         return self.model_["structural"](prep, neighbors=neighbors)
+
+    def forward_repr_target_bag(
+        self,
+        prep: SSFEBatch, 
+        *, 
+        n_bags: int, 
+        device: torch.device, 
+        dtype: torch.dtype 
+    ) -> torch.Tensor: 
+        if not isinstance(prep, TabularBatch): 
+            raise TypeError("TabularSSFE expects TabularBatch for repr target pooling.")
+        target = prep.repr_target.to(device=device, dtype=dtype)
+        if target.ndim == 1: 
+            target = target.unsqueeze(1)
+        if target.shape[0] == n_bags: 
+            return target 
+        raise ValueError("expects county-level.")
 
     def anchor_features_from_batch(self, batch) -> np.ndarray:
         x = batch[0] if isinstance(batch, (list, tuple)) else batch 
@@ -1872,3 +2106,493 @@ class TabularSSFE(SSFEBase):
             out[idx, :kk] = node_ids[idx[nbr_local]]
 
         return out
+
+# ---------------------------------------------------------
+# Orthogonal (via HSIC) Multi-view hypergraph autoencoders 
+# TengQi et. al, 2016
+# ---------------------------------------------------------
+
+class MultiviewManagerSSFE(BaseEstimator): 
+
+    def __init__(
+        self,
+        *,
+        experts: Mapping[str, SSFEBase], 
+        global_dim: int, 
+        gate_floor: float = 0., 
+
+        epochs: int = 800, 
+        lr: float, 
+        weight_decay: float, 
+
+        early_stopping_rounds: int = 40, 
+        min_delta: float = 1e-4, 
+        w_recon: float = 1.0, 
+        w_align: float = 1.0, 
+        w_privacy: float = 1.0,
+        align_start_pct: float = 0.05, 
+        align_end_pct: float = 0.40, 
+        privacy_start_pct: float = 0.10, 
+        privacy_end_pct: float = 0.90, 
+        privacy_ramp_power: float = 1.1, 
+        sinkhorn_epsilon: float = 0.05, 
+        hsic_sigma: Optional[float] = None,
+        recon_cross_scale: float = 1.0, 
+        align_l2_scale: float = 1.0, 
+        align_kl_scale: float = 1.0, 
+        random_state: int = 0, 
+        device: str = "cuda"
+    ):
+        if len(experts) < 2: 
+            raise ValueError("MultiviewManagerSSFE requires at least 2 classes")
+
+        self.experts               = experts
+        self.expert_ids            = list(self.experts.keys())
+
+        self.global_dim            = global_dim
+        self.epochs                = epochs
+        self.early_stopping_rounds = early_stopping_rounds
+        self.random_state          = random_state
+        self.hsic_sigma            = hsic_sigma
+        self.gate_floor            = gate_floor
+        self.lr                    = lr
+        self.weight_decay          = weight_decay
+        self.min_delta             = min_delta
+
+        self.recon_cross_scale     = recon_cross_scale  
+
+        self.w_recon_target        = w_recon 
+        self.w_align_target        = w_align 
+        self.w_privacy_target      = w_privacy 
+
+        self.w_recon               = self.w_recon_target
+        
+        self.align_start_pct       = align_start_pct
+        self.align_end_pct         = align_end_pct 
+        self.privacy_start_pct     = privacy_start_pct 
+        self.privacy_end_pct       = privacy_end_pct 
+        self.privacy_ramp_power    = privacy_ramp_power 
+
+        self.sinkhorn_epsilon      = sinkhorn_epsilon
+        self.recon_cross_scale     = recon_cross_scale
+        self.align_l2_scale        = align_l2_scale
+        self.align_kl_scale        = align_kl_scale
+
+        self.device = torch.device(device) if device else torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+
+        self.model_ = nn.ModuleDict({
+            "shared_proj": nn.ModuleDict(),
+            "gate_head": nn.ModuleDict(),
+            "self_recon": nn.ModuleDict(),
+            "cross_recon": nn.ModuleDict(),
+        })
+
+        self.loss_: nn.Module | None = None
+        self.opt_: torch.optim.Optimizer | None = None
+        self.scheduler_: Any | None = None
+        self.best_val_score_: float = float("inf")
+        self.is_fitted_: bool = False
+        self.initialized_: bool = False
+
+    # -----------------------------------------------------
+    # Model Fit 
+    # -----------------------------------------------------
+
+    def fit(self, train_loader, val_loader=None): 
+        torch.manual_seed(self.random_state)
+        np.random.seed(self.random_state)
+
+        self.init_fit(train_loader)
+        best_manager, best_expert, best_val = self.run_phase(
+            name="OMDAE-HSIC", 
+            train_loader=train_loader, 
+            val_loader=val_loader
+        )
+
+        if best_manager is not None: 
+            self.model_.load_state_dict(best_manager) 
+        if best_expert is not None: 
+            for eid, ex in self.experts.items(): 
+                ex.model_.load_state_dict(best_expert[eid])
+
+        self.best_val_score_ = best_val 
+        self.is_fitted_      = True 
+        return self 
+
+    # ----------------------------------------------------- 
+    # Per Expert Extraction 
+    # ----------------------------------------------------- 
+
+    def extract(self, X: Mapping[str, Any]) -> dict[str, NDArray]: 
+
+        if not self.is_fitted_ or not self.initialized_: 
+            raise RuntimeError("call fit() before extract()")
+
+        batch_map = self.assert_batch_contract(X)
+        loaders   = {
+            eid: self.experts[eid].ensure_loader(batch_map[eid], shuffle=False)
+            for eid in self.expert_ids 
+        }
+
+        for ex in self.experts.values(): 
+            ex.model_.eval() 
+        self.model_.eval() 
+        if self.loss_ is not None: 
+            self.loss_.eval() 
+
+        per_expert: dict[str, list[NDArray]] = {eid: [] for eid in self.expert_ids}
+        global_out: list[NDArray] = []
+
+        with torch.no_grad(): 
+            iters = [iter(loaders[eid]) for eid in self.expert_ids]
+            for batches in zip(*iters): 
+                cur = {eid: b for eid, b in zip(self.expert_ids, batches)}
+                states: dict[str, SSFEMultiviewState] = {}
+                shared_proj: dict[str, torch.Tensor]  = {}
+
+                for eid in self.expert_ids: 
+                    st = self.experts[eid].build_multiview_state(cur[eid])
+                    states[eid] = st 
+                    shared_proj[eid] = self.model_["shared_proj"][eid](st.shared_bag) 
+
+                _, s_global = self.consensus(shared_proj)
+
+                for eid in self.expert_ids: 
+                    st = states[eid] 
+                    per_expert[eid].append(st.private_bag.detach().cpu().numpy())
+
+                global_out.append(s_global.detach().cpu().numpy())
+
+        out: dict[str, NDArray] = {}
+        for eid in self.expert_ids: 
+            arrs = per_expert[eid] 
+            out[eid] = (np.vstack(arrs).astype(np.float32, copy=False) if arrs else
+                        np.empty((0, 0), dtype=np.float32))
+        out["shared_global"] = (np.vstack(global_out).astype(np.float32, copy=False) 
+                                if global_out else np.empty((0, 0), dtype=np.float32)) 
+        return out 
+        
+    # -----------------------------------------------------
+    # Fit Helpers  
+    # -----------------------------------------------------
+
+    def run_phase(
+        self,
+        *,
+        name: str, 
+        train_loader, 
+        val_loader 
+    ): 
+        if self.opt_ is None: 
+            raise RuntimeError("opt_ not initialized.")
+        
+        print(f"[{name}] starting...", file=sys.stderr)
+
+        best_val     = float("inf")
+        best_manager = None 
+        best_expert  = None 
+        patience     = 0 
+        t0           = time.perf_counter()
+
+        for ep in range(self.epochs): 
+            self.update_loss_weights(ep)
+            train_loss          = self.train_epoch(train_loader)
+            val_loss, val_parts = self.validate(val_loader)
+
+            score = train_loss if val_loss is None else val_loss 
+
+            if score < best_val - self.min_delta: 
+                best_val     = score 
+                best_manager = copy.deepcopy(self.model_.state_dict()) 
+                best_expert  = {
+                    eid: copy.deepcopy(ex.model_.state_dict()) 
+                    for eid, ex in self.experts.items() 
+                }
+                patience  = 0 
+            else: 
+                patience += 1
+                if self.early_stopping_rounds > 0 and patience >= self.early_stopping_rounds: 
+                    break 
+
+            if ep % 5 == 0: 
+                dt = (time.perf_counter() - t0) / (ep + 1)
+                if val_loss is None:
+                    print(
+                        f"[mv epoch {ep:3d}] {dt:.2f}s avg | train={train_loss:.4f}",
+                        file=sys.stderr
+                    )
+                else:
+                    print(
+                        f"[mv epoch {ep:3d}] {dt:.2f}s avg | "
+                        f"val_total={val_loss:.4f} | "
+                        f"val_rec={val_parts.get('recon', 0.0):.4f} | "
+                        f"val_align={val_parts.get('align', 0.0):.4f} | "
+                        f"val_priv={val_parts.get('privacy', 0.0):.4f}",
+                        file=sys.stderr
+                    )
+
+        return best_manager, best_expert, best_val
+
+    def train_epoch(self, loader) -> float: 
+        if self.opt_ is None: 
+            raise RuntimeError("opt_ not initialized")
+
+        # Ensure in training context for gradients 
+        for ex in self.experts.values(): 
+            ex.model_.train() 
+        self.model_.train() 
+        if self.loss_ is not None: 
+            self.loss_.train() 
+
+        total = 0.0 
+        count = 0 
+        for batch in loader: 
+            loss, _, bsz = self.process_batch(batch)
+
+            self.opt_.zero_grad(set_to_none=True)
+            loss.backward() 
+            self.opt_.step() 
+
+            total += float(loss.item()) * bsz 
+            count += bsz 
+
+        if self.scheduler_ is not None: 
+            self.scheduler_.step() 
+
+        return total / max(1, count) 
+
+    def validate(self, loader): 
+        if loader is None: 
+            return None, {}
+
+        # Ensure in evalute context for gradients 
+        for ex in self.experts.values(): 
+            ex.model_.eval() 
+        self.model_.eval() 
+        if self.loss_ is not None: 
+            self.loss_.eval() 
+
+        sums: dict[str, float] = {}
+        count = 0 
+        with torch.no_grad(): 
+            for batch in loader: 
+                _, terms, bsz = self.process_batch(batch)
+                for k, v in terms.items(): 
+                    sums[k] = sums.get(k, 0.0) + float(v.item()) * bsz 
+                count += bsz 
+
+        denom = max(1, count)
+        parts = {k: (v / denom) for k, v in sums.items()}
+        total = float(
+            parts.get("recon", 0.0) + parts.get("align", 0.0) + parts.get("privacy", 0.0)
+        ) 
+        return total, parts 
+
+    def process_batch(self, raw_batch): 
+        batch = self.assert_batch_contract(raw_batch)
+        return self.forward_batch(batch)
+
+    def forward_batch(self, batch_map: Mapping[str, Any]): 
+        if not self.initialized_ or self.loss_ is None: 
+            raise RuntimeError("loss not initialized.")
+
+        states: dict[str, SSFEMultiviewState]    = {}
+        shared_proj: dict[str, torch.Tensor]     = {}
+        private_bags: dict[str, torch.Tensor]    = {}
+        repr_targets: dict[str, torch.Tensor]    = {}
+        sinkhorn_logits: dict[str, torch.Tensor] = {}
+
+        for eid in self.expert_ids: 
+            ex = self.experts[eid]
+            st = ex.build_multiview_state(batch_map[eid])
+            states[eid] = st 
+
+            s = self.model_["shared_proj"][eid](st.shared_bag)
+            shared_proj[eid]  = s
+            private_bags[eid] = st.private_bag 
+            repr_targets[eid] = st.repr_target_bag
+
+            if st.shared_sinkhorn_logits is None: 
+                raise ValueError(f"{eid} missing shared_sinkhorn_logits")
+            sinkhorn_logits[eid] = st.shared_sinkhorn_logits 
+
+        wide = states[self.expert_ids[0]].wide_cond_bag
+        for eid in self.expert_ids[1:]:
+            if states[eid].wide_cond_bag.shape[0] != wide.shape[0]:
+                raise ValueError(f"bag-count mismatch for expert={eid}")
+
+        alpha, s_global = self.consensus(shared_proj)
+
+        pack = self.loss_(
+            shared_bags=shared_proj,
+            private_bags=private_bags,
+            repr_targets=repr_targets,
+            shared_global=s_global,
+            sinkhorn_logits=sinkhorn_logits,
+            attention_weights=alpha,
+            wide_cond=wide,
+            w_recon=self.w_recon,
+            w_align=self.w_align,
+            w_privacy=self.w_privacy
+        )
+
+        terms = dict(pack.raw)
+        bsz   = s_global.shape[0]
+        return pack.total, terms, bsz 
+
+    def consensus(
+        self, 
+        shared_proj: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        '''
+        Compute attention and take consensus as the average sum weighted via attention scores. 
+        Returns both attention and global public embeddings so alignment can use attention score.
+        '''
+
+        scores = torch.cat(
+            [self.model_["gate_head"][eid](shared_proj[eid]) 
+            for eid in self.expert_ids], dim=1
+        ) 
+        alpha  = F.softmax(scores, dim=1)
+
+        if self.gate_floor > 0.0: 
+            e     = len(self.expert_ids)
+            floor = min(max(self.gate_floor, 0.0), 1.0 / float(e))
+            alpha = alpha * (1.0 - floor * e) + floor 
+            alpha = alpha / alpha.sum(dim=1, keepdim=True).clamp_min(1e-9)
+
+        s_global = torch.zeros_like(shared_proj[self.expert_ids[0]])
+        for i, eid in enumerate(self.expert_ids): 
+            s_global = s_global + alpha[:, i:i+1] * shared_proj[eid]
+        return alpha, s_global 
+
+    def update_loss_weights(self, epoch: int): 
+        t = epoch / max(1, self.epochs - 1)
+        self.w_recon = self.w_recon_target 
+
+        if t < self.align_start_pct: 
+            self.w_align = 0.0 
+        elif t < self.align_end_pct: 
+            r = (t - self.align_start_pct) / max(1e-9, self.align_end_pct - self.align_start_pct)
+            self.w_align = self.w_align_target * r 
+        else: 
+            self.w_align = self.w_align_target 
+
+        if t < self.privacy_start_pct: 
+            self.w_privacy = 0.0 
+        elif t < self.privacy_end_pct: 
+            r = (t - self.privacy_start_pct) / max(1e-9, self.privacy_end_pct - self.privacy_start_pct) 
+            self.w_privacy = self.w_privacy_target * (r ** self.privacy_ramp_power)
+        else: 
+            self.w_privacy = self.w_privacy_target
+
+    # -----------------------------------------------------
+    # Initialization and Assertions   
+    # -----------------------------------------------------
+
+    def init_fit(self, train_loader): 
+        self.assert_experts_ready() 
+        sample = self.assert_batch_contract(next(iter(train_loader)))
+        self.init(sample)
+
+    def init(self, sample_batch: Mapping[str, Any]): 
+        states = {}
+        with torch.no_grad(): 
+            for eid in self.expert_ids: 
+                ex = self.experts[eid]
+                ex.model_.eval() 
+                states[eid] = ex.build_multiview_state(sample_batch[eid])
+
+        n_bags = None 
+        for eid in self.expert_ids: 
+            nb = int(states[eid].n_bags) 
+            n_bags = nb if n_bags is None else n_bags 
+            if nb != n_bags: 
+                raise ValueError(f"n_bags mismatch: {eid} has {nb}, expected {n_bags}")
+
+        for eid in self.expert_ids: 
+            s_dim = states[eid].shared_bag.shape[1]
+            p_dim = states[eid].private_bag.shape[1]
+            t_dim = states[eid].repr_target_bag.shape[1]
+
+            self.model_["shared_proj"][eid] = nn.Sequential(
+                nn.LayerNorm(s_dim),
+                nn.Linear(s_dim, self.global_dim),
+                nn.GELU(), 
+                nn.LayerNorm(self.global_dim)
+            ).to(self.device)
+
+            self.model_["gate_head"][eid] = nn.Linear(self.global_dim, 1).to(self.device)
+
+            in_dim = self.global_dim + p_dim 
+            self.model_["self_recon"][eid] = nn.Sequential(
+                nn.Linear(in_dim, in_dim),
+                nn.GELU(), 
+                nn.Linear(in_dim, t_dim)
+            ).to(self.device)
+
+            self.model_["cross_recon"][eid] = nn.Sequential(
+                nn.Linear(in_dim, in_dim),
+                nn.GELU(), 
+                nn.Linear(in_dim, t_dim)
+            ).to(self.device)
+
+        self.loss_ = build_ssfe_multiview_loss(
+            expert_ids=self.expert_ids,
+            self_recon_heads=self.model_["self_recon"], 
+            cross_recon_heads=self.model_["cross_recon"], 
+            sinkhorn_epsilon=self.sinkhorn_epsilon,
+            hsic_sigma=self.hsic_sigma,
+            recon_cross_scale=self.recon_cross_scale,
+            align_l2_scale=self.align_l2_scale,
+            align_kl_scale=self.align_kl_scale 
+        ).to(self.device)
+
+        expert_params = []
+        for eid in self.expert_ids: 
+            expert_params.extend(self.experts[eid].model_.parameters())
+        manager_params = self.model_.parameters()
+        loss_params    = self.loss_.parameters() 
+        params = self.concat_params(expert_params, manager_params, loss_params)
+
+        self.opt_       = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
+        self.scheduler_ = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.opt_, T_max=self.epochs
+        )
+        self.initialized_ = True 
+            
+
+    def assert_batch_contract(self, batch: Any) -> Mapping[str, Any]: 
+        if not isinstance(batch, Mapping): 
+            raise TypeError("Multiview batch must be Mapping[str, Any]")
+        missing = [eid for eid in self.expert_ids if eid not in batch]
+        extra   = [k for k in batch.keys() if k not in self.expert_ids]
+        if missing: 
+            raise KeyError(f"batch missing experts: {missing}")
+        if extra: 
+            raise KeyError(f"batch has unexpected experts: {extra}")
+        return batch 
+
+    def assert_experts_ready(self): 
+        for eid, ex in self.experts.items(): 
+            if not isinstance(ex, SSFEBase): 
+                raise TypeError(f"{eid} is not SSFEBase")
+            if "semantic" not in ex.model_ or "structural" not in ex.model_: 
+                raise RuntimeError(f"{eid} is not initialized.")
+
+    @staticmethod 
+    def concat_params(*param_groups): 
+        out  = []
+        seen = set() 
+        for group in param_groups: 
+            for p in group: 
+                if not p.requires_grad:
+                    continue 
+                pid = id(p)
+                if pid in seen: 
+                    continue 
+                seen.add(pid)
+                out.append(p)
+        return out 
