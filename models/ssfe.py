@@ -82,6 +82,7 @@ class SSFEMultiviewState:
     '''
     prep: SSFEBatch 
     repr_target_bag: torch.Tensor 
+    recon_weight_bag: torch.Tensor | None
     node_batch_idx: torch.Tensor 
     n_bags: int 
 
@@ -355,11 +356,7 @@ class SSFEBase(BaseEstimator, ABC):
                     attn_dim=max(32, d_st_boot // 2), 
                     attn_dropout=getattr(self, "attn_dropout", 0.0)  
                 ).to(self.device)
-                self.model_["target_county_pool"] = GatedAttentionPooling(
-                    in_dim=d_target_boot,
-                    attn_dim=max(32, d_target_boot // 2), 
-                    attn_dropout=getattr(self, "attn_dropout", 0.0)
-                ).to(self.device)
+                self.model_["target_county_pool"] = CountyMeanPooling().to(self.device)
 
             sem_node, sem_bag = self.forward_semantic(prep)
             st_node, st_bag   = self.forward_structural(prep)
@@ -743,12 +740,19 @@ class SSFEBase(BaseEstimator, ABC):
             device=shared_bag.device,
             dtype=shared_bag.dtype
         )
+        recon_weight_bag = self.forward_recon_weight_bag(
+            prep,
+            n_bags=n_bags,
+            device=shared_bag.device,
+            dtype=shared_bag.dtype
+        )
 
         shared_logits = self.compute_shared_sinkhorn_logits(shared_bag)
 
         return SSFEMultiviewState(
             prep=prep,
             repr_target_bag=repr_target_bag, 
+            recon_weight_bag=recon_weight_bag,
             node_batch_idx=node_batch_idx,
             n_bags=n_bags,
             semantic_bag=sem_bag,
@@ -810,6 +814,16 @@ class SSFEBase(BaseEstimator, ABC):
         if t.shape[0] == n_bags: 
             return t 
         raise ValueError("target is not county level")
+
+    def forward_recon_weight_bag(
+        self,
+        prep: SSFEBatch,
+        *,
+        n_bags: int,
+        device: torch.device,
+        dtype: torch.dtype
+    ) -> torch.Tensor:
+        return torch.ones((n_bags,), device=device, dtype=dtype)
 
     @staticmethod 
     def assert_county_level(
@@ -877,10 +891,25 @@ class SpatialPatchBatch(SSFEBatch):
     n_tiles: int 
     n_patches_per_tile: int 
 
+class CountyMeanPooling(nn.Module): 
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        batch_indices: torch.Tensor, 
+        batch_size: int
+    ) -> torch.Tensor: 
+        if x.ndim != 2: 
+            raise ValueError(f"expected (N, d), got {tuple(x.shape)}")
+        out   = x.new_zeros((batch_size, x.shape[1]))
+        count = x.new_zeros((batch_size, 1))
+
+        out.index_add_(0, batch_indices, x) 
+        count.index_add_(0, batch_indices, x.new_ones((x.shape[0], 1)))
+        return out / count.clamp_min(1.0)
 
 class SpatialPatchPreprocessor(nn.Module): 
     '''
-    Converts flat tile tensors to patched embeddings for use by SFE 
+    Converts flat tile tensors to patched embeddings for use by SSFE 
     '''
 
     def __init__(
@@ -932,10 +961,25 @@ class SpatialPatchPreprocessor(nn.Module):
 
         if wide_cond.ndim == 1: 
             wide_cond = wide_cond.unsqueeze(1)
+
+        K    = stats.shape[1]
+        P = self.patch_size 
+        raw_patches = F.unfold(tiles, kernel_size=P, stride=P).transpose(1, 2).contiguous()
+        
+        K_unfold = raw_patches.shape[1]
+        K_stats  = stats.shape[1]
+
+        if K_stats != K_unfold: 
+            raise ValueError 
+
+        K = K_unfold 
+        raw_patches = raw_patches.reshape(T * K, -1)
         
         embc = self.encoder(tiles)
-        K    = stats.shape[1]
+        if embc.ndim != 2 or embc.shape[0] != T * K: 
+            raise ValueError 
         embc = embc.view(T, K, -1)
+
         embs = self.maybe_patch_shuffle(embc)
         idx  = None 
 
@@ -951,7 +995,7 @@ class SpatialPatchPreprocessor(nn.Module):
 
         sem_in       = torch.cat([embs, stats_z], dim=-1) 
 
-        repr_target  = embc.reshape(T * K, -1)
+        repr_target  = raw_patches.detach().to(dtype=torch.float32).contiguous() 
         sem_in       = sem_in.reshape(T * K, -1)
         stats_z_f    = stats_z.reshape(T * K, -1)
         stats_raw_f  = stats_raw.reshape(T * K, -1)
@@ -1155,7 +1199,7 @@ class SpatialSSFE(SSFEBase):
         dropout: float, 
         attn_dropout: float, 
         global_active_eps: float = 1e-6, 
-        swap_noise_prob: float = 0.10, 
+        swap_noise_prob: float = 0.20, 
 
         # parent class 
         epochs: int = 400, 
@@ -1323,6 +1367,25 @@ class SpatialSSFE(SSFEBase):
         st_county = self.model_["st_county_pool"](st_tile, inv, n_county)
         return st_node, st_county 
 
+    def spatial_patch_active_mask(
+        self,
+        prep: SSFEBatch,
+        *,
+        device: torch.device,
+        dtype: torch.dtype
+    ) -> torch.Tensor:
+        if not isinstance(prep, SpatialPatchBatch):
+            raise TypeError("SpatialSSFE expects SpatialPatchBatch for active mask")
+        if prep.stats_raw is None:
+            raise ValueError("stats_raw required for active mask")
+
+        stats = prep.stats_raw.to(device=device, dtype=dtype)
+        if stats.ndim != 2:
+            raise ValueError(f"expected patch stats shape (N, D), got {tuple(stats.shape)}")
+
+        eps = max(float(self.global_active_eps), 1e-12)
+        return (stats.abs().amax(dim=1) > eps).to(dtype)
+
     def forward_repr_target_bag(
         self, 
         prep: SSFEBatch, 
@@ -1334,22 +1397,83 @@ class SpatialSSFE(SSFEBase):
 
         if not isinstance(prep, SpatialPatchBatch): 
             raise TypeError("SpatialSSFE expects SpatialPatchBatch for repr target pooling")
-        target = prep.repr_target.to(device=device, dtype=dtype)
-        if target.ndim == 1: 
+        if prep.stats_z is None:
+            raise ValueError("stats_z required for active-weighted repr target pooling")
+        target = prep.stats_z.to(device=device, dtype=dtype)
+        if target.ndim == 1:
             target = target.unsqueeze(1)
-        if target.shape[0] == n_bags: 
-            return target 
+        if target.shape[0] == n_bags:
+            return target.detach()
 
         patch_to_tile = prep.batch_idx.to(device=device, dtype=torch.long).view(-1)
         tile_to_cty, n_county = self.resolve_county_index(prep.tile_batch_idx, device=device)
         if n_county != n_bags: 
             raise ValueError(f"county count mismatch: {n_county} != {n_bags}")
+        if target.shape[0] != patch_to_tile.numel():
+            raise ValueError("stats_z / patch index length mismatch for repr target pooling")
 
         patch_to_cty = tile_to_cty[patch_to_tile]
-        
-        if "target_county_pool" in self.model_: 
-            return self.model_["target_county_pool"](target, patch_to_cty, n_bags)
-        raise ValueError("must use gated attention pooling.")
+        patch_active = self.spatial_patch_active_mask(
+            prep,
+            device=device,
+            dtype=dtype
+        ).unsqueeze(1)
+        if patch_active.shape[0] != target.shape[0]:
+            raise ValueError("active mask / target length mismatch")
+
+        target_masked = target * patch_active
+
+        pooled = torch.zeros((n_bags, target.shape[1]), device=device, dtype=dtype)
+        count  = torch.zeros((n_bags, 1), device=device, dtype=dtype)
+        pooled.index_add_(0, patch_to_cty, target_masked)
+        count.index_add_(0, patch_to_cty, patch_active)
+
+        out = pooled / count.clamp_min(1.0)
+
+        # Fallback for empty-active counties keeps target numerically stable.
+        zero_active = (count.squeeze(1) <= 0)
+        if bool(torch.any(zero_active)):
+            pooled_all = torch.zeros_like(pooled)
+            count_all  = torch.zeros_like(count)
+            pooled_all.index_add_(0, patch_to_cty, target)
+            count_all.index_add_(0, patch_to_cty, torch.ones_like(patch_active))
+            out_all = pooled_all / count_all.clamp_min(1.0)
+            out[zero_active] = out_all[zero_active]
+
+        return out.detach()
+
+    def forward_recon_weight_bag(
+        self,
+        prep: SSFEBatch,
+        *,
+        n_bags: int,
+        device: torch.device,
+        dtype: torch.dtype
+    ) -> torch.Tensor:
+        if not isinstance(prep, SpatialPatchBatch):
+            raise TypeError("SpatialSSFE expects SpatialPatchBatch for recon weighting")
+        if prep.stats_raw is None:
+            return torch.ones((n_bags,), device=device, dtype=dtype)
+
+        patch_to_tile = prep.batch_idx.to(device=device, dtype=torch.long).view(-1)
+        tile_to_cty, n_county = self.resolve_county_index(prep.tile_batch_idx, device=device)
+        if n_county != n_bags:
+            raise ValueError(f"county count mismatch: {n_county} != {n_bags}")
+        if prep.stats_raw.shape[0] != patch_to_tile.numel():
+            raise ValueError("stats_raw/patch index length mismatch for recon weighting")
+
+        patch_to_cty = tile_to_cty[patch_to_tile]
+        patch_active = self.spatial_patch_active_mask(
+            prep,
+            device=device,
+            dtype=dtype
+        )
+
+        bag_sum = torch.zeros((n_bags,), device=device, dtype=dtype)
+        bag_cnt = torch.zeros((n_bags,), device=device, dtype=dtype)
+        bag_sum.index_add_(0, patch_to_cty, patch_active)
+        bag_cnt.index_add_(0, patch_to_cty, torch.ones_like(patch_active))
+        return bag_sum / bag_cnt.clamp_min(1.0)
 
     def anchor_features_from_batch(self, batch) -> np.ndarray: 
         if not isinstance(batch, (list, tuple)) or len(batch) < 4:
@@ -1557,7 +1681,8 @@ class TabularSemanticEmbedder(nn.Module):
             hidden_dim=refine_hidden_dim,
             depth=refine_depth,
             dropout=dropout,
-            out_dim=out_dim
+            out_dim=out_dim,
+            zero_head_init=False 
         )
 
         self.node_norm = nn.LayerNorm(out_dim)
@@ -1695,7 +1820,7 @@ class TabularSSFE(SSFEBase):
         # tabular metadata 
         in_dim: int, 
         embed_dim: int, 
-        swap_noise_prob: float = 0.10, 
+        swap_noise_prob: float = 0.20, 
 
         # semantic branch 
         semantic_out_dim: int, 
@@ -2121,7 +2246,7 @@ class MultiviewManagerSSFE(BaseEstimator):
         global_dim: int, 
         gate_floor: float = 0., 
 
-        epochs: int = 800, 
+        epochs: int = 500, 
         lr: float, 
         weight_decay: float, 
 
@@ -2130,16 +2255,20 @@ class MultiviewManagerSSFE(BaseEstimator):
         w_recon: float = 1.0, 
         w_align: float = 1.0, 
         w_privacy: float = 1.0,
-        align_start_pct: float = 0.05, 
+        w_var_reg: float = 1.0,
+        schedule_loss_weights: bool = True,
+        align_start_pct: float = 0.10, 
         align_end_pct: float = 0.40, 
-        privacy_start_pct: float = 0.10, 
-        privacy_end_pct: float = 0.90, 
-        privacy_ramp_power: float = 1.1, 
+        privacy_start_pct: float = 0.00, 
+        privacy_end_pct: float = 0.50, 
+        privacy_ramp_power: float = 2.0, 
         sinkhorn_epsilon: float = 0.05, 
         hsic_sigma: Optional[float] = None,
         recon_cross_scale: float = 1.0, 
         align_l2_scale: float = 1.0, 
         align_kl_scale: float = 1.0, 
+        var_reg_gamma: float = 1.0,
+        var_reg_eps: float = 1e-4,
         random_state: int = 0, 
         device: str = "cuda"
     ):
@@ -2164,8 +2293,13 @@ class MultiviewManagerSSFE(BaseEstimator):
         self.w_recon_target        = w_recon 
         self.w_align_target        = w_align 
         self.w_privacy_target      = w_privacy 
+        self.w_var_reg_target      = w_var_reg
 
         self.w_recon               = self.w_recon_target
+        self.w_align               = self.w_align_target
+        self.w_privacy             = self.w_privacy_target
+        self.w_var_reg             = self.w_var_reg_target
+        self.schedule_loss_weights = bool(schedule_loss_weights)
         
         self.align_start_pct       = align_start_pct
         self.align_end_pct         = align_end_pct 
@@ -2177,6 +2311,8 @@ class MultiviewManagerSSFE(BaseEstimator):
         self.recon_cross_scale     = recon_cross_scale
         self.align_l2_scale        = align_l2_scale
         self.align_kl_scale        = align_kl_scale
+        self.var_reg_gamma         = var_reg_gamma
+        self.var_reg_eps           = var_reg_eps
 
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -2329,9 +2465,29 @@ class MultiviewManagerSSFE(BaseEstimator):
                         f"val_total={val_loss:.4f} | "
                         f"val_rec={val_parts.get('recon', 0.0):.4f} | "
                         f"val_align={val_parts.get('align', 0.0):.4f} | "
-                        f"val_priv={val_parts.get('privacy', 0.0):.4f}",
+                        f"val_priv={val_parts.get('privacy', 0.0):.4f} | "
+                        f"val_var={val_parts.get('var_reg', 0.0):.4f}",
                         file=sys.stderr
                     )
+                    if ep % 10 == 0:
+                        rec_terms = []
+                        hsic_terms = []
+                        for eid in self.expert_ids:
+                            rec_total = val_parts.get(f"recon.{eid}_self", 0.0) + \
+                                        self.recon_cross_scale * val_parts.get(f"recon.{eid}_cross", 0.0)
+                            hsic_total = val_parts.get(f"privacy.{eid}_hsic_p_s", 0.0) + \
+                                         val_parts.get(f"privacy.{eid}_hsic_p_w", 0.0)
+                            rec_terms.append(f"{eid}={rec_total:.4f}")
+                            hsic_terms.append(f"{eid}={hsic_total:.4f}")
+
+                        hsic_sw = val_parts.get("privacy.hsic_s_wide", 0.0)
+                        print(
+                            f"[mv epoch {ep:3d}] detail | "
+                            f"recon_expert[{', '.join(rec_terms)}] | "
+                            f"hsic_expert[{', '.join(hsic_terms)}] | "
+                            f"hsic_s_wide={hsic_sw:.4f}",
+                            file=sys.stderr
+                        )
 
         return best_manager, best_expert, best_val
 
@@ -2386,7 +2542,10 @@ class MultiviewManagerSSFE(BaseEstimator):
         denom = max(1, count)
         parts = {k: (v / denom) for k, v in sums.items()}
         total = float(
-            parts.get("recon", 0.0) + parts.get("align", 0.0) + parts.get("privacy", 0.0)
+            parts.get("recon", 0.0) +
+            parts.get("align", 0.0) +
+            parts.get("privacy", 0.0) +
+            parts.get("var_reg", 0.0)
         ) 
         return total, parts 
 
@@ -2402,6 +2561,7 @@ class MultiviewManagerSSFE(BaseEstimator):
         shared_proj: dict[str, torch.Tensor]     = {}
         private_bags: dict[str, torch.Tensor]    = {}
         repr_targets: dict[str, torch.Tensor]    = {}
+        recon_weights: dict[str, torch.Tensor]   = {}
         sinkhorn_logits: dict[str, torch.Tensor] = {}
 
         for eid in self.expert_ids: 
@@ -2413,6 +2573,12 @@ class MultiviewManagerSSFE(BaseEstimator):
             shared_proj[eid]  = s
             private_bags[eid] = st.private_bag 
             repr_targets[eid] = st.repr_target_bag
+            if st.recon_weight_bag is None:
+                recon_weights[eid] = torch.ones(
+                    (st.n_bags,), device=st.shared_bag.device, dtype=st.shared_bag.dtype
+                )
+            else:
+                recon_weights[eid] = st.recon_weight_bag
 
             if st.shared_sinkhorn_logits is None: 
                 raise ValueError(f"{eid} missing shared_sinkhorn_logits")
@@ -2429,16 +2595,19 @@ class MultiviewManagerSSFE(BaseEstimator):
             shared_bags=shared_proj,
             private_bags=private_bags,
             repr_targets=repr_targets,
+            recon_weights=recon_weights,
             shared_global=s_global,
             sinkhorn_logits=sinkhorn_logits,
             attention_weights=alpha,
             wide_cond=wide,
             w_recon=self.w_recon,
             w_align=self.w_align,
-            w_privacy=self.w_privacy
+            w_privacy=self.w_privacy,
+            w_var_reg=self.w_var_reg,
         )
 
         terms = dict(pack.raw)
+        terms.update(pack.metrics)
         bsz   = s_global.shape[0]
         return pack.total, terms, bsz 
 
@@ -2469,8 +2638,14 @@ class MultiviewManagerSSFE(BaseEstimator):
         return alpha, s_global 
 
     def update_loss_weights(self, epoch: int): 
-        t = epoch / max(1, self.epochs - 1)
         self.w_recon = self.w_recon_target 
+        if not self.schedule_loss_weights:
+            self.w_align = self.w_align_target
+            self.w_privacy = self.w_privacy_target
+            self.w_var_reg = self.w_var_reg_target
+            return
+
+        t = epoch / max(1, self.epochs - 1)
 
         if t < self.align_start_pct: 
             self.w_align = 0.0 
@@ -2481,12 +2656,15 @@ class MultiviewManagerSSFE(BaseEstimator):
             self.w_align = self.w_align_target 
 
         if t < self.privacy_start_pct: 
-            self.w_privacy = 0.0 
+            self.w_privacy = 0.0
+            self.w_var_reg = 0.0
         elif t < self.privacy_end_pct: 
             r = (t - self.privacy_start_pct) / max(1e-9, self.privacy_end_pct - self.privacy_start_pct) 
             self.w_privacy = self.w_privacy_target * (r ** self.privacy_ramp_power)
+            self.w_var_reg = self.w_var_reg_target * (r ** self.privacy_ramp_power)
         else: 
             self.w_privacy = self.w_privacy_target
+            self.w_var_reg = self.w_var_reg_target
 
     # -----------------------------------------------------
     # Initialization and Assertions   
@@ -2547,7 +2725,9 @@ class MultiviewManagerSSFE(BaseEstimator):
             hsic_sigma=self.hsic_sigma,
             recon_cross_scale=self.recon_cross_scale,
             align_l2_scale=self.align_l2_scale,
-            align_kl_scale=self.align_kl_scale 
+            align_kl_scale=self.align_kl_scale,
+            var_reg_gamma=self.var_reg_gamma,
+            var_reg_eps=self.var_reg_eps,
         ).to(self.device)
 
         expert_params = []

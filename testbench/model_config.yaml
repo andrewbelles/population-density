@@ -74,10 +74,6 @@ models:
   Manifold/USPS:
     embed_dim: 64
     semantic_out_dim: 64
-    transformer_dim: 128
-    transformer_heads: 4
-    transformer_layers: 2
-    transformer_attn_dropout: 0.05193447326264852
     semantic_proj_dim: 64
     semantic_hidden_dim: 512
     semantic_depth: 3
@@ -98,10 +94,6 @@ models:
   Manifold/SAIPE:
     embed_dim: 64
     semantic_out_dim: 64
-    transformer_dim: 128
-    transformer_heads: 8
-    transformer_layers: 3
-    transformer_attn_dropout: 0.00010870325353787812
     semantic_proj_dim: 64
     semantic_hidden_dim: 512
     semantic_depth: 1
@@ -151,3 +143,8 @@ models:
     aux_hard_scale: 0.15473279806283707
     aux_decay_power: 2.7355754582010077
     batch_size: 128
+  Manifold/Multiview:
+    global_dim: 256
+    gate_floor: 0.05751622782386665
+    lr: 0.00014773176334293553
+    weight_decay: 1.3049073550362393e-06

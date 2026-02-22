@@ -54,6 +54,8 @@ from utils.helpers         import (
 # ---------------------------------------------------------
 
 HSIC_SIGMA_GRID_DEFAULT: tuple[float, ...] = (0.1, 1.0, 5.0, 10.0)
+MULTIVIEW_VAR_REG_EPS: float = 1e-4
+MULTIVIEW_RECON_NORM_EPS: float = 1e-6
 
 # --------------------------------------------------------- 
 # Class Weighting Methods 
@@ -898,6 +900,8 @@ class MultiviewReconstructionLoss(WeightedLossTerm):
         self_recon_heads: nn.ModuleDict,
         cross_recon_heads: nn.ModuleDict,
         cross_scale: float = 1.0, 
+        normalize_targets: bool = True,
+        norm_eps: float = MULTIVIEW_RECON_NORM_EPS,
         weight: WeightSpec = 1.0, 
         name: str = "recon"
     ): 
@@ -907,6 +911,8 @@ class MultiviewReconstructionLoss(WeightedLossTerm):
         self.self_recon_heads  = self_recon_heads
         self.cross_recon_heads = cross_recon_heads
         self.cross_scale       = cross_scale
+        self.normalize_targets = bool(normalize_targets)
+        self.norm_eps          = float(norm_eps)
 
     def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         s_list = ordered_expert_tensors(
@@ -924,28 +930,54 @@ class MultiviewReconstructionLoss(WeightedLossTerm):
             self.expert_ids, 
             key="repr_targets"
         )
+        rw_list = None
+        if "recon_weights" in context and context["recon_weights"] is not None:
+            rw_list = ordered_expert_tensors(
+                context["recon_weights"],
+                self.expert_ids,
+                key="recon_weights"
+            )
         s_glob = context["shared_global"]
-
-        rec_vals, rec_self_vals, rec_cross_vals = [], [], []
+        rec_vals = []
         metrics: dict[str, torch.Tensor]        = {}
 
-        for eid, si, pi, xi in zip(self.expert_ids, s_list, p_list, t_list): 
+        for i, (eid, si, pi, xi) in enumerate(zip(self.expert_ids, s_list, p_list, t_list)): 
             z_self  = torch.cat([si, pi], dim=1)
             z_cross = torch.cat([s_glob, pi], dim=1)
 
             x_hat_self  = self.self_recon_heads[eid](z_self)
             x_hat_cross = self.cross_recon_heads[eid](z_cross)
+            err_self = (x_hat_self - xi).pow(2)
+            err_cross = (x_hat_cross - xi).pow(2)
+            if self.normalize_targets:
+                var = xi.var(dim=0, unbiased=False).clamp_min(self.norm_eps)
+                err_self = err_self / var
+                err_cross = err_cross / var
+                metrics[f"{eid}_target_var_mean"] = var.mean().detach()
 
-            l_self  = F.mse_loss(x_hat_self, xi)
-            l_cross = F.mse_loss(x_hat_cross, xi)
+            per_self = err_self.mean(dim=1)
+            per_cross = err_cross.mean(dim=1)
+
+            w_i = None
+            if rw_list is not None:
+                w_i = to_batch_tensor(
+                    rw_list[i],
+                    n=per_self.numel(),
+                    device=per_self.device,
+                    dtype=per_self.dtype
+                ).clamp_min(0.0)
+
+            l_self  = weighted_mean(per_self, w_i)
+            l_cross = weighted_mean(per_cross, w_i)
             l_i     = l_self + self.cross_scale * l_cross 
-
-            rec_self_vals.append(l_self)
-            rec_cross_vals.append(l_cross)
             rec_vals.append(l_i)
 
             metrics[f"{eid}_self"]  = l_self.detach()
             metrics[f"{eid}_cross"] = l_cross.detach()
+            metrics[f"{eid}_self_raw"] = F.mse_loss(x_hat_self, xi).detach()
+            metrics[f"{eid}_cross_raw"] = F.mse_loss(x_hat_cross, xi).detach()
+            if w_i is not None:
+                metrics[f"{eid}_weight_mean"] = w_i.mean().detach()
 
         raw = torch.stack(rec_vals).sum() 
         return raw, metrics 
@@ -1108,6 +1140,55 @@ class MultiviewPrivacyLoss(WeightedLossTerm):
         hsic  = hsic / torch.sqrt(k_var.clamp_min(self.eps) * l_var.clamp_min(self.eps))
         return hsic.abs() 
 
+class VarianceRegularizationLoss(WeightedLossTerm): 
+    '''
+    Prevent low-rank collapse in private embeddings by penalizing feature std below gamma.
+    '''
+
+    required_keys = ("private_bags",)
+
+    def __init__(
+        self,
+        *,
+        expert_ids: list[str], 
+        gamma: float = 1.0, 
+        eps: float = MULTIVIEW_VAR_REG_EPS, 
+        weight: WeightSpec = 1.0, 
+        name: str = "var_reg"
+    ): 
+        super().__init__(name=name, weight=weight, reduction="mean")
+        self.expert_ids = expert_ids
+        self.gamma      = float(gamma)
+        self.eps        = float(eps)
+
+    def compute(self, context: LossContext) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        p_list = ordered_expert_tensors(
+            context["private_bags"], 
+            self.expert_ids, 
+            key="private_bags"
+        )
+
+        vals = []
+        metrics: dict[str, torch.Tensor] = {}
+        for eid, pi in zip(self.expert_ids, p_list):
+            if pi.ndim != 2: 
+                raise ValueError(f"{eid} private_bag must be 2d")
+
+            if pi.shape[0] < 2:
+                std = pi.new_zeros((pi.shape[1],))
+                l_var = pi.new_tensor(0.0)
+            else:
+                std = torch.sqrt(pi.var(dim=0, unbiased=False) + self.eps)
+                l_var = F.relu(self.gamma - std).mean()
+
+            vals.append(l_var)
+            metrics[f"{eid}_std_mean"] = std.mean().detach()
+            metrics[f"{eid}_std_min"]  = std.min().detach()
+            metrics[f"{eid}_var_loss"] = l_var.detach()
+
+        raw = torch.stack(vals).sum()
+        return raw, metrics
+
 # ---------------------------------------------------------
 # Loss Helpers 
 # ---------------------------------------------------------
@@ -1267,7 +1348,9 @@ def build_ssfe_multiview_loss(
     hsic_sigma: Optional[float] = None, 
     recon_cross_scale: float = 1.0, 
     align_l2_scale: float = 1.0, 
-    align_kl_scale: float = 1.0 
+    align_kl_scale: float = 1.0,
+    var_reg_gamma: float = 1.0,
+    var_reg_eps: float = MULTIVIEW_VAR_REG_EPS,
 ): 
     return LossComposer(
         MultiviewReconstructionLoss(
@@ -1291,5 +1374,12 @@ def build_ssfe_multiview_loss(
             sigma=hsic_sigma,
             weight="w_privacy",
             name="privacy"
+        ),
+        VarianceRegularizationLoss(
+            expert_ids=expert_ids,
+            gamma=var_reg_gamma,
+            eps=var_reg_eps,
+            weight="w_var_reg",
+            name="var_reg"
         )
     )

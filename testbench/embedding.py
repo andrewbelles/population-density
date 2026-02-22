@@ -6,10 +6,11 @@
 # 
 # 
 
-from typing_extensions import evaluate_forward_ref
 from numpy.typing import NDArray
 
-import argparse, io
+from typing import Optional
+
+import argparse, io, inspect
 
 import numpy as np
 
@@ -23,7 +24,8 @@ from sklearn.preprocessing     import StandardScaler
 
 from preprocessing.loaders     import (
     load_spatial_mmap_manifest,
-    load_compact_dataset 
+    load_compact_dataset,
+    load_ssfe_expert_inputs
 ) 
 
 from testbench.utils.paths     import (
@@ -38,10 +40,12 @@ from testbench.utils.data      import (
 )
 
 from optimization.evaluators   import (
-    SSFEEvaluator
+    SSFEEvaluator,
+    MultiviewSSFEEEvaluator
 )
 
 from optimization.spaces       import (
+    define_multiview_ssfe_space,
     define_spatial_ssfe_space,
     define_tabular_ssfe_space
 )
@@ -53,7 +57,8 @@ from optimization.engine       import (
 
 from models.ssfe               import (
     SpatialSSFE, 
-    TabularSSFE
+    TabularSSFE,
+    MultiviewManagerSSFE
 )
 
 from testbench.utils.config    import (
@@ -90,6 +95,7 @@ VIIRS_KEY  = "Manifold/VIIRS"
 NLCD_KEY   = "Manifold/NLCD"
 USPS_KEY   = "Manifold/USPS"
 SAIPE_KEY  = "Manifold/SAIPE"
+MULTI_KEY  = "Manifold/Multiview"
 
 # Out Paths 
 USPS_OUT              = project_path("data", "datasets", "usps_pooled.mat")
@@ -106,6 +112,9 @@ USPS_ANCHORS  = project_path("data", "anchors", "usps.npy")
 
 def _row_score(name: str, score: float): 
     return {"Name": name, "SSFE Loss": format_metric(score)}
+
+def _canon_fips(fips: NDArray) -> NDArray:
+    return np.asarray([str(x).strip().zfill(5) for x in np.asarray(fips).reshape(-1)], dtype="U5")
 
 def _spatial_opt(
     *,
@@ -183,6 +192,30 @@ def _spatial_opt(
         "params": best_params
     }
 
+def _load_external_wide_cond(
+    *,
+    source_fips: NDArray,
+    wide_cond_path: str
+) -> tuple[NDArray, NDArray]: 
+    wide_path = wide_cond_path
+    wide_ds   = load_compact_dataset(wide_path)
+
+    wide_x = np.asarray(wide_ds["features"], dtype=np.float64)
+    wide_fips = _canon_fips(np.asarray(wide_ds["sample_ids"]))
+    if wide_x.ndim != 2 or wide_x.shape[0] != wide_fips.shape[0]: 
+        raise ValueError("wide_cond dataset has invalid shape.")
+
+    idx  = {fid: i for i, fid in enumerate(wide_fips)}
+    keep = np.asarray([fid in idx for fid in source_fips], dtype=bool)
+    if not keep.any(): 
+        raise ValueError("no overlapping fips.")
+
+    aligned = np.asarray([wide_x[idx[fid]] for fid in source_fips[keep]])
+    dropped = int((~keep).sum())
+    print(f"[tabular-ssfe] dropped {dropped} rows missing in wide_cond.")
+    return aligned, keep 
+
+
 def _tabular_ssfe_opt(
     *,
     load_data_fn,
@@ -198,13 +231,16 @@ def _tabular_ssfe_opt(
 
     data   = load_data_fn(data_path) 
     X      = np.asarray(data["features"], dtype=np.float32)
+    W      = np.asarray(data["wide_cond"], dtype=np.float32)
+    if W.ndim != 2 or W.shape[0] != X.shape[0]: 
+        raise ValueError("shape mismatch.")
     in_dim = int(X.shape[1])
 
     fixed = dict(factory_overrides or {})
     fixed.update({"in_dim": in_dim})
 
     def loader_func(_filepath): 
-        return {"features": X}
+        return {"features": X, "wide_cond": W}
 
     def ssfe_factory(*, compute_strategy=None, collate_fn=None, **params): 
         _ = compute_strategy 
@@ -379,16 +415,176 @@ def test_usps_opt(
     trials: int = 50, 
     random_state: int = 0, 
     config_path: str = CONFIG_PATH, 
+    year: int = 2013, 
+    wide_cond_path: Optional[str] = None, 
     **_
 ):
+    if wide_cond_path is None:
+        wide_cond_path = project_path("data", "datasets", f"wide_scalar_{year}.mat")
+
+    usps = load_compact_dataset(data_path)
+    wide = load_compact_dataset(wide_cond_path)
+
+    X_usps = np.asarray(usps["features"], dtype=np.float32)
+    f_usps = _canon_fips(usps["sample_ids"])
+    X_wide = np.asarray(wide["features"], dtype=np.float32)
+    f_wide = _canon_fips(wide["sample_ids"])
+
+    idx_wide = {f: i for i, f in enumerate(f_wide)}
+    keep = np.asarray([f in idx_wide for f in f_usps], dtype=bool)
+    if not keep.any():
+        raise ValueError(f"no overlapping fips between USPS and wide_cond: {wide_cond_path}")
+
+    X_keep = X_usps[keep]
+    f_keep = f_usps[keep]
+    W_keep = np.asarray([X_wide[idx_wide[f]] for f in f_keep], dtype=np.float32)
+
+    dropped = int((~keep).sum())
+    if dropped:
+        print(f"[usps-opt] dropped {dropped} rows missing in wide_cond.")
+
+    aligned = {
+        "features": X_keep,
+        "wide_cond": W_keep,
+    }
+    def load_data_fn(_):
+        return aligned
+
     return _tabular_ssfe_opt(
-        load_data_fn=load_compact_dataset, 
+        load_data_fn=load_data_fn, 
         data_path=data_path,
         model_key=model_key,
         trials=trials,
         random_state=random_state,
         config_path=config_path
     )
+
+def test_multiview_opt(
+    *,
+    admin_path: str = USPS_2013, 
+    viirs_root: str = VIIRS_ROOT, 
+    model_key: str = MULTI_KEY, 
+    viirs_key: str = VIIRS_KEY, 
+    admin_key: str = USPS_KEY, 
+    tile_shape: tuple[int, int, int] = (3, 256, 256),
+    year: int = 2013, 
+    trials: int = 30, 
+    random_state: int = 0, 
+    config_path: str = CONFIG_PATH,
+    wide_mat_path: Optional[str] = None,
+    **_
+): 
+    viirs_params = load_model_params(config_path, viirs_key)
+    admin_params = load_model_params(config_path, admin_key)
+
+    if wide_mat_path is None: 
+        wide_mat_path = project_path("data", "datasets", f"wide_scalar_{year}.mat")
+
+    aligned = load_ssfe_expert_inputs(
+        admin_path=admin_path,
+        viirs_root=viirs_root,
+        tile_shape=tile_shape,
+        random_state=random_state,
+        wide_mat_path=wide_mat_path,
+        year=year
+    )
+
+    admin_in_dim = np.asarray(aligned["admin"]["features"]).shape[1]
+    viirs_in_ch  = aligned["viirs"].get("in_channels", tile_shape[0])
+
+    def loader_func(_):
+        return aligned 
+
+    def _filter_kwargs(
+        params: dict,
+        ctor,
+        *,
+        deny: tuple[str, ...] = ()
+    ) -> dict:
+        allowed = set(inspect.signature(ctor.__init__).parameters.keys()) - {"self"}
+        deny_set = set(deny)
+        return {k: v for k, v in params.items() if k in allowed and k not in deny_set}
+
+    def manager_factory(*, compute_strategy=None, **manager_params):
+        _ = compute_strategy
+        admin_config = dict(admin_params)
+        viirs_config = dict(viirs_params)
+        sem_depth    = manager_params.pop("semantic_depth", 2)
+
+        for k in ("in_dim", "random_state", "device"):
+            admin_config.pop(k, None)
+        for k in ("in_channels", "tile_size", "random_state", "device"):
+            viirs_config.pop(k, None)
+        admin_config = _filter_kwargs(
+            admin_params, TabularSSFE,
+            deny=("in_dim", "random_state", "device")
+        )
+        viirs_config = _filter_kwargs(
+            viirs_params, SpatialSSFE,
+            deny=("in_channels", "tile_size", "random_state", "device")
+        )
+        mgr_cfg = _filter_kwargs(
+            manager_params, MultiviewManagerSSFE,
+            deny=("experts", "random_state", "device")
+        )
+
+        admin_config["semantic_depth"] = sem_depth
+        viirs_config["semantic_depth"] = sem_depth
+
+        experts = {
+            "admin": TabularSSFE(
+                in_dim=admin_in_dim,
+                **admin_config
+            ),
+            "viirs": SpatialSSFE(
+                in_channels=viirs_in_ch,
+                tile_size=tile_shape[1],
+                **viirs_config
+            )
+        }
+        return MultiviewManagerSSFE(
+            experts=experts,
+            random_state=random_state,
+            device=str(strategy.device),
+            **mgr_cfg
+        )
+
+    evaluator = MultiviewSSFEEEvaluator(
+        filepath="__virtual__", 
+        loader_func=loader_func,
+        model_factory=manager_factory,
+        param_space=define_multiview_ssfe_space,
+        random_state=random_state,
+        n_runs=1,
+        compute_strategy=strategy
+    )
+
+    prior_params = None
+    try:
+        prior_params = load_model_params(config_path, model_key)
+    except Exception:
+        prior_params = None
+
+    config = EngineConfig(
+        n_trials=trials,
+        direction="minimize",
+        random_state=random_state,
+        sampler_type="multivariate-tpe",
+        mp_enabled=False,
+        enqueue_trials=[prior_params] if prior_params else None,
+    )
+
+    best_params, best_value, _ = run_optimization(
+        name=model_key,
+        evaluator=evaluator,
+        config=config
+    )
+    save_model_config(config_path, model_key, best_params)
+    return {
+        "header": ["Name", "SSFE Loss"],
+        "row": _row_score(model_key, best_value),
+        "params": best_params
+    }
 
 # ---------------------------------------------------------
 # Tests Entry Point 
@@ -398,6 +594,7 @@ TESTS = {
     "viirs-opt": test_viirs_opt, 
     "saipe-opt": test_saipe_opt,
     "usps-opt": test_usps_opt,
+    "multiview-opt": test_multiview_opt,
     "reduce-all": test_reduce_all,
 }
 
@@ -417,6 +614,7 @@ def main():
     parser.add_argument("--tests", nargs="*", default=None)
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--folds", type=int, default=2)
+    parser.add_argument("--year", type=int, default=2013)
     parser.add_argument("--random-state", default=0)
     parser.add_argument("--embedding-paths", default=None)
     args = parser.parse_args()
@@ -435,8 +633,8 @@ def main():
         trials=args.trials,
         folds=args.folds,
         embedding_paths=args.embedding_paths,
+        year=args.year, 
         random_state=args.random_state,
-        ablation_groups=ablation_groups,
     )
 
     print(buf.getvalue().strip())

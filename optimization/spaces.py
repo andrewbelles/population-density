@@ -357,7 +357,7 @@ def define_multiview_ssfe_space(trial):
         "semantic_depth": 2,#trial.suggest_int("semantic_depth", 2, 5), 
         "w_recon": 1.0,#trial.suggest_float("w_recon", 0.5, 2.0),
         "w_align": 1.0,#trial.suggest_float("w_align", 0.5, 2.0),
-        "w_privacy": 1.2,#trial.suggest_float("w_privacy", 0.5, 2.0),
+        "w_privacy": 5.0,#trial.suggest_float("w_privacy", 0.5, 2.0),
 
         "align_start_pct": 0.10,
         "align_end_pct": 0.35,

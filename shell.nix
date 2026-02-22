@@ -74,7 +74,7 @@ pkgs.mkShell {
         -f https://data.pyg.ord/whl/torch-2.6.0+cu124.html ||
         echo "[pip] pyg deps failed" >&2 
 
-      $PIP_QUIET install torch-geometric rasterstats pyrosm networkit imageio || 
+      $PIP_QUIET install torch-geometric rasterstats pyrosm networkit shap imageio || 
         echo "[pip] extra deps failed" >&2 
 
       echo "[NIX-SHELL] installing CUDA xgboost"

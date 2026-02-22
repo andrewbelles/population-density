@@ -16,7 +16,7 @@ import numpy as np
 
 from numpy.typing import ArrayLike, NDArray
 
-from typing import Any, Callable, Sequence, Dict  
+from typing import Any, Callable, Mapping, Sequence, Dict  
 
 from sklearn.preprocessing import StandardScaler
 
@@ -33,6 +33,45 @@ MONTHS      = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "o
 # ---------------------------------------------------------
 # Generic Helper Functions 
 # ---------------------------------------------------------
+
+def ordered_expert_tensors(
+    bags, 
+    expert_ids: list[str], 
+    *,
+    key: str
+) -> list[torch.Tensor]: 
+    if isinstance(bags, Mapping): 
+        missing = [eid for eid in expert_ids if eid not in bags]
+        if missing: 
+            raise KeyError(f"[{key}] missing experts: {missing}")
+        return [bags[eid] for eid in expert_ids]
+
+    if isinstance(bags, (list, tuple)): 
+        if len(bags) != len(expert_ids): 
+            raise ValueError(f"[{key}] expected {len(expert_ids)} tensors, got {len(bags)}")
+        return list(bags)
+    raise TypeError(f"[{key}] expected Mapping or list/tuple of tensors.")
+
+def normalize_attention(
+    attn: torch.Tensor, 
+    *,
+    n_bags: int, 
+    n_experts: int, 
+    eps: float = 1e-9 
+) -> torch.Tensor: 
+    if attn.ndim == 1: 
+        if attn.numel() != n_experts: 
+            raise ValueError(f"attention_weights expected {n_experts} values, got {attn.numel()}")
+        a = attn.view(1, n_experts).expand(n_bags, n_experts)
+    elif attn.ndim == 2: 
+        if attn.shape != (n_bags, n_experts): 
+            raise ValueError(f"attention_weights expected shape ({n_bags}, {n_experts})")
+        a = attn 
+    else: 
+        raise ValueError("attention_weights must be 1d/2d.")
+
+    a = a.clamp_min(0.0)
+    return a / a.sum(dim=1, keepdim=True).clamp_min(eps)
 
 def to_num(s: pd.Series) -> pd.Series: 
     return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False), errors="coerce")
