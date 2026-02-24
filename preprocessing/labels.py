@@ -37,15 +37,23 @@ class PopulationLabels:
 
     # File to year mapping 
     FILE_BY_YEAR   = {
-        2013: "co-est2020-alldata.csv", 
+        2013: "co-est2020-alldata.csv",
+        2015: "co-est2020-alldata.csv",
+        2016: "co-est2020-alldata.csv",
+        2017: "co-est2020-alldata.csv",
+        2018: "co-est2020-alldata.csv",
         2019: "co-est2020-alldata.csv",
     }
 
-    # Columns to check for stable binning per year 
+    # Columns to check for stable binning per year
     AVAILABLE_COLS = {
-        2013: ("POPESTIMATE2013",), 
+        2013: ("POPESTIMATE2013",),
+        2015: ("POPESTIMATE2015",),
+        2016: ("POPESTIMATE2016",),
+        2017: ("POPESTIMATE2017",),
+        2018: ("POPESTIMATE2018",),
         2019: ("POPESTIMATE2019",),
-    } 
+    }
 
     def __init__(
         self,

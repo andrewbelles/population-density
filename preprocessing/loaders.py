@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scipy.io import loadmat
-from torch.utils.data import Dataset
+
+from torch.utils.data import Dataset, Subset
 
 from utils.helpers import (
     bind,
@@ -1074,6 +1075,19 @@ class WideDeepInputs(TypedDict):
     expert_dims: dict[str, int]
     wide_in_dim: int 
 
+class TabularExpertInputs(TypedDict): 
+    features: NDArray[np.float32]
+    wide_cond: NDArray[np.float32]
+    node_ids: NDArray[np.int64]
+    sample_ids: NDArray[np.str_]
+
+# Hardcodes N=2 experts for now 
+class SSFEExpertInputs(TypedDict): 
+    admin: TabularExpertInputs
+    viirs: SpatialDatasetDict 
+    labels: NDArray[np.float32]
+    sample_ids: NDArray[np.str_]
+
 def canon_fips_vec(x) -> NDArray[np.str_]: 
     arr = np.asarray(x).reshape(-1)
     out = []
@@ -1083,6 +1097,66 @@ def canon_fips_vec(x) -> NDArray[np.str_]:
             s = s.zfill(5)
         out.append(s)
     return np.asarray(out, dtype="U5")
+
+def load_ssfe_expert_inputs(
+    *,
+    admin_path: str, 
+    viirs_root: str, 
+    tile_shape: tuple[int, int, int] = (3, 256, 256), 
+    random_state: int = 0,
+    wide_mat_path: Optional[str] = None, 
+    year: int = 2013 
+) -> SSFEExpertInputs: 
+
+    admin = load_compact_dataset(admin_path)
+    viirs = load_spatial_mmap_manifest(
+        viirs_root,
+        tile_shape=tile_shape,
+        random_state=random_state,
+        wide_mat_path=wide_mat_path,
+        year=year
+    )
+
+    admin_ids = canon_fips_vec(admin["sample_ids"])
+    viirs_ids = canon_fips_vec(viirs["sample_ids"])
+    idx_admin = {fid: i for i, fid in enumerate(admin_ids)}
+
+    keep     = np.asarray([fid in idx_admin for fid in viirs_ids], dtype=bool)
+    keep_idx = np.flatnonzero(keep).astype(np.int64)
+    if keep_idx.size == 0: 
+        raise ValueError("no overlapping fips between admin and viirs datasets.")
+
+    sample_ids = viirs_ids[keep_idx]
+    admin_rows = np.asarray([idx_admin[fid] for fid in sample_ids], dtype=np.int64)
+
+    admin_x      = np.asarray(admin["features"], dtype=np.float32)[admin_rows]
+    viirs_ds     = viirs["dataset"]
+    viirs_wide   = np.asarray(viirs_ds.wide_features, dtype=np.float32)[keep_idx]
+    viirs_labels = np.asarray(viirs["labels"], dtype=np.float32)[keep_idx]
+
+    viirs_subset = Subset(viirs_ds, keep_idx.tolist())
+
+    admin_pack: TabularExpertInputs = {
+        "features": admin_x,
+        "wide_cond": viirs_wide,
+        "node_ids": np.arange(sample_ids.shape[0], dtype=np.int64),
+        "sample_ids": sample_ids
+    }
+
+    viirs_pack: SpatialDatasetDict = {
+        "dataset": viirs_subset, 
+        "labels": viirs_labels,
+        "sample_ids": sample_ids,
+        "collate_fn": viirs.get("collate_fn"),
+        "in_channels": viirs.get("in_channels", tile_shape[0])
+    }
+
+    return {
+        "admin": admin_pack, 
+        "viirs": viirs_pack, 
+        "labels": viirs_labels, 
+        "sample_ids": sample_ids 
+    }
 
 def coords_by_fips(fips: NDArray[np.str_]) -> tuple[NDArray[np.float64], NDArray[np.bool_]]: 
     path = Path(project_path("data", "datasets", "saipe_population.mat")) # fallback coords path
