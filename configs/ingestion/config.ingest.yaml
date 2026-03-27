@@ -1,0 +1,91 @@
+# External sources live under ingestion/data/raw. Stable reference metadata like
+# shapefiles lives under ingestion/metadata. Normalized ingestion outputs are
+# written to ingestion/data/datasets as parquet.
+
+years:
+  start: 2020
+  end: 2024
+
+paths:
+  county_shapefile: ingestion/metadata/geography/county_shapefile/tl_2020_us_county.shp
+  raw_root: ingestion/data/raw
+  dataset_root: ingestion/data/datasets
+  metadata_root: ingestion/metadata
+  temp_root: ingestion/data/tmp
+
+viirs:
+  enabled: true
+  source_dir: ingestion/data/raw/viirs
+  source_globs:
+    - VIIRS_NTL_CONUS_Aggregate_{year}.tif.gz
+    - VIIRS_NTL_CONUS_Aggregate_{year}.tif
+    - viirs_{year}.tif
+    - VNL*{year}*.tif.gz
+    - VNL*{year}*.tif
+  canonical_name: VIIRS_NTL_CONUS_Aggregate_{year}.tif
+  rewrite_source_dir: true
+  preserve_name: false
+  stage_compressed: true
+  raw_subdir: viirs
+  tensor_subdir: tensors/viirs
+
+s5p:
+  enabled: true
+  source_dir: ingestion/data/raw/s5p
+  source_globs:
+    - S5P_NO2_CONUS_Aggregate_{year}.tif.gz
+    - S5P_NO2_CONUS_Aggregate_{year}.tif
+  preserve_name: true
+  stage_compressed: true
+  raw_subdir: s5p
+  tensor_subdir: tensors/s5p
+
+usps:
+  enabled: true
+  source_dir: ingestion/data/raw/usps
+  raw_subdir: usps
+  zip_glob: usps_vac_*_tractsum_2kx.zip
+  gpkg_template: usps_master_tracts_{year}.gpkg
+  table_path: ingestion/data/datasets/tabular/usps_county_admin_2020_2024.parquet
+  prev_scalar_mat_template: ingestion/data/raw/supervision/usps_scalar_{year}.mat
+
+pep:
+  enabled: true
+  census_2020_csv: ingestion/data/raw/census/co-est2020-alldata.csv
+  census_2023_csv: ingestion/data/raw/census/co-est2023-alldata.csv
+  census_2024_csv: ingestion/data/raw/census/co-est2024-alldata.csv
+  table_path: ingestion/data/datasets/tabular/pep_county_estimates_2020_2024.parquet
+  wide_2020_mat: ingestion/data/raw/supervision/wide_scalar_2020.mat
+  pep_2020_mat: ingestion/data/raw/supervision/pep_arithmetic_2020.mat
+  pep_2020_anchor: with_resid
+
+admin:
+  enabled: true
+  merge_path: ingestion/data/datasets/tabular/county_year_admin_panel_2020_2024.parquet
+  yearly_dir: ingestion/data/datasets/tabular/usps_scalar
+
+  laus:
+    enabled: true
+    raw_subdir: admin/laus
+    table_path: ingestion/data/datasets/tabular/laus_county_features_2020_2024.parquet
+    data_path: ingestion/data/raw/admin/laus/la.data.64.County
+    download_url: https://download.bls.gov/pub/time.series/la/la.data.64.County
+    download_base_url: https://download.bls.gov/pub/time.series/la/
+    state_shard_dir: ingestion/data/raw/admin/laus/state_shards
+    seasonal_code: U
+    area_type_code: CN
+    urate_code: '03'
+    unemp_code: '04'
+    emp_code: '05'
+    lf_code: '06'
+    chunksize: 1000000
+
+  housing:
+    enabled: true
+    raw_subdir: admin/housing
+    table_path: ingestion/data/datasets/tabular/housing_county_features_2020_2024.parquet
+    source_mode: realtor
+    inventory_url: https://econdata.s3-us-west-2.amazonaws.com/Reports/Core/RDC_Inventory_Core_Metrics_County_History.csv
+    hotness_url: https://econdata.s3-us-west-2.amazonaws.com/Reports/Hotness/RDC_Inventory_Hotness_Metrics_County_History.csv
+    inventory_csv: ingestion/data/raw/admin/housing/RDC_Inventory_Core_Metrics_County_History.csv
+    hotness_csv: ingestion/data/raw/admin/housing/RDC_Inventory_Hotness_Metrics_County_History.csv
