@@ -1,0 +1,79 @@
+years:
+  start: 2020
+  end: 2024
+
+modalities:
+  - admin
+  - viirs
+  - s5p
+
+paths:
+  geo_coords_path: ingestion/metadata/geography/2020_Gaz_counties_national.txt
+  run_root: graph/checkpoints
+  runs_parquet: graph/data/topology_runs.parquet
+  basis_parquet: graph/data/topology_basis.parquet
+  edges_parquet: graph/data/topology_edges.parquet
+
+graph:
+  graph_tag_base: gsl_gem_admin_viirs_s5p
+  pool_mode: gem
+  graph_objective: barlow
+  mem_top_k: 11
+  block_pca_dim: 0
+  hidden_dim: 144
+  joint_dim: 40
+  dropout: 0.016
+  temperature: 0.123
+  tau_graph: 0.983
+  w_pull: 0.018
+  beta_geo: 0.191
+  support_k: 28
+  final_row_topk: 10
+  knn_k: 6
+  knn_bandwidth_k: 6
+  epochs: 120
+  lr: 0.001
+  weight_decay: 0.00001
+  geo_gamma: 1.0
+  attention_hidden_dim: 256
+  attention_dropout: 0.0
+  projector_hidden_dim: 128
+  projector_dim: 64
+  barlow_lambda: 0.005
+  spatial_negative_mining: false
+  remote_gating: true
+  netvlad_clusters: 8
+  geo_residual_graph: true
+  mutual_knn: false
+  degree_penalty: false
+  degree_penalty_weight: 0.05
+  device: cuda
+  seed: 0
+  write_knn_reference: true
+
+admin:
+  enabled: true
+  kind: dense
+  input_parquet: manifold/data/admin_embeddings.parquet
+  family_tag_base: tabdae_vime8
+  bottleneck_dim: 0
+  bag_keep_rate: 1.0
+  gem_p_init: 3.0
+
+viirs:
+  enabled: true
+  kind: bag
+  input_parquet: manifold/data/viirs_embeddings.parquet
+  family_tag_base: byol_viirs24km32_flatrad
+  bottleneck_dim: 26
+  bag_keep_rate: 0.75
+  gem_p_init: 4.0
+
+s5p:
+  enabled: false
+  kind: bag
+  input_parquet: manifold/data/s5p_embeddings.parquet
+  family_tag_base: byol_nitrous24km32
+  bottleneck_dim: 22
+  bag_keep_rate: 0.50
+  gem_p_init: 6.5

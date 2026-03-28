@@ -1,0 +1,94 @@
+years:
+  start: 2020
+  end: 2024
+
+modalities:
+  - admin
+  - viirs
+  - s5p
+
+paths:
+  county_shapefile: ingestion/metadata/geography/county_shapefile/tl_2020_us_county.shp
+  pep_parquet: ingestion/data/datasets/tabular/pep_county_estimates_2020_2024.parquet
+  topology_runs_parquet: graph/data/topology_runs.parquet
+  topology_basis_parquet: graph/data/topology_basis.parquet
+  topology_edges_parquet: graph/data/topology_edges.parquet
+  outputs:
+    root: nowcast/data
+    censal_dir: nowcast/data/censal
+    postcensal_dir: nowcast/data/postcensal
+    analysis_dir: nowcast/data/analysis
+
+evaluation:
+  strict_year: 2020
+  n_splits: 5
+  seed: 0
+  tile_pool_mode: mean_max
+  model_pca_reduce: false
+  model_pca_dim: 64
+  model_pca_mode: global
+  fold_strategy: region_balanced
+  fold_region_level: division
+  postcensal_direct_modalities: [admin]
+  postcensal_use_mem: true
+  postcensal_full_prediction: false
+  selection_hard_case_quantile: 0.90
+
+graph:
+  enabled: true
+  graph_tag_base: gsl_gem_admin_viirs_s5p
+  graph_kind: learned
+  mem_top_k: 11
+
+downstream:
+  selected: huber
+  strict_direct_modalities: [admin, viirs, s5p]
+  strict_feature_specs: [pep, mem, embeddings, embeddings_only, embeddings_mem, embeddings_mem_only]
+
+  kernel_ridge:
+    model: kernel_ridge
+    kr_kernel: laplacian
+    kr_gamma: 0.0
+    kr_alpha: 0.8
+    rolling_online_update: false
+
+  elastic_net:
+    model: elastic_net
+    enet_alpha: 0.001
+    enet_l1_ratio: 0.5
+    enet_max_iter: 5000
+    enet_tol: 0.0001
+    rolling_online_update: false
+
+  huber:
+    model: huber
+    huber_alpha: 0.0001
+    huber_epsilon: 1.35
+    huber_max_iter: 1000
+    huber_tol: 0.00001
+    huber_kernelize: false
+    rolling_online_update: true
+    rolling_alpha_mult: 50.0
+    rolling_weight_drift_frac: 0.05
+
+analysis:
+  leakage_proxy_mode: bidirectional
+  leakage_summary_parquet: analysis/artifacts/nowcast_safety/topology_leakage_summary.parquet
+
+admin:
+  enabled: true
+  kind: dense
+  input_parquet: manifold/data/admin_embeddings.parquet
+  family_tag_base: tabdae_vime8
+
+viirs:
+  enabled: true
+  kind: bag
+  input_parquet: manifold/data/viirs_embeddings.parquet
+  family_tag_base: byol_viirs24km32_flatrad
+
+s5p:
+  enabled: false
+  kind: bag
+  input_parquet: manifold/data/s5p_embeddings.parquet
+  family_tag_base: byol_nitrous24km32

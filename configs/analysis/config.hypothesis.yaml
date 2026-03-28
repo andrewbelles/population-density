@@ -1,0 +1,52 @@
+paths:
+  nowcast_config: configs/nowcast/config.nowcast.yaml
+  nowcast_root: nowcast/data
+  graph_runs_parquet: graph/data/topology_runs.parquet
+  graph_basis_parquet: graph/data/topology_basis.parquet
+  graph_edges_parquet: graph/data/topology_edges.parquet
+  output_root: analysis/artifacts/hypothesis
+
+comparison:
+  baseline_model: pep
+  treatment_model: embeddings_mem
+
+inputs:
+  censal_summary: nowcast/data/censal/summary.parquet
+  censal_fold_metrics: nowcast/data/censal/fold_metrics.parquet
+  censal_abs_errors: nowcast/data/censal/abs_errors.parquet
+  county_trajectory: nowcast/data/postcensal/county_trajectory.parquet
+  year_metrics: nowcast/data/postcensal/year_metrics.parquet
+  county_summary: nowcast/data/postcensal/county_summary.parquet
+  summary_json: nowcast/data/postcensal/summary.json
+
+selection:
+  anchor_year: 2020
+  start_year: 2020
+  end_year: 2024
+  hard_case_quantile: 0.90
+  worst_regression_quantile: 0.10
+  improvement_strata:
+    - <5k
+    - 5k-50k
+    - 250k-1M
+    - >1M
+
+hypothesis:
+  paired_test: division_state_bootstrap
+  bootstrap_draws: 5000
+  random_seed: 0
+  alpha: 0.05
+  non_negligible_ape_pct: 0.0
+  adjusted_relative_pct_threshold: 0.0
+  majority_threshold: 0.50
+  state_equal_tolerance_pct: 1.0e-4
+
+safety:
+  max_growth_ratio_warn: 1.10
+  max_abs_correction_log_warn: 0.25
+  interval_coverage_target: 0.68
+  bounded_share_threshold: 0.95
+
+visualization:
+  county_examples_per_group: 3
+  export_dpi: 180
