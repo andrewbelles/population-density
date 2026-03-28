@@ -21,3 +21,6 @@ papers/
 
 **/checkpoints/*
 !**/checkpoints/.gitkeep
+
+**/artifacts/*
+!**/artifacts/.gitkeep
