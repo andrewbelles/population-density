@@ -64,6 +64,7 @@ downstream:
     model: huber
     huber_alpha: 0.0001
     huber_epsilon: 1.35
+    huber_asymmetry: 0.0
     huber_max_iter: 5000
     huber_tol: 0.00001
     huber_kernelize: false

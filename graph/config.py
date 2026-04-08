@@ -51,7 +51,6 @@ class ModalityConfig:
 @dataclass(slots=True)
 class GraphConfig:
     graph_tag_base: str
-    pool_mode: str
     graph_objective: str
     mem_top_k: int
     block_pca_dim: int
@@ -70,14 +69,11 @@ class GraphConfig:
     lr: float
     weight_decay: float
     geo_gamma: float
-    attention_hidden_dim: int
-    attention_dropout: float
     projector_hidden_dim: int
     projector_dim: int
     barlow_lambda: float
     spatial_negative_mining: bool
     remote_gating: bool
-    netvlad_clusters: int
     geo_residual_graph: bool
     mutual_knn: bool
     degree_penalty: bool
@@ -145,7 +141,6 @@ def _parse_modality(section: dict[str, Any], name: str) -> ModalityConfig:
 def _parse_graph(section: dict[str, Any]) -> GraphConfig:
     return GraphConfig(
         graph_tag_base=str(section.get("graph_tag_base", "gsl_topology")),
-        pool_mode=str(section.get("pool_mode", "gem")),
         graph_objective=str(section.get("graph_objective", "barlow")),
         mem_top_k=int(section.get("mem_top_k", 11)),
         block_pca_dim=int(section.get("block_pca_dim", 0)),
@@ -164,14 +159,11 @@ def _parse_graph(section: dict[str, Any]) -> GraphConfig:
         lr=float(section.get("lr", 1e-3)),
         weight_decay=float(section.get("weight_decay", 1e-5)),
         geo_gamma=float(section.get("geo_gamma", 1.0)),
-        attention_hidden_dim=int(section.get("attention_hidden_dim", 256)),
-        attention_dropout=float(section.get("attention_dropout", 0.0)),
         projector_hidden_dim=int(section.get("projector_hidden_dim", 128)),
         projector_dim=int(section.get("projector_dim", 64)),
         barlow_lambda=float(section.get("barlow_lambda", 5e-3)),
         spatial_negative_mining=bool(section.get("spatial_negative_mining", False)),
         remote_gating=bool(section.get("remote_gating", True)),
-        netvlad_clusters=int(section.get("netvlad_clusters", 8)),
         geo_residual_graph=bool(section.get("geo_residual_graph", True)),
         mutual_knn=bool(section.get("mutual_knn", False)),
         degree_penalty=bool(section.get("degree_penalty", False)),

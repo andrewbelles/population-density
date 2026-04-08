@@ -31,6 +31,7 @@ from manifold.data import load_county_coords
 
 
 LOGGER = logging.getLogger("graph.topology")
+GRAPH_POOL_MODE = "gem"
 
 
 @dataclass(slots=True)
@@ -244,7 +245,7 @@ class TopologyParquetWriter:
                 pa.array(np.asarray([int(n_counties)], dtype=np.int32)),
                 pa.array(np.asarray([int(basis_dim)], dtype=np.int32)),
                 pa.array(np.asarray([float(graph_loss)], dtype=np.float32)),
-                pa.array([str(graph_cfg.pool_mode)], type=pa.string()),
+                pa.array([str(GRAPH_POOL_MODE)], type=pa.string()),
                 pa.array([str(graph_cfg.graph_objective)], type=pa.string()),
                 pa.array(np.asarray([int(graph_cfg.support_k)], dtype=np.int32)),
                 pa.array(np.asarray([int(graph_cfg.final_row_topk)], dtype=np.int32)),
@@ -628,58 +629,6 @@ class SignedGeMPool(nn.Module):
         return sign * torch.pow(torch.clamp(agg, min=self.eps), 1.0 / p)
 
 
-class MeanMaxPool(nn.Module):
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        m = mask.to(dtype=x.dtype).unsqueeze(-1)
-        denom = torch.clamp(m.sum(dim=1), min=1.0)
-        mean = torch.sum(m * x, dim=1) / denom
-        x_masked = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
-        mx = torch.amax(x_masked, dim=1)
-        mx = torch.where(torch.isfinite(mx), mx, mean)
-        return torch.cat([mean, mx], dim=1)
-
-
-class MaskedAttentionPool(nn.Module):
-    def __init__(self, in_dim: int, attn_dim: int = 256, attn_dropout: float = 0.0) -> None:
-        super().__init__()
-        self.v = nn.Linear(int(in_dim), int(attn_dim))
-        self.u = nn.Linear(int(in_dim), int(attn_dim))
-        self.w = nn.Linear(int(attn_dim), 1)
-        self.tanh = nn.Tanh()
-        self.sigmoid = nn.Sigmoid()
-        self.dropout = nn.Dropout(float(attn_dropout)) if float(attn_dropout) > 0.0 else nn.Identity()
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        logits = self.w(self.tanh(self.v(x)) * self.sigmoid(self.u(x))).squeeze(-1)
-        logits = logits.masked_fill(~mask, -1e9)
-        attn = torch.softmax(logits, dim=1)
-        attn = self.dropout(attn)
-        attn = torch.where(mask, attn, torch.zeros_like(attn))
-        norm = torch.clamp(attn.sum(dim=1, keepdim=True), min=1e-9)
-        attn = attn / norm
-        return torch.sum(attn.unsqueeze(-1) * x, dim=1)
-
-
-class NetVLADPool(nn.Module):
-    def __init__(self, in_dim: int, clusters: int = 8) -> None:
-        super().__init__()
-        self.in_dim = int(in_dim)
-        self.clusters = int(max(2, clusters))
-        self.assignment = nn.Linear(int(in_dim), int(self.clusters), bias=True)
-        self.centroids = nn.Parameter(torch.randn(int(self.clusters), int(in_dim), dtype=torch.float32) * 0.02)
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        logits = self.assignment(x)
-        logits = logits.masked_fill(~mask.unsqueeze(-1), -1e9)
-        assign = torch.softmax(logits, dim=2)
-        assign = assign * mask.to(dtype=x.dtype).unsqueeze(-1)
-        residual = x.unsqueeze(2) - self.centroids.view(1, 1, int(self.clusters), int(self.in_dim))
-        vlad = torch.sum(assign.unsqueeze(-1) * residual, dim=1)
-        vlad = F.normalize(vlad, p=2, dim=2)
-        vlad = vlad.reshape(x.shape[0], int(self.clusters) * int(self.in_dim))
-        return F.normalize(vlad, p=2, dim=1)
-
-
 class GraphEncoder(nn.Module):
     def __init__(
         self,
@@ -689,12 +638,8 @@ class GraphEncoder(nn.Module):
         hidden_dim: int,
         joint_dim: int,
         dropout_p: float,
-        pool_mode: str,
         bottleneck_dims: dict[str, int],
-        attention_hidden_dim: int,
-        attention_dropout: float,
         gem_p_init: dict[str, float],
-        netvlad_clusters: int,
         remote_gating: bool,
         bag_keep_rates: dict[str, float],
         projector_hidden_dim: int,
@@ -702,7 +647,6 @@ class GraphEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.dropout_p = float(dropout_p)
-        self.pool_mode = str(pool_mode)
         self.block_order = list(block_order)
         self.block_specs = {str(k): dict(v) for k, v in block_specs.items()}
         self.block_poolers = nn.ModuleDict()
@@ -716,20 +660,8 @@ class GraphEncoder(nn.Module):
             kind = str(spec["kind"])
             in_dim = int(spec["input_dim"])
             if kind == "bag":
-                if self.pool_mode == "mean_max":
-                    pooler = MeanMaxPool()
-                    pooled_dim = 2 * int(in_dim)
-                elif self.pool_mode == "attention":
-                    pooler = MaskedAttentionPool(in_dim=int(in_dim), attn_dim=int(max(1, attention_hidden_dim)), attn_dropout=float(attention_dropout))
-                    pooled_dim = int(in_dim)
-                elif self.pool_mode == "gem":
-                    pooler = SignedGeMPool(in_dim=int(in_dim), p_init=float(gem_p_init.get(name, gem_p_init.get("default", 3.0))))
-                    pooled_dim = int(in_dim)
-                elif self.pool_mode == "netvlad":
-                    pooler = NetVLADPool(in_dim=int(in_dim), clusters=int(netvlad_clusters))
-                    pooled_dim = int(in_dim) * int(netvlad_clusters)
-                else:
-                    raise ValueError(f"unsupported pool_mode={self.pool_mode!r}")
+                pooler = SignedGeMPool(in_dim=int(in_dim), p_init=float(gem_p_init.get(name, gem_p_init.get("default", 3.0))))
+                pooled_dim = int(in_dim)
                 self.block_poolers[name] = pooler
             else:
                 pooled_dim = int(in_dim)
@@ -742,7 +674,14 @@ class GraphEncoder(nn.Module):
                 total_in += int(pooled_dim)
             if str(name) != "admin":
                 self.remote_block_names.append(str(name))
-        total_remote = int(sum(int(self.block_projectors[name][1].out_features) if isinstance(self.block_projectors[name], nn.Sequential) else self.block_specs[name]["input_dim"] if str(self.block_specs[name]["kind"]) == "dense" else (2 * int(self.block_specs[name]["input_dim"]) if self.pool_mode == "mean_max" else int(self.block_specs[name]["input_dim"]) if self.pool_mode != "netvlad" else int(self.block_specs[name]["input_dim"]) * int(netvlad_clusters)) for name in self.remote_block_names))
+        total_remote = int(
+            sum(
+                int(self.block_projectors[name][1].out_features)
+                if isinstance(self.block_projectors[name], nn.Sequential)
+                else int(self.block_specs[name]["input_dim"])
+                for name in self.remote_block_names
+            )
+        )
         if self.remote_gating and total_remote > 0:
             gate_hidden = int(max(8, min(128, total_remote // 2 if total_remote >= 16 else total_remote)))
             self.remote_gate = nn.Sequential(nn.LayerNorm(int(total_remote)), nn.Linear(int(total_remote), int(gate_hidden)), nn.GELU(), nn.Linear(int(gate_hidden), int(total_remote)))
@@ -1099,12 +1038,8 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         hidden_dim=int(graph_cfg.hidden_dim),
         joint_dim=int(graph_cfg.joint_dim),
         dropout_p=float(graph_cfg.dropout),
-        pool_mode=str(graph_cfg.pool_mode),
         bottleneck_dims=bottleneck_dims,
-        attention_hidden_dim=int(graph_cfg.attention_hidden_dim),
-        attention_dropout=float(graph_cfg.attention_dropout),
         gem_p_init=resolve_gem_p_init_map(config),
-        netvlad_clusters=int(graph_cfg.netvlad_clusters),
         remote_gating=bool(graph_cfg.remote_gating),
         bag_keep_rates=resolve_bag_keep_rate_map(config),
         projector_hidden_dim=int(graph_cfg.projector_hidden_dim),

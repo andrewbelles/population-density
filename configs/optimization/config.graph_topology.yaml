@@ -1,0 +1,150 @@
+graph_config_path: configs/graph/config.topology.yaml
+nowcast_config_path: configs/nowcast/config.nowcast.yaml
+output_root: optimization/runs
+
+slice:
+  family_end_year: 2020
+  source_year: 2020
+
+study:
+  study_name: graph_topology_ablation
+  direction: maximize
+  n_trials: 400 
+  timeout_sec: 0
+  sampler_seed: 0
+  n_startup_trials: 8
+  gc_after_trial: true
+
+gl2:
+  enabled: false  
+  min_trials: 12
+  patience: 8
+  max_generalization_loss_pct: 0.50
+  min_relative_improvement_pct: 0.00
+
+up2:
+  enabled: true
+  successive_worsening_strips: 2
+  strip_length: 5
+
+objective:
+  model_key: huber
+  direct_modality: admin
+  weight_adjusted_global_delta: 0.70
+  weight_adjusted_hard_case_delta: 0.20
+  weight_low_top_k: 0.10
+  hard_case_quantile: 0.90
+  adjusted_global_scale_pct: 5.0
+  adjusted_hard_case_scale_pct: 5.0
+  center_low_top_k: true
+
+groups:
+  signal_modalities: [admin, viirs, s5p]
+  admin_modality: admin
+  include_full_signal: true
+  include_signal_only: true
+  include_remove_one: true
+  include_admin_only: false
+
+graph_overrides:
+  epochs: 120
+  device: cuda
+  write_knn_reference: false
+
+search_space:
+  hidden_dim:
+    type: int
+    low: 96
+    high: 224
+    step: 16
+  joint_dim:
+    type: int
+    low: 24
+    high: 64
+    step: 8
+  dropout:
+    type: float
+    low: 0.00
+    high: 0.08
+  temperature:
+    type: float
+    low: 0.05
+    high: 0.20
+  tau_graph:
+    type: float
+    low: 0.92
+    high: 1.00
+  w_pull:
+    type: float
+    low: 0.00
+    high: 0.10
+  beta_geo:
+    type: float
+    low: 0.05
+    high: 0.35
+  support_k:
+    type: int
+    low: 12
+    high: 36
+    step: 4
+  final_row_topk:
+    type: int
+    low: 6
+    high: 16
+    step: 2
+  knn_k:
+    type: int
+    low: 4
+    high: 12
+    step: 2
+  knn_bandwidth_k:
+    type: int
+    low: 4
+    high: 12
+    step: 2
+  mem_top_k:
+    type: int
+    low: 8
+    high: 16
+    step: 1
+  lr:
+    type: float
+    low: 0.0003
+    high: 0.0030
+    log: true
+  weight_decay:
+    type: float
+    low: 0.000001
+    high: 0.000100
+    log: true
+  projector_hidden_dim:
+    type: int
+    low: 64
+    high: 192
+    step: 32
+  projector_dim:
+    type: int
+    low: 32
+    high: 96
+    step: 16
+  barlow_lambda:
+    type: float
+    low: 0.001
+    high: 0.020
+    log: true
+  remote_gating:
+    type: bool
+  geo_residual_graph:
+    type: bool
+  mutual_knn:
+    type: bool
+  gem_p_init.viirs:
+    type: float
+    low: 2.0
+    high: 8.0
+    step: 0.5
+  gem_p_init.s5p:
+    type: float
+    low: 2.0
+    high: 8.0
+    step: 0.5

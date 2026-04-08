@@ -16,13 +16,13 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment, minimize
 from scipy.stats import norm, spearmanr
 from scipy.linalg import subspace_angles
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.kernel_ridge import KernelRidge
-from sklearn.linear_model import ElasticNet, HuberRegressor, Ridge
+from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.metrics import adjusted_rand_score
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances, manhattan_distances
 from sklearn.model_selection import GroupKFold
@@ -336,6 +336,19 @@ def weighted_std(x: np.ndarray, sample_weight: np.ndarray | None = None) -> floa
     mu = float(np.average(arr, weights=w))
     var = float(np.average((arr - mu) ** 2, weights=w))
     return float(np.sqrt(max(var, 0.0)))
+
+
+def robust_scale_estimate(x: np.ndarray) -> float:
+    arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    keep = np.isfinite(arr)
+    if not np.any(keep):
+        return 1.0
+    vals = arr[keep]
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    mad_scale = float(mad / 0.6744897501960817) if mad > 0.0 else 0.0
+    std_scale = float(np.std(vals, ddof=0)) if vals.size > 1 else 0.0
+    return float(max(mad_scale, std_scale, 1e-6))
 
 
 def gaussian_crps(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
@@ -760,6 +773,73 @@ def fit_elastic_net(
     return pred_te, sigma
 
 
+def _fit_asymmetric_huber_standardized(
+    Xtr_s: np.ndarray,
+    ytr_f: np.ndarray,
+    *,
+    model_cfg: DownstreamModelConfig,
+) -> tuple[np.ndarray, float, float]:
+    X = np.asarray(Xtr_s, dtype=np.float64)
+    y = np.asarray(ytr_f, dtype=np.float64).reshape(-1)
+    if X.ndim != 2:
+        raise ValueError("Xtr_s must be 2D")
+    if X.shape[0] != y.shape[0]:
+        raise ValueError("Xtr_s/ytr row mismatch")
+    n = int(max(1, X.shape[0]))
+    alpha = float(max(model_cfg.huber_alpha, 0.0))
+    epsilon = float(max(model_cfg.huber_epsilon, 1.0 + 1e-6))
+    asym = float(np.clip(model_cfg.huber_asymmetry, -4.0, 4.0))
+    pos_w = float(math.exp(0.5 * asym))
+    neg_w = float(math.exp(-0.5 * asym))
+    resid_scale = float(robust_scale_estimate(y))
+    ridge = Ridge(alpha=float(max(alpha, 1e-12)), fit_intercept=True)
+    ridge.fit(X, y)
+    theta0 = np.concatenate(
+        [
+            np.asarray(ridge.coef_, dtype=np.float64).reshape(-1),
+            np.asarray([float(ridge.intercept_)], dtype=np.float64),
+        ]
+    )
+
+    def objective_and_grad(theta: np.ndarray) -> tuple[float, np.ndarray]:
+        coef = np.asarray(theta[:-1], dtype=np.float64).reshape(-1)
+        intercept = float(theta[-1])
+        pred = np.asarray(X @ coef + intercept, dtype=np.float64)
+        resid = np.asarray(y - pred, dtype=np.float64)
+        u = resid / resid_scale
+        abs_u = np.abs(u)
+        quad = abs_u <= epsilon
+        loss_u = np.where(quad, 0.5 * np.square(u), epsilon * (abs_u - 0.5 * epsilon))
+        psi_u = np.where(quad, u, epsilon * np.sign(u))
+        sign_w = np.where(resid >= 0.0, pos_w, neg_w)
+        loss = float((resid_scale ** 2) * np.mean(sign_w * loss_u) + 0.5 * alpha * float(np.dot(coef, coef)))
+        grad_common = np.asarray(sign_w * (resid_scale * psi_u), dtype=np.float64)
+        grad_coef = np.asarray(-(X.T @ grad_common) / float(n) + alpha * coef, dtype=np.float64)
+        grad_intercept = float(-np.mean(grad_common))
+        grad = np.concatenate([grad_coef, np.asarray([grad_intercept], dtype=np.float64)])
+        return loss, grad
+
+    res = minimize(
+        fun=lambda th: objective_and_grad(np.asarray(th, dtype=np.float64))[0],
+        x0=np.asarray(theta0, dtype=np.float64),
+        jac=lambda th: objective_and_grad(np.asarray(th, dtype=np.float64))[1],
+        method="L-BFGS-B",
+        options={
+            "maxiter": int(model_cfg.huber_max_iter),
+            "ftol": float(max(model_cfg.huber_tol, 1e-12)),
+            "gtol": float(max(model_cfg.huber_tol, 1e-12)),
+        },
+    )
+    theta_hat = np.asarray(res.x if res.x is not None else theta0, dtype=np.float64)
+    if (not bool(res.success)) and np.isfinite(theta_hat).all():
+        LOGGER.debug("asymmetric huber optimization did not report success: status=%s message=%s", getattr(res, "status", None), getattr(res, "message", ""))
+    coef_hat = np.asarray(theta_hat[:-1], dtype=np.float64).reshape(-1)
+    intercept_hat = float(theta_hat[-1])
+    pred_tr = np.asarray(X @ coef_hat + intercept_hat, dtype=np.float64)
+    sigma_hat = max(float(weighted_std(y - pred_tr)), 1e-6)
+    return coef_hat, intercept_hat, sigma_hat
+
+
 def fit_huber(
     Xtr: np.ndarray,
     ytr: np.ndarray,
@@ -780,17 +860,8 @@ def fit_huber(
             seed=int(seed),
         )
     ytr_f = np.asarray(ytr, dtype=np.float64).reshape(-1)
-    mdl = HuberRegressor(
-        alpha=float(max(model_cfg.huber_alpha, 0.0)),
-        epsilon=float(max(model_cfg.huber_epsilon, 1.0 + 1e-6)),
-        max_iter=int(model_cfg.huber_max_iter),
-        tol=float(max(model_cfg.huber_tol, 1e-8)),
-        fit_intercept=True,
-    )
-    mdl.fit(Xtr_s, ytr_f)
-    pred_te = np.asarray(mdl.predict(Xte_s), dtype=np.float64).reshape(-1)
-    pred_tr = np.asarray(mdl.predict(Xtr_s), dtype=np.float64).reshape(-1)
-    sigma = max(float(getattr(mdl, "scale_", weighted_std(ytr_f - pred_tr))), 1e-6)
+    coef_hat, intercept_hat, sigma = _fit_asymmetric_huber_standardized(Xtr_s, ytr_f, model_cfg=model_cfg)
+    pred_te = np.asarray(np.asarray(Xte_s, dtype=np.float64) @ coef_hat.reshape(-1) + float(intercept_hat), dtype=np.float64).reshape(-1)
     return pred_te, sigma
 
 
@@ -835,32 +906,35 @@ def fit_linear_huber_state(
     Xtr: np.ndarray,
     ytr: np.ndarray,
     model_cfg: DownstreamModelConfig,
+    prestandardized: bool = False,
 ) -> LinearHuberState:
-    sc = StandardScaler()
-    Xtr_s = sc.fit_transform(np.asarray(Xtr, dtype=np.float64))
+    X = np.asarray(Xtr, dtype=np.float64)
+    if bool(prestandardized):
+        mean_ = np.zeros((X.shape[1],), dtype=np.float64)
+        scale_ = np.ones((X.shape[1],), dtype=np.float64)
+        Xtr_s = np.asarray(X, dtype=np.float64)
+    else:
+        sc = StandardScaler()
+        Xtr_s = sc.fit_transform(X)
+        mean_ = np.asarray(sc.mean_, dtype=np.float64)
+        scale_ = np.asarray(sc.scale_, dtype=np.float64)
     ytr_f = np.asarray(ytr, dtype=np.float64).reshape(-1)
-    mdl = HuberRegressor(
-        alpha=float(max(model_cfg.huber_alpha, 0.0)),
-        epsilon=float(max(model_cfg.huber_epsilon, 1.0 + 1e-6)),
-        max_iter=int(model_cfg.huber_max_iter),
-        tol=float(max(model_cfg.huber_tol, 1e-8)),
-        fit_intercept=True,
-    )
-    mdl.fit(Xtr_s, ytr_f)
-    pred_tr = np.asarray(mdl.predict(Xtr_s), dtype=np.float64).reshape(-1)
-    sigma = max(float(getattr(mdl, "scale_", weighted_std(ytr_f - pred_tr))), 1e-6)
+    coef_hat, intercept_hat, sigma = _fit_asymmetric_huber_standardized(Xtr_s, ytr_f, model_cfg=model_cfg)
     return LinearHuberState(
-        mean_=np.asarray(sc.mean_, dtype=np.float64),
-        scale_=np.asarray(sc.scale_, dtype=np.float64),
-        coef_=np.asarray(mdl.coef_, dtype=np.float64),
-        intercept_=float(mdl.intercept_),
+        mean_=mean_,
+        scale_=scale_,
+        coef_=np.asarray(coef_hat, dtype=np.float64),
+        intercept_=float(intercept_hat),
         sigma_=float(sigma),
     )
 
 
-def predict_linear_huber_state(*, state: LinearHuberState, Xte: np.ndarray) -> np.ndarray:
+def predict_linear_huber_state(*, state: LinearHuberState, Xte: np.ndarray, prestandardized: bool = False) -> np.ndarray:
     X = np.asarray(Xte, dtype=np.float64)
-    Xs = (X - state.mean_.reshape(1, -1)) / np.clip(state.scale_.reshape(1, -1), 1e-9, None)
+    if bool(prestandardized):
+        Xs = X
+    else:
+        Xs = (X - state.mean_.reshape(1, -1)) / np.clip(state.scale_.reshape(1, -1), 1e-9, None)
     return np.asarray(Xs @ state.coef_.reshape(-1) + float(state.intercept_), dtype=np.float64)
 
 
@@ -874,16 +948,26 @@ def fit_capped_huber_delta(
     X = np.asarray(Xcur, dtype=np.float64)
     y = np.asarray(delta_target, dtype=np.float64).reshape(-1)
     Xs = (X - base_state.mean_.reshape(1, -1)) / np.clip(base_state.scale_.reshape(1, -1), 1e-9, None)
-    mdl = HuberRegressor(
-        alpha=float(max(float(model_cfg.huber_alpha) * float(max(model_cfg.rolling_alpha_mult, 1e-9)), 0.0)),
-        epsilon=float(max(float(model_cfg.huber_epsilon), 1.0 + 1e-6)),
-        max_iter=int(model_cfg.huber_max_iter),
-        tol=float(max(float(model_cfg.huber_tol), 1e-8)),
-        fit_intercept=True,
+    delta_model_cfg = DownstreamModelConfig(
+        model=model_cfg.model,
+        kr_kernel=model_cfg.kr_kernel,
+        kr_gamma=model_cfg.kr_gamma,
+        kr_alpha=model_cfg.kr_alpha,
+        enet_alpha=model_cfg.enet_alpha,
+        enet_l1_ratio=model_cfg.enet_l1_ratio,
+        enet_max_iter=model_cfg.enet_max_iter,
+        enet_tol=model_cfg.enet_tol,
+        huber_alpha=float(max(float(model_cfg.huber_alpha) * float(max(model_cfg.rolling_alpha_mult, 1e-9)), 0.0)),
+        huber_epsilon=model_cfg.huber_epsilon,
+        huber_asymmetry=model_cfg.huber_asymmetry,
+        huber_max_iter=model_cfg.huber_max_iter,
+        huber_tol=model_cfg.huber_tol,
+        huber_kernelize=False,
+        rolling_online_update=model_cfg.rolling_online_update,
+        rolling_alpha_mult=model_cfg.rolling_alpha_mult,
+        rolling_weight_drift_frac=model_cfg.rolling_weight_drift_frac,
     )
-    mdl.fit(Xs, y)
-    delta_coef = np.asarray(mdl.coef_, dtype=np.float64).reshape(-1)
-    delta_intercept = float(mdl.intercept_)
+    delta_coef, delta_intercept, _delta_sigma = _fit_asymmetric_huber_standardized(Xs, y, model_cfg=delta_model_cfg)
     base_vec = np.concatenate([np.asarray(base_state.coef_, dtype=np.float64).reshape(-1), np.asarray([float(base_state.intercept_)], dtype=np.float64)])
     delta_vec = np.concatenate([delta_coef, np.asarray([delta_intercept], dtype=np.float64)])
     max_frac = float(max(model_cfg.rolling_weight_drift_frac, 0.0))
@@ -896,7 +980,7 @@ def fit_capped_huber_delta(
         delta_coef = np.asarray(delta_vec[:-1], dtype=np.float64)
         delta_intercept = float(delta_vec[-1])
     pred_tr = np.asarray(Xs @ delta_coef + delta_intercept, dtype=np.float64)
-    sigma = max(float(getattr(mdl, "scale_", weighted_std(y - pred_tr))), 1e-6)
+    sigma = max(float(weighted_std(y - pred_tr)), 1e-6)
     pred_all = np.asarray(Xs @ delta_coef + delta_intercept, dtype=np.float64)
     return pred_all, float(sigma)
 
@@ -914,6 +998,7 @@ def rolling_regularized_model_cfg(model_cfg: DownstreamModelConfig) -> Downstrea
         enet_tol=model_cfg.enet_tol,
         huber_alpha=float(max(0.0, model_cfg.huber_alpha * alpha_mult)),
         huber_epsilon=model_cfg.huber_epsilon,
+        huber_asymmetry=model_cfg.huber_asymmetry,
         huber_max_iter=model_cfg.huber_max_iter,
         huber_tol=model_cfg.huber_tol,
         huber_kernelize=model_cfg.huber_kernelize,

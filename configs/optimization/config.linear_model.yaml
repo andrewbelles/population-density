@@ -1,0 +1,51 @@
+graph_config_path: configs/graph/config.topology.yaml
+nowcast_config_path: configs/nowcast/config.nowcast.yaml
+graph_runs_root: optimization/runs
+output_root: optimization/runs
+
+study:
+  study_name: linear_model_ablation
+  direction: maximize
+  n_trials: 30
+  timeout_sec: 0
+  sampler_seed: 0
+  n_startup_trials: 8
+  gc_after_trial: true
+
+gl2:
+  enabled: false
+  min_trials: 12
+  patience: 8
+  max_generalization_loss_pct: 0.50
+  min_relative_improvement_pct: 0.00
+
+objective:
+  model_key: huber
+  direct_modality: admin
+  weight_adjusted_global_delta: 0.70
+  weight_adjusted_hard_case_delta: 0.20
+  weight_low_top_k: 0.10
+  hard_case_quantile: 0.90
+  adjusted_global_scale_pct: 5.0
+  adjusted_hard_case_scale_pct: 5.0
+  center_low_top_k: true
+
+search_space:
+  huber_alpha:
+    type: float
+    low: 0.00002
+    high: 0.00200
+    log: true
+  huber_epsilon:
+    type: float
+    low: 1.10
+    high: 1.80
+  huber_asymmetry:
+    type: float
+    low: -0.35
+    high: 0.35
+  huber_tol:
+    type: float
+    low: 0.000001
+    high: 0.000100
+    log: true

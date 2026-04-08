@@ -91,6 +91,7 @@ class DownstreamModelConfig:
     enet_tol: float
     huber_alpha: float
     huber_epsilon: float
+    huber_asymmetry: float
     huber_max_iter: int
     huber_tol: float
     huber_kernelize: bool
@@ -222,6 +223,7 @@ def _parse_downstream_model(section: dict[str, Any], *, model_key: str) -> Downs
         enet_tol=float(section.get("enet_tol", 1e-4)),
         huber_alpha=float(section.get("huber_alpha", 1e-4)),
         huber_epsilon=float(section.get("huber_epsilon", 1.35)),
+        huber_asymmetry=float(section.get("huber_asymmetry", 0.0)),
         huber_max_iter=int(section.get("huber_max_iter", 5000)),
         huber_tol=float(section.get("huber_tol", 1e-5)),
         huber_kernelize=bool(section.get("huber_kernelize", False)),

@@ -15,7 +15,6 @@ paths:
 
 graph:
   graph_tag_base: gsl_gem_viirs_s5p
-  pool_mode: gem
   graph_objective: barlow
   mem_top_k: 11
   block_pca_dim: 0
@@ -34,14 +33,11 @@ graph:
   lr: 0.001
   weight_decay: 0.00001
   geo_gamma: 1.0
-  attention_hidden_dim: 256
-  attention_dropout: 0.0
   projector_hidden_dim: 128
   projector_dim: 64
   barlow_lambda: 0.005
   spatial_negative_mining: false
   remote_gating: true
-  netvlad_clusters: 8
   geo_residual_graph: true
   mutual_knn: false
   degree_penalty: false
