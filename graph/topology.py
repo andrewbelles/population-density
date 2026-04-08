@@ -31,7 +31,7 @@ from manifold.data import load_county_coords
 
 
 LOGGER = logging.getLogger("graph.topology")
-GRAPH_POOL_MODE = "gem"
+GRAPH_POOL_MODE = "mean_max"
 
 
 @dataclass(slots=True)
@@ -608,25 +608,46 @@ def barlow_twins_loss(y1: torch.Tensor, y2: torch.Tensor, *, offdiag_lambda: flo
     return on_diag + float(offdiag_lambda) * off_diag
 
 
-class SignedGeMPool(nn.Module):
-    def __init__(self, in_dim: int, p_init: float = 3.0, eps: float = 1e-6) -> None:
+class MeanMaxPool(nn.Module):
+    def __init__(self, in_dim: int) -> None:
         super().__init__()
-        p0 = float(max(p_init, 1.05))
-        raw0 = math.log(math.exp(p0 - 1.0) - 1.0)
         self.in_dim = int(in_dim)
-        self.raw_p = nn.Parameter(torch.tensor(float(raw0), dtype=torch.float32))
-        self.eps = float(eps)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         m = mask.to(dtype=x.dtype).unsqueeze(-1)
         denom = torch.clamp(m.sum(dim=1), min=1.0)
         mean = torch.sum(m * x, dim=1) / denom
-        sign = torch.sign(mean)
-        p = 1.0 + F.softplus(self.raw_p)
-        x_mag = torch.clamp(torch.abs(x), min=self.eps)
-        x_pow = torch.pow(x_mag, p)
-        agg = torch.sum(m * x_pow, dim=1) / denom
-        return sign * torch.pow(torch.clamp(agg, min=self.eps), 1.0 / p)
+        masked_x = torch.where(mask.unsqueeze(-1), x, torch.full_like(x, -1e9))
+        maxv = torch.max(masked_x, dim=1).values
+        maxv = torch.where(torch.isfinite(maxv), maxv, torch.zeros_like(maxv))
+        return torch.cat([mean, maxv], dim=1)
+
+
+def cross_correlation_sq_penalty(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    if x.ndim != 2 or y.ndim != 2 or x.shape[0] != y.shape[0]:
+        raise ValueError("cross_correlation_sq_penalty expects [n,d] tensors with matching n")
+    zx = (x - x.mean(dim=0, keepdim=True)) / torch.clamp(x.std(dim=0, keepdim=True, unbiased=False), min=eps)
+    zy = (y - y.mean(dim=0, keepdim=True)) / torch.clamp(y.std(dim=0, keepdim=True, unbiased=False), min=eps)
+    c = torch.matmul(zx.T, zy) / float(max(int(x.shape[0]), 1))
+    return torch.mean(c ** 2)
+
+
+def cosine_alignment_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    if x.shape != y.shape:
+        raise ValueError("cosine_alignment_loss expects matching shapes")
+    return torch.mean(1.0 - torch.sum(F.normalize(x, dim=1) * F.normalize(y, dim=1), dim=1))
+
+
+def row_normalize_torch(w: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    rs = torch.clamp(torch.sum(w, dim=1, keepdim=True), min=float(eps))
+    return w / rs
+
+
+def current_fusion_weight_map(model: nn.Module) -> dict[str, float]:
+    if not isinstance(model, GraphEncoder):
+        return {}
+    weights = torch.softmax(model.graph_fusion_logits.detach(), dim=0).cpu().tolist()
+    return {str(name): float(weight) for name, weight in zip(model.component_order, weights)}
 
 
 class GraphEncoder(nn.Module):
@@ -637,10 +658,8 @@ class GraphEncoder(nn.Module):
         block_order: list[str],
         hidden_dim: int,
         joint_dim: int,
+        consensus_dim: int,
         dropout_p: float,
-        bottleneck_dims: dict[str, int],
-        gem_p_init: dict[str, float],
-        remote_gating: bool,
         bag_keep_rates: dict[str, float],
         projector_hidden_dim: int,
         projector_dim: int,
@@ -648,52 +667,50 @@ class GraphEncoder(nn.Module):
         super().__init__()
         self.dropout_p = float(dropout_p)
         self.block_order = list(block_order)
+        self.component_order = ["consensus", *self.block_order]
         self.block_specs = {str(k): dict(v) for k, v in block_specs.items()}
         self.block_poolers = nn.ModuleDict()
-        self.block_projectors = nn.ModuleDict()
-        self.remote_gating = bool(remote_gating)
+        self.block_norms = nn.ModuleDict()
+        self.complement_nets = nn.ModuleDict()
+        self.consensus_nets = nn.ModuleDict()
+        self.complement_projectors = nn.ModuleDict()
+        self.block_dims: dict[str, int] = {}
         self.bag_keep_rates = {str(k): float(min(max(v, 0.0), 1.0)) for k, v in dict(bag_keep_rates).items()}
-        self.remote_block_names: list[str] = []
-        total_in = 0
         for name in self.block_order:
             spec = dict(self.block_specs[name])
             kind = str(spec["kind"])
             in_dim = int(spec["input_dim"])
             if kind == "bag":
-                pooler = SignedGeMPool(in_dim=int(in_dim), p_init=float(gem_p_init.get(name, gem_p_init.get("default", 3.0))))
-                pooled_dim = int(in_dim)
+                pooler = MeanMaxPool(in_dim=int(in_dim))
+                pooled_dim = int(2 * in_dim)
                 self.block_poolers[name] = pooler
             else:
                 pooled_dim = int(in_dim)
-            out_dim = int(bottleneck_dims.get(name, 0))
-            if out_dim > 0 and out_dim != pooled_dim:
-                self.block_projectors[name] = nn.Sequential(nn.LayerNorm(int(pooled_dim)), nn.Linear(int(pooled_dim), int(out_dim)), nn.GELU())
-                total_in += int(out_dim)
-            else:
-                self.block_projectors[name] = nn.LayerNorm(int(pooled_dim))
-                total_in += int(pooled_dim)
-            if str(name) != "admin":
-                self.remote_block_names.append(str(name))
-        total_remote = int(
-            sum(
-                int(self.block_projectors[name][1].out_features)
-                if isinstance(self.block_projectors[name], nn.Sequential)
-                else int(self.block_specs[name]["input_dim"])
-                for name in self.remote_block_names
+            self.block_dims[name] = int(pooled_dim)
+            self.block_norms[name] = nn.LayerNorm(int(pooled_dim))
+            self.complement_nets[name] = nn.Sequential(
+                nn.Linear(int(pooled_dim), int(hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(hidden_dim), int(joint_dim)),
             )
-        )
-        if self.remote_gating and total_remote > 0:
-            gate_hidden = int(max(8, min(128, total_remote // 2 if total_remote >= 16 else total_remote)))
-            self.remote_gate = nn.Sequential(nn.LayerNorm(int(total_remote)), nn.Linear(int(total_remote), int(gate_hidden)), nn.GELU(), nn.Linear(int(gate_hidden), int(total_remote)))
-        else:
-            self.remote_gate = None
-        self.net = nn.Sequential(nn.LayerNorm(int(total_in)), nn.Linear(int(total_in), int(hidden_dim)), nn.GELU(), nn.Linear(int(hidden_dim), int(joint_dim)))
-        self.ssl_projector = nn.Sequential(
-            nn.LayerNorm(int(joint_dim)),
-            nn.Linear(int(joint_dim), int(max(1, projector_hidden_dim))),
+            self.consensus_nets[name] = nn.Sequential(
+                nn.Linear(int(pooled_dim), int(hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(hidden_dim), int(consensus_dim)),
+            )
+            self.complement_projectors[name] = nn.Sequential(
+                nn.LayerNorm(int(joint_dim)),
+                nn.Linear(int(joint_dim), int(max(1, projector_hidden_dim))),
+                nn.GELU(),
+                nn.Linear(int(max(1, projector_hidden_dim)), int(max(1, projector_dim))),
+            )
+        self.consensus_projector = nn.Sequential(
+            nn.LayerNorm(int(consensus_dim)),
+            nn.Linear(int(consensus_dim), int(max(1, projector_hidden_dim))),
             nn.GELU(),
             nn.Linear(int(max(1, projector_hidden_dim)), int(max(1, projector_dim))),
         )
+        self.graph_fusion_logits = nn.Parameter(torch.zeros((int(len(self.component_order)),), dtype=torch.float32))
 
     def _subsample_mask(self, mask: torch.Tensor, keep_rate: float) -> torch.Tensor:
         keep_prob = float(min(max(keep_rate, 0.0), 1.0))
@@ -729,50 +746,84 @@ class GraphEncoder(nn.Module):
 
     def extract_block_features(self, pack: dict[str, object]) -> dict[str, torch.Tensor]:
         pooled = self.pool_blocks(pack)
-        return {name: self.block_projectors[name](pooled[name]) for name in self.block_order}
+        return {name: self.block_norms[name](pooled[name]) for name in self.block_order}
 
-    def assemble_features(self, pack: dict[str, object]) -> torch.Tensor:
-        block_features = self.extract_block_features(pack)
-        if self.remote_gate is not None and self.remote_block_names:
-            remote_parts = [block_features[name] for name in self.remote_block_names if name in block_features]
-            if remote_parts:
-                remote_cat = torch.cat(remote_parts, dim=1)
-                remote_cat = remote_cat * torch.sigmoid(self.remote_gate(remote_cat))
-                split_sizes = [int(block_features[name].shape[1]) for name in self.remote_block_names if name in block_features]
-                split_parts = torch.split(remote_cat, split_sizes, dim=1)
-                remote_map = {name: part for name, part in zip([name for name in self.remote_block_names if name in block_features], split_parts)}
-                return torch.cat([remote_map.get(name, block_features[name]) if name in remote_map else block_features[name] for name in self.block_order], dim=1)
-        return torch.cat([block_features[name] for name in self.block_order], dim=1)
+    def _encode_from_features(self, block_features: dict[str, torch.Tensor]) -> dict[str, object]:
+        comp_raw = {name: self.complement_nets[name](block_features[name]) for name in self.block_order}
+        comp_z = {name: F.normalize(comp_raw[name], dim=1) for name in self.block_order}
+        consensus_raw_by_mod = {name: self.consensus_nets[name](block_features[name]) for name in self.block_order}
+        consensus_by_mod = {name: F.normalize(consensus_raw_by_mod[name], dim=1) for name in self.block_order}
+        consensus_stack = torch.stack([consensus_raw_by_mod[name] for name in self.block_order], dim=0)
+        consensus_raw = torch.mean(consensus_stack, dim=0)
+        consensus_z = F.normalize(consensus_raw, dim=1)
+        return {
+            "comp_raw": comp_raw,
+            "comp_z": comp_z,
+            "consensus_raw_by_mod": consensus_raw_by_mod,
+            "consensus_by_mod": consensus_by_mod,
+            "consensus_raw": consensus_raw,
+            "consensus_z": consensus_z,
+        }
+
+    def encode_graph_components(self, pack: dict[str, object]) -> dict[str, torch.Tensor]:
+        encoded = self._encode_from_features(self.extract_block_features(pack))
+        out = {"consensus": encoded["consensus_z"]}
+        out.update(encoded["comp_z"])
+        return out
+
+    def fusion_weights(self) -> torch.Tensor:
+        return torch.softmax(self.graph_fusion_logits, dim=0)
 
     def encode(self, pack: dict[str, object]) -> torch.Tensor:
-        return F.normalize(self.net(self.assemble_features(pack)), dim=1)
+        components = self.encode_graph_components(pack)
+        first = components[self.component_order[0]]
+        weights = self.fusion_weights().to(dtype=first.dtype, device=first.device)
+        fused_parts: list[torch.Tensor] = []
+        for idx, name in enumerate(self.component_order):
+            fused_parts.append(weights[idx] * components[name])
+        fused = torch.cat(fused_parts, dim=1)
+        return F.normalize(fused, dim=1)
 
-    def forward(self, pack: dict[str, object]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        h = self.assemble_features(pack)
-        z_raw = self.net(h)
-        z = F.normalize(z_raw, dim=1)
+    def forward(self, pack: dict[str, object]) -> dict[str, object]:
+        base_features = self.extract_block_features(pack)
+        base_encoded = self._encode_from_features(base_features)
         if self.training:
             aug_pack = self._augment_pack(pack)
-            h_aug = self.assemble_features(aug_pack)
+            aug_features = self.extract_block_features(aug_pack)
             if self.dropout_p > 0.0:
-                keep_prob = max(1e-6, 1.0 - float(self.dropout_p))
-                keep = (torch.rand_like(h_aug) < keep_prob).to(dtype=h_aug.dtype)
-                h_aug = (h_aug * keep) / keep_prob
+                aug_features = {name: F.dropout(aug_features[name], p=float(self.dropout_p), training=True) for name in self.block_order}
+            aug_encoded = self._encode_from_features(aug_features)
         else:
-            h_aug = h
-        z_aug_raw = self.net(h_aug)
-        z_aug = F.normalize(z_aug_raw, dim=1)
-        y = self.ssl_projector(z_raw)
-        y_aug = self.ssl_projector(z_aug_raw)
-        return z, z_aug, y, y_aug
-
-
-def resolve_gem_p_init_map(config: TopologyConfig) -> dict[str, float]:
-    out = {"default": 3.0}
-    for modality in config.modalities:
-        block_cfg = config.block_cfg(modality)
-        out[str(modality)] = float(block_cfg.gem_p_init)
-    return out
+            aug_encoded = {
+                "comp_raw": {name: base_encoded["comp_raw"][name] for name in self.block_order},
+                "comp_z": {name: base_encoded["comp_z"][name] for name in self.block_order},
+                "consensus_raw_by_mod": {name: base_encoded["consensus_raw_by_mod"][name] for name in self.block_order},
+                "consensus_by_mod": {name: base_encoded["consensus_by_mod"][name] for name in self.block_order},
+                "consensus_raw": base_encoded["consensus_raw"],
+                "consensus_z": base_encoded["consensus_z"],
+            }
+        comp_y = {name: self.complement_projectors[name](base_encoded["comp_raw"][name]) for name in self.block_order}
+        comp_y_aug = {name: self.complement_projectors[name](aug_encoded["comp_raw"][name]) for name in self.block_order}
+        consensus_y = self.consensus_projector(base_encoded["consensus_raw"])
+        consensus_y_aug = self.consensus_projector(aug_encoded["consensus_raw"])
+        return {
+            "comp_raw": base_encoded["comp_raw"],
+            "comp_z": base_encoded["comp_z"],
+            "comp_y": comp_y,
+            "comp_aug_raw": aug_encoded["comp_raw"],
+            "comp_aug_z": aug_encoded["comp_z"],
+            "comp_y_aug": comp_y_aug,
+            "consensus_raw_by_mod": base_encoded["consensus_raw_by_mod"],
+            "consensus_by_mod": base_encoded["consensus_by_mod"],
+            "consensus_raw": base_encoded["consensus_raw"],
+            "consensus_z": base_encoded["consensus_z"],
+            "consensus_y": consensus_y,
+            "consensus_aug_raw_by_mod": aug_encoded["consensus_raw_by_mod"],
+            "consensus_aug_by_mod": aug_encoded["consensus_by_mod"],
+            "consensus_aug_raw": aug_encoded["consensus_raw"],
+            "consensus_aug_z": aug_encoded["consensus_z"],
+            "consensus_y_aug": consensus_y_aug,
+        }
 
 
 def resolve_bag_keep_rate_map(config: TopologyConfig) -> dict[str, float]:
@@ -809,15 +860,52 @@ def build_soft_pre_adjacency_torch(z: torch.Tensor, *, support_mask: torch.Tenso
     return pre_w
 
 
-def degree_penalty_loss(z: torch.Tensor, *, support_mask: torch.Tensor, geo_penalty: torch.Tensor, tau_graph: float, beta_geo: float, geo_residual_graph: bool) -> torch.Tensor:
-    pre_w = build_soft_pre_adjacency_torch(z, support_mask=support_mask, geo_penalty=geo_penalty, tau_graph=tau_graph, beta_geo=beta_geo, geo_residual_graph=geo_residual_graph)
+def fuse_soft_pre_adjacency_torch(
+    modality_z: dict[str, torch.Tensor],
+    *,
+    fusion_weights: torch.Tensor,
+    block_order: list[str],
+    support_mask: torch.Tensor,
+    geo_penalty: torch.Tensor,
+    tau_graph: float,
+    beta_geo: float,
+    geo_residual_graph: bool,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    fused = None
+    pieces: dict[str, torch.Tensor] = {}
+    for idx, name in enumerate(block_order):
+        pre = build_soft_pre_adjacency_torch(
+            modality_z[name],
+            support_mask=support_mask,
+            geo_penalty=geo_penalty,
+            tau_graph=float(tau_graph),
+            beta_geo=float(beta_geo),
+            geo_residual_graph=bool(geo_residual_graph),
+        )
+        pieces[str(name)] = pre
+        term = fusion_weights[idx].to(dtype=pre.dtype, device=pre.device) * pre
+        fused = term if fused is None else (fused + term)
+    if fused is None:
+        raise ValueError("late-fusion adjacency requires at least one modality graph")
+    return fused, pieces
+
+
+def degree_penalty_from_pre_adjacency(pre_w: torch.Tensor) -> torch.Tensor:
     deg = torch.sum(pre_w, dim=1)
     deg_mu = torch.clamp(torch.mean(deg), min=1e-6)
     deg_rel = deg / deg_mu
     return torch.mean((deg_rel - 1.0) ** 2)
 
 
-def build_learned_adjacency(z: np.ndarray, *, support_mask: np.ndarray, geo_penalty: np.ndarray, tau_graph: float, beta_geo: float, final_row_topk: int, geo_residual_graph: bool = False, mutual_knn: bool = False) -> np.ndarray:
+def build_soft_pre_adjacency_numpy(
+    z: np.ndarray,
+    *,
+    support_mask: np.ndarray,
+    geo_penalty: np.ndarray,
+    tau_graph: float,
+    beta_geo: float,
+    geo_residual_graph: bool = False,
+) -> np.ndarray:
     z_arr = np.asarray(z, dtype=np.float64)
     support = np.asarray(support_mask, dtype=bool)
     geo = np.asarray(geo_penalty, dtype=np.float64)
@@ -845,6 +933,11 @@ def build_learned_adjacency(z: np.ndarray, *, support_mask: np.ndarray, geo_pena
         w = np.exp(np.where(np.isfinite(score), score - row_max, -1e9))
         w[~np.isfinite(w)] = 0.0
         np.fill_diagonal(w, 0.0)
+    return np.asarray(w, dtype=np.float64)
+
+
+def finalize_adjacency(w: np.ndarray, *, final_row_topk: int, mutual_knn: bool = False) -> np.ndarray:
+    w = np.asarray(w, dtype=np.float64)
     if int(final_row_topk) > 0 and int(final_row_topk) < int(w.shape[0] - 1):
         k = int(final_row_topk)
         work = w.copy()
@@ -862,13 +955,21 @@ def build_learned_adjacency(z: np.ndarray, *, support_mask: np.ndarray, geo_pena
     return w / rs
 
 
+def build_learned_adjacency(z: np.ndarray, *, support_mask: np.ndarray, geo_penalty: np.ndarray, tau_graph: float, beta_geo: float, final_row_topk: int, geo_residual_graph: bool = False, mutual_knn: bool = False) -> np.ndarray:
+    pre_w = build_soft_pre_adjacency_numpy(
+        z,
+        support_mask=support_mask,
+        geo_penalty=geo_penalty,
+        tau_graph=float(tau_graph),
+        beta_geo=float(beta_geo),
+        geo_residual_graph=bool(geo_residual_graph),
+    )
+    return finalize_adjacency(pre_w, final_row_topk=int(final_row_topk), mutual_knn=bool(mutual_knn))
+
+
 def extract_pool_stats(model: nn.Module) -> dict[str, float]:
-    stats: dict[str, float] = {}
-    for name, pooler in getattr(model, "block_poolers", {}).items():
-        if isinstance(pooler, SignedGeMPool):
-            p = 1.0 + F.softplus(pooler.raw_p.detach())
-            stats[f"gem_p_{name}"] = float(torch.mean(p).cpu().item())
-    return stats
+    weights = current_fusion_weight_map(model)
+    return {f"fusion_weight_{str(name)}": float(weight) for name, weight in weights.items()}
 
 
 def parquet_rows_for_family(input_parquet: Path, *, family_tag_name: str, source_year: int) -> pd.DataFrame:
@@ -1031,16 +1132,13 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
     support_mask_t = torch.as_tensor(np.asarray(support_mask, dtype=bool), dtype=torch.bool, device=device)
     dist_norm_t = torch.as_tensor(np.asarray(dist_norm, dtype=np.float32), dtype=torch.float32, device=device)
     geo_penalty_t = torch.as_tensor(np.asarray(geo_penalty, dtype=np.float32), dtype=torch.float32, device=device)
-    bottleneck_dims = {str(m): int(config.block_cfg(m).bottleneck_dim) for m in config.modalities if bool(config.block_cfg(m).enabled)}
     model = GraphEncoder(
         block_specs=dict(pack.block_specs),
         block_order=list(pack.block_order),
         hidden_dim=int(graph_cfg.hidden_dim),
         joint_dim=int(graph_cfg.joint_dim),
+        consensus_dim=int(graph_cfg.consensus_dim),
         dropout_p=float(graph_cfg.dropout),
-        bottleneck_dims=bottleneck_dims,
-        gem_p_init=resolve_gem_p_init_map(config),
-        remote_gating=bool(graph_cfg.remote_gating),
         bag_keep_rates=resolve_bag_keep_rate_map(config),
         projector_hidden_dim=int(graph_cfg.projector_hidden_dim),
         projector_dim=int(graph_cfg.projector_dim),
@@ -1051,41 +1149,108 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
     for epoch in range(int(graph_cfg.epochs)):
         model.train()
         opt.zero_grad(set_to_none=True)
-        z, z_aug, y_ssl, y_ssl_aug = model(pack_torch)
+        model_out = model(pack_torch)
+        ssl_terms: list[torch.Tensor] = []
+        pull_terms: list[torch.Tensor] = []
+        align_terms: list[torch.Tensor] = []
+        ortho_terms: list[torch.Tensor] = []
+        for name in model.block_order:
+            if str(graph_cfg.graph_objective).strip().lower() == "barlow":
+                ssl_term = barlow_twins_loss(model_out["comp_y"][name], model_out["comp_y_aug"][name], offdiag_lambda=float(graph_cfg.barlow_lambda))
+            else:
+                if bool(graph_cfg.spatial_negative_mining):
+                    ssl_term = spatial_nt_xent_loss(model_out["comp_y"][name], model_out["comp_y_aug"][name], temperature=float(graph_cfg.temperature), support_mask=support_mask_t, dist_norm=dist_norm_t)
+                else:
+                    ssl_term = nt_xent_loss(model_out["comp_y"][name], model_out["comp_y_aug"][name], temperature=float(graph_cfg.temperature))
+            ssl_terms.append(ssl_term)
+            pull = 1.0 - torch.sum(model_out["comp_z"][name] * model_out["comp_z"][name][pos_idx], dim=1)
+            pull_terms.append(torch.mean(pull))
+            align_terms.append(cosine_alignment_loss(model_out["consensus_by_mod"][name], model_out["consensus_z"]))
+            ortho_terms.append(cross_correlation_sq_penalty(model_out["comp_raw"][name], model_out["consensus_raw_by_mod"][name]))
+        loss_ssl = torch.mean(torch.stack(ssl_terms, dim=0))
         if str(graph_cfg.graph_objective).strip().lower() == "barlow":
-            loss_ssl = barlow_twins_loss(y_ssl, y_ssl_aug, offdiag_lambda=float(graph_cfg.barlow_lambda))
+            loss_consensus_ssl = barlow_twins_loss(model_out["consensus_y"], model_out["consensus_y_aug"], offdiag_lambda=float(graph_cfg.barlow_lambda))
         else:
             if bool(graph_cfg.spatial_negative_mining):
-                loss_ssl = spatial_nt_xent_loss(y_ssl, y_ssl_aug, temperature=float(graph_cfg.temperature), support_mask=support_mask_t, dist_norm=dist_norm_t)
+                loss_consensus_ssl = spatial_nt_xent_loss(model_out["consensus_y"], model_out["consensus_y_aug"], temperature=float(graph_cfg.temperature), support_mask=support_mask_t, dist_norm=dist_norm_t)
             else:
-                loss_ssl = nt_xent_loss(y_ssl, y_ssl_aug, temperature=float(graph_cfg.temperature))
-        pull = 1.0 - torch.sum(z * z[pos_idx], dim=1)
-        loss_pull = torch.mean(pull)
-        loss_deg = degree_penalty_loss(z, support_mask=support_mask_t, geo_penalty=geo_penalty_t, tau_graph=float(graph_cfg.tau_graph), beta_geo=float(graph_cfg.beta_geo), geo_residual_graph=bool(graph_cfg.geo_residual_graph)) if bool(graph_cfg.degree_penalty) else torch.zeros((), dtype=z.dtype, device=z.device)
-        loss = loss_ssl + float(graph_cfg.w_pull) * loss_pull + float(graph_cfg.degree_penalty_weight) * loss_deg
+                loss_consensus_ssl = nt_xent_loss(model_out["consensus_y"], model_out["consensus_y_aug"], temperature=float(graph_cfg.temperature))
+        cons_pull = 1.0 - torch.sum(model_out["consensus_z"] * model_out["consensus_z"][pos_idx], dim=1)
+        pull_terms.append(torch.mean(cons_pull))
+        loss_pull = torch.mean(torch.stack(pull_terms, dim=0))
+        loss_align = torch.mean(torch.stack(align_terms, dim=0))
+        loss_ortho = torch.mean(torch.stack(ortho_terms, dim=0))
+        graph_components = {"consensus": model_out["consensus_z"], **model_out["comp_z"]}
+        fused_pre_w, pre_pieces = fuse_soft_pre_adjacency_torch(
+            graph_components,
+            fusion_weights=model.fusion_weights(),
+            block_order=list(model.component_order),
+            support_mask=support_mask_t,
+            geo_penalty=geo_penalty_t,
+            tau_graph=float(graph_cfg.tau_graph),
+            beta_geo=float(graph_cfg.beta_geo),
+            geo_residual_graph=bool(graph_cfg.geo_residual_graph),
+        )
+        consensus_pre = row_normalize_torch(pre_pieces["consensus"])
+        graph_consensus_terms = [
+            torch.mean((row_normalize_torch(pre_pieces[name]) - consensus_pre) ** 2)
+            for name in model.block_order
+        ]
+        loss_graph_consensus = torch.mean(torch.stack(graph_consensus_terms, dim=0))
+        loss_deg = degree_penalty_from_pre_adjacency(fused_pre_w) if bool(graph_cfg.degree_penalty) else torch.zeros((), dtype=loss_ssl.dtype, device=loss_ssl.device)
+        loss = (
+            loss_ssl
+            + float(graph_cfg.consensus_ssl_weight) * loss_consensus_ssl
+            + float(graph_cfg.consensus_alignment_weight) * loss_align
+            + float(graph_cfg.complementary_orthogonality_weight) * loss_ortho
+            + float(graph_cfg.graph_consensus_weight) * loss_graph_consensus
+            + float(graph_cfg.w_pull) * loss_pull
+            + float(graph_cfg.degree_penalty_weight) * loss_deg
+        )
         loss.backward()
         opt.step()
         loss_val = float(loss.detach().cpu().item())
         if loss_val < best_loss:
             best_loss = float(loss_val)
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        LOGGER.debug("[graph epoch %03d] family=%d source=%d loss=%.6f ssl=%.6f pull=%.6f deg=%.6f", epoch, int(family_end_year), int(source_year), loss_val, float(loss_ssl.detach().cpu()), float(loss_pull.detach().cpu()), float(loss_deg.detach().cpu()))
+        LOGGER.debug(
+            "[graph epoch %03d] family=%d source=%d loss=%.6f comp_ssl=%.6f cons_ssl=%.6f align=%.6f ortho=%.6f graph_cons=%.6f pull=%.6f deg=%.6f",
+            epoch,
+            int(family_end_year),
+            int(source_year),
+            loss_val,
+            float(loss_ssl.detach().cpu()),
+            float(loss_consensus_ssl.detach().cpu()),
+            float(loss_align.detach().cpu()),
+            float(loss_ortho.detach().cpu()),
+            float(loss_graph_consensus.detach().cpu()),
+            float(loss_pull.detach().cpu()),
+            float(loss_deg.detach().cpu()),
+        )
     if best_state is not None:
         model.load_state_dict(best_state)
     pool_stats = extract_pool_stats(model)
     model.eval()
     with torch.no_grad():
+        component_z_final = model.encode_graph_components(pack_torch)
         z_final = np.asarray(model.encode(pack_torch).detach().cpu(), dtype=np.float64)
-    w_learn = build_learned_adjacency(
-        z_final,
-        support_mask=support_mask,
-        geo_penalty=geo_penalty,
-        tau_graph=float(graph_cfg.tau_graph),
-        beta_geo=float(graph_cfg.beta_geo),
-        final_row_topk=int(graph_cfg.final_row_topk),
-        geo_residual_graph=bool(graph_cfg.geo_residual_graph),
-        mutual_knn=bool(graph_cfg.mutual_knn),
-    )
+    fusion_weights = current_fusion_weight_map(model)
+    w_pre = None
+    for name in model.component_order:
+        z_mod = np.asarray(component_z_final[name].detach().cpu(), dtype=np.float64)
+        pre = build_soft_pre_adjacency_numpy(
+            z_mod,
+            support_mask=support_mask,
+            geo_penalty=geo_penalty,
+            tau_graph=float(graph_cfg.tau_graph),
+            beta_geo=float(graph_cfg.beta_geo),
+            geo_residual_graph=bool(graph_cfg.geo_residual_graph),
+        )
+        weight = float(fusion_weights.get(str(name), 0.0))
+        w_pre = weight * pre if w_pre is None else (w_pre + weight * pre)
+    if w_pre is None:
+        raise RuntimeError("late-fusion graph produced no modality adjacencies")
+    w_learn = finalize_adjacency(w_pre, final_row_topk=int(graph_cfg.final_row_topk), mutual_knn=bool(graph_cfg.mutual_knn))
     basis_row_topk = max(int(graph_cfg.support_k), int(graph_cfg.final_row_topk), 32)
     evals_learn, evecs_learn = build_moran_basis_fast(w_learn, top_k=int(graph_cfg.mem_top_k), row_topk=int(basis_row_topk))
     evals_knn, evecs_knn = build_moran_basis_fast(w_knn, top_k=int(graph_cfg.mem_top_k), row_topk=max(int(graph_cfg.knn_k), 32))

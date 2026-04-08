@@ -14,12 +14,13 @@ paths:
   edges_parquet: graph/data/topology_edges.parquet
 
 graph:
-  graph_tag_base: gsl_gem_viirs_s5p
+  graph_tag_base: gsl_meanmax_consensus_viirs_s5p
   graph_objective: barlow
   mem_top_k: 11
   block_pca_dim: 0
   hidden_dim: 144
   joint_dim: 40
+  consensus_dim: 40
   dropout: 0.016
   temperature: 0.123
   tau_graph: 0.983
@@ -36,8 +37,11 @@ graph:
   projector_hidden_dim: 128
   projector_dim: 64
   barlow_lambda: 0.005
+  consensus_ssl_weight: 1.0
+  consensus_alignment_weight: 0.10
+  complementary_orthogonality_weight: 0.05
+  graph_consensus_weight: 0.10
   spatial_negative_mining: false
-  remote_gating: true
   geo_residual_graph: true
   mutual_knn: false
   degree_penalty: false
@@ -51,15 +55,11 @@ viirs:
   kind: bag
   input_parquet: manifold/data/viirs_embeddings.parquet
   family_tag_base: byol_viirs24km32_flatrad
-  bottleneck_dim: 26
   bag_keep_rate: 0.75
-  gem_p_init: 4.0
 
 s5p:
   enabled: true 
   kind: bag
   input_parquet: manifold/data/s5p_embeddings.parquet
   family_tag_base: byol_nitrous24km32
-  bottleneck_dim: 22
   bag_keep_rate: 0.50
-  gem_p_init: 6.5

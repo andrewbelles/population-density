@@ -7,7 +7,7 @@ slice:
   source_year: 2020
 
 study:
-  study_name: graph_topology_ablation
+  study_name: graph_topology_consensus_ablation
   direction: maximize
   n_trials: 400 
   timeout_sec: 0
@@ -58,6 +58,11 @@ search_space:
     high: 224
     step: 16
   joint_dim:
+    type: int
+    low: 24
+    high: 64
+    step: 8
+  consensus_dim:
     type: int
     low: 24
     high: 64
@@ -132,19 +137,7 @@ search_space:
     low: 0.001
     high: 0.020
     log: true
-  remote_gating:
-    type: bool
   geo_residual_graph:
     type: bool
   mutual_knn:
     type: bool
-  gem_p_init.viirs:
-    type: float
-    low: 2.0
-    high: 8.0
-    step: 0.5
-  gem_p_init.s5p:
-    type: float
-    low: 2.0
-    high: 8.0
-    step: 0.5

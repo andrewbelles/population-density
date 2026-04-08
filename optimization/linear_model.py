@@ -69,7 +69,6 @@ class SavedGraphRun:
     source_year: int
     graph_overrides: dict[str, Any]
     graph_params: dict[str, Any]
-    modality_overrides: dict[str, dict[str, Any]]
     selected_mem_top_k: int
     payload: dict[str, Any]
 
@@ -185,11 +184,7 @@ def load_saved_graph_runs(
             graph_tag_base=str(payload["graph_tag_base"]).strip(),
             group_kinds=[str(x) for x in list(payload.get("group_kinds", []))],
         )
-        graph_params, modality_overrides = split_param_mapping(
-            params={str(k): v for k, v in dict(payload["best_trial"]["params"]).items()},
-            registry=registry,
-            included_modalities=list(group.modalities),
-        )
+        graph_params = split_param_mapping(params={str(k): v for k, v in dict(payload["best_trial"]["params"]).items()})
         selected_mem_top_k = int(payload["best_trial"].get("user_attrs", {}).get("selected_mem_top_k", 0))
         if selected_mem_top_k <= 0:
             raise ValueError(f"{path}: missing positive selected_mem_top_k in best_trial.user_attrs")
@@ -202,7 +197,6 @@ def load_saved_graph_runs(
                 source_year=int(payload["source_year"]),
                 graph_overrides={str(k): v for k, v in dict(payload.get("graph_overrides", {})).items()},
                 graph_params=graph_params,
-                modality_overrides=modality_overrides,
                 selected_mem_top_k=int(selected_mem_top_k),
                 payload=payload,
             )
@@ -227,7 +221,6 @@ def rebuild_best_artifact(
         registry,
         group=saved_run.group,
         graph_cfg=graph_cfg,
-        modality_overrides=saved_run.modality_overrides,
     )
     return train_graph_slice(
         trial_topology_cfg,

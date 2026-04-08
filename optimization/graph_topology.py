@@ -51,7 +51,7 @@ from optimization.common import (
 
 
 LOGGER = logging.getLogger("optimization.graph_topology")
-DEAD_GRAPH_FIELDS = {"pool_mode", "attention_hidden_dim", "attention_dropout", "netvlad_clusters"}
+DEAD_GRAPH_FIELDS = {"pool_mode", "attention_hidden_dim", "attention_dropout", "netvlad_clusters", "remote_gating"}
 
 
 @dataclass(slots=True)
@@ -186,12 +186,19 @@ def load_tune_config(path: str | Path) -> GraphTuneConfig:
     groups_raw = dict(_require(raw, "groups"))
     graph_overrides = dict(raw.get("graph_overrides", {}))
     search_space = {str(k): dict(v) for k, v in dict(raw.get("search_space", {})).items()}
+    graph_field_names = set(StageGraphConfig.__dataclass_fields__.keys())
     bad_search = sorted(DEAD_GRAPH_FIELDS.intersection(search_space))
     if bad_search:
         raise ValueError(f"graph topology tuner does not permit dead search dimensions: {bad_search}")
     bad_overrides = sorted(DEAD_GRAPH_FIELDS.intersection(graph_overrides))
     if bad_overrides:
         raise ValueError(f"graph topology tuner does not permit dead graph overrides: {bad_overrides}")
+    unknown_search = sorted(set(search_space) - graph_field_names)
+    if unknown_search:
+        raise ValueError(f"graph topology tuner search space contains unknown graph fields: {unknown_search}")
+    unknown_overrides = sorted(set(graph_overrides) - graph_field_names)
+    if unknown_overrides:
+        raise ValueError(f"graph topology tuner overrides contain unknown graph fields: {unknown_overrides}")
     return GraphTuneConfig(
         graph_config_path=_as_path(_require(raw, "graph_config_path")),
         nowcast_config_path=_as_path(_require(raw, "nowcast_config_path")),
@@ -252,9 +259,7 @@ def graph_modality_from_nowcast(mod_cfg: Any) -> GraphModalityConfig:
         kind=str(mod_cfg.kind).strip().lower(),
         input_parquet=Path(mod_cfg.input_parquet),
         family_tag_base=str(mod_cfg.family_tag_base),
-        bottleneck_dim=0,
         bag_keep_rate=1.0,
-        gem_p_init=3.0,
     )
 
 
@@ -286,7 +291,7 @@ def build_ablation_groups(base_graph_cfg: TopologyConfig, registry: dict[str, Gr
         if key in seen:
             groups[seen[key]].group_kinds.append(str(group_kind))
             return
-        tag_base = f"gsl_gem_{'_'.join(mods)}"
+        tag_base = f"gsl_meanmax_consensus_{'_'.join(mods)}"
         groups.append(AblationGroup(name=str(name), modalities=mods, graph_tag_base=tag_base, group_kinds=[str(group_kind)]))
         seen[key] = int(len(groups) - 1)
 
@@ -324,18 +329,8 @@ def build_trial_topology_config(
     *,
     group: AblationGroup,
     graph_cfg: StageGraphConfig,
-    modality_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> TopologyConfig:
     blocks = {str(k): copy.deepcopy(v) for k, v in registry.items()}
-    for modality, override_map in dict(modality_overrides or {}).items():
-        key = str(modality).strip().lower()
-        if key not in blocks:
-            continue
-        block = blocks[key]
-        for field, value in dict(override_map).items():
-            if not hasattr(block, str(field)):
-                raise ValueError(f"unknown modality override field={field!r} for {key!r}")
-            setattr(block, str(field), value)
     return TopologyConfig(
         years=base_graph_cfg.years,
         modalities=list(group.modalities),
@@ -348,42 +343,26 @@ def build_trial_topology_config(
 def split_param_mapping(
     *,
     params: dict[str, Any],
-    registry: dict[str, GraphModalityConfig],
-    included_modalities: list[str],
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+) -> dict[str, Any]:
     graph_params: dict[str, Any] = {}
-    modality_overrides: dict[str, dict[str, Any]] = {}
-    included = {str(m).strip().lower() for m in included_modalities}
     for raw_name, value in dict(params).items():
         name = str(raw_name)
         if name in DEAD_GRAPH_FIELDS:
             continue
-        if name.startswith("gem_p_init."):
-            modality = str(name.split(".", 1)[1]).strip().lower()
-            if modality not in included:
-                continue
-            if modality not in registry:
-                continue
-            if str(registry[modality].kind).strip().lower() != "bag":
-                continue
-            modality_overrides.setdefault(modality, {})["gem_p_init"] = float(value)
-            continue
         graph_params[name] = value
-    return graph_params, modality_overrides
+    return graph_params
 
 
 def split_trial_params(
     *,
     trial: optuna.trial.Trial,
     tune_cfg: GraphTuneConfig,
-    registry: dict[str, GraphModalityConfig],
-    group: AblationGroup,
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+) -> dict[str, Any]:
     sampled: dict[str, Any] = {}
     for raw_name, spec in tune_cfg.search_space.items():
         name = str(raw_name)
         sampled[name] = suggest_from_space(trial, name, dict(spec))
-    return split_param_mapping(params=sampled, registry=registry, included_modalities=list(group.modalities))
+    return split_param_mapping(params=sampled)
 
 
 def compute_topology_leakage_proxy_matrix(
@@ -778,12 +757,7 @@ def optimize_group(
     stopper = GL2StudyStopper(tune_cfg.gl2)
 
     def objective(trial: optuna.trial.Trial) -> float:
-        trial_params, modality_overrides = split_trial_params(
-            trial=trial,
-            tune_cfg=tune_cfg,
-            registry=registry,
-            group=group,
-        )
+        trial_params = split_trial_params(trial=trial, tune_cfg=tune_cfg)
         graph_cfg = apply_graph_params(
             base_graph_cfg.graph,
             overrides=tune_cfg.graph_overrides,
@@ -795,7 +769,6 @@ def optimize_group(
             registry,
             group=group,
             graph_cfg=graph_cfg,
-            modality_overrides=modality_overrides,
         )
         artifact = train_graph_slice(
             trial_topology_cfg,

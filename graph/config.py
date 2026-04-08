@@ -43,9 +43,7 @@ class ModalityConfig:
     kind: str
     input_parquet: Path
     family_tag_base: str
-    bottleneck_dim: int
     bag_keep_rate: float
-    gem_p_init: float
 
 
 @dataclass(slots=True)
@@ -56,6 +54,7 @@ class GraphConfig:
     block_pca_dim: int
     hidden_dim: int
     joint_dim: int
+    consensus_dim: int
     dropout: float
     temperature: float
     tau_graph: float
@@ -72,8 +71,11 @@ class GraphConfig:
     projector_hidden_dim: int
     projector_dim: int
     barlow_lambda: float
+    consensus_ssl_weight: float
+    consensus_alignment_weight: float
+    complementary_orthogonality_weight: float
+    graph_consensus_weight: float
     spatial_negative_mining: bool
-    remote_gating: bool
     geo_residual_graph: bool
     mutual_knn: bool
     degree_penalty: bool
@@ -132,20 +134,20 @@ def _parse_modality(section: dict[str, Any], name: str) -> ModalityConfig:
         kind=str(kind),
         input_parquet=_as_path(_require(section, "input_parquet")),
         family_tag_base=str(_require(section, "family_tag_base")),
-        bottleneck_dim=int(section.get("bottleneck_dim", 0)),
         bag_keep_rate=float(section.get("bag_keep_rate", 1.0)),
-        gem_p_init=float(section.get("gem_p_init", 3.0)),
     )
 
 
 def _parse_graph(section: dict[str, Any]) -> GraphConfig:
+    joint_dim = int(section.get("joint_dim", 40))
     return GraphConfig(
-        graph_tag_base=str(section.get("graph_tag_base", "gsl_topology")),
+        graph_tag_base=str(section.get("graph_tag_base", "gsl_meanmax_consensus")),
         graph_objective=str(section.get("graph_objective", "barlow")),
         mem_top_k=int(section.get("mem_top_k", 11)),
         block_pca_dim=int(section.get("block_pca_dim", 0)),
         hidden_dim=int(section.get("hidden_dim", 144)),
-        joint_dim=int(section.get("joint_dim", 40)),
+        joint_dim=joint_dim,
+        consensus_dim=int(section.get("consensus_dim", joint_dim)),
         dropout=float(section.get("dropout", 0.02)),
         temperature=float(section.get("temperature", 0.12)),
         tau_graph=float(section.get("tau_graph", 1.0)),
@@ -162,8 +164,11 @@ def _parse_graph(section: dict[str, Any]) -> GraphConfig:
         projector_hidden_dim=int(section.get("projector_hidden_dim", 128)),
         projector_dim=int(section.get("projector_dim", 64)),
         barlow_lambda=float(section.get("barlow_lambda", 5e-3)),
+        consensus_ssl_weight=float(section.get("consensus_ssl_weight", 1.0)),
+        consensus_alignment_weight=float(section.get("consensus_alignment_weight", 0.10)),
+        complementary_orthogonality_weight=float(section.get("complementary_orthogonality_weight", 0.05)),
+        graph_consensus_weight=float(section.get("graph_consensus_weight", 0.10)),
         spatial_negative_mining=bool(section.get("spatial_negative_mining", False)),
-        remote_gating=bool(section.get("remote_gating", True)),
         geo_residual_graph=bool(section.get("geo_residual_graph", True)),
         mutual_knn=bool(section.get("mutual_knn", False)),
         degree_penalty=bool(section.get("degree_penalty", False)),
