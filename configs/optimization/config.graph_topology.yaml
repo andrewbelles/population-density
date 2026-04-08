@@ -141,3 +141,19 @@ search_space:
     type: bool
   mutual_knn:
     type: bool
+  fusion_logit.consensus:
+    type: float
+    low: -1.5
+    high: 1.5
+  fusion_logit.admin:
+    type: float
+    low: -1.5
+    high: 1.5
+  fusion_logit.viirs:
+    type: float
+    low: -1.5
+    high: 1.5
+  fusion_logit.s5p:
+    type: float
+    low: -1.5
+    high: 1.5

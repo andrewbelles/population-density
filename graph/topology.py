@@ -643,6 +643,14 @@ def row_normalize_torch(w: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
     return w / rs
 
 
+def rowwise_cosine_graph_agreement_loss(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    if a.shape != b.shape:
+        raise ValueError("rowwise_cosine_graph_agreement_loss expects matching shapes")
+    an = F.normalize(a, p=2.0, dim=1, eps=float(eps))
+    bn = F.normalize(b, p=2.0, dim=1, eps=float(eps))
+    return torch.mean(1.0 - torch.sum(an * bn, dim=1))
+
+
 def current_fusion_weight_map(model: nn.Module) -> dict[str, float]:
     if not isinstance(model, GraphEncoder):
         return {}
@@ -659,6 +667,7 @@ class GraphEncoder(nn.Module):
         hidden_dim: int,
         joint_dim: int,
         consensus_dim: int,
+        fusion_logits: dict[str, float] | None,
         dropout_p: float,
         bag_keep_rates: dict[str, float],
         projector_hidden_dim: int,
@@ -710,7 +719,12 @@ class GraphEncoder(nn.Module):
             nn.GELU(),
             nn.Linear(int(max(1, projector_hidden_dim)), int(max(1, projector_dim))),
         )
-        self.graph_fusion_logits = nn.Parameter(torch.zeros((int(len(self.component_order)),), dtype=torch.float32))
+        fusion_logit_map = {str(k).strip().lower(): float(v) for k, v in dict(fusion_logits or {}).items()}
+        fusion_vec = torch.as_tensor(
+            [fusion_logit_map.get(str(name).strip().lower(), 0.0) for name in self.component_order],
+            dtype=torch.float32,
+        )
+        self.register_buffer("graph_fusion_logits", fusion_vec)
 
     def _subsample_mask(self, mask: torch.Tensor, keep_rate: float) -> torch.Tensor:
         keep_prob = float(min(max(keep_rate, 0.0), 1.0))
@@ -839,7 +853,9 @@ def build_graph_optimizer(model: nn.Module, *, lr: float, weight_decay: float) -
 
 
 def build_soft_pre_adjacency_torch(z: torch.Tensor, *, support_mask: torch.Tensor, geo_penalty: torch.Tensor, tau_graph: float, beta_geo: float, geo_residual_graph: bool) -> torch.Tensor:
-    dist_lat = torch.cdist(z, z, p=1.0)
+    z_norm = F.normalize(z, dim=1)
+    sim = torch.clamp(torch.matmul(z_norm, z_norm.T), min=-1.0, max=1.0)
+    dist_lat = 1.0 - sim
     lat_aff = torch.exp(-(dist_lat / float(max(tau_graph, 1e-6))))
     lat_aff = torch.where(support_mask, lat_aff, torch.zeros_like(lat_aff))
     lat_aff.fill_diagonal_(0.0)
@@ -909,7 +925,10 @@ def build_soft_pre_adjacency_numpy(
     z_arr = np.asarray(z, dtype=np.float64)
     support = np.asarray(support_mask, dtype=bool)
     geo = np.asarray(geo_penalty, dtype=np.float64)
-    dist_lat = np.sum(np.abs(z_arr[:, None, :] - z_arr[None, :, :]), axis=-1)
+    denom = np.clip(np.linalg.norm(z_arr, axis=1, keepdims=True), 1e-9, None)
+    z_norm = z_arr / denom
+    sim = np.clip(np.matmul(z_norm, z_norm.T), -1.0, 1.0)
+    dist_lat = 1.0 - sim
     lat_aff = np.exp(-(dist_lat / float(max(tau_graph, 1e-6))))
     lat_aff[~np.isfinite(lat_aff)] = 0.0
     lat_aff[~support] = 0.0
@@ -1138,6 +1157,7 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         hidden_dim=int(graph_cfg.hidden_dim),
         joint_dim=int(graph_cfg.joint_dim),
         consensus_dim=int(graph_cfg.consensus_dim),
+        fusion_logits=dict(graph_cfg.fusion_logits),
         dropout_p=float(graph_cfg.dropout),
         bag_keep_rates=resolve_bag_keep_rate_map(config),
         projector_hidden_dim=int(graph_cfg.projector_hidden_dim),
@@ -1193,7 +1213,7 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         )
         consensus_pre = row_normalize_torch(pre_pieces["consensus"])
         graph_consensus_terms = [
-            torch.mean((row_normalize_torch(pre_pieces[name]) - consensus_pre) ** 2)
+            rowwise_cosine_graph_agreement_loss(row_normalize_torch(pre_pieces[name]), consensus_pre)
             for name in model.block_order
         ]
         loss_graph_consensus = torch.mean(torch.stack(graph_consensus_terms, dim=0))

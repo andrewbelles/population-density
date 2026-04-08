@@ -50,6 +50,7 @@ class ModalityConfig:
 class GraphConfig:
     graph_tag_base: str
     graph_objective: str
+    fusion_logits: dict[str, float]
     mem_top_k: int
     block_pca_dim: int
     hidden_dim: int
@@ -143,6 +144,7 @@ def _parse_graph(section: dict[str, Any]) -> GraphConfig:
     return GraphConfig(
         graph_tag_base=str(section.get("graph_tag_base", "gsl_meanmax_consensus")),
         graph_objective=str(section.get("graph_objective", "barlow")),
+        fusion_logits={str(k).strip().lower(): float(v) for k, v in dict(section.get("fusion_logits", {})).items()},
         mem_top_k=int(section.get("mem_top_k", 11)),
         block_pca_dim=int(section.get("block_pca_dim", 0)),
         hidden_dim=int(section.get("hidden_dim", 144)),

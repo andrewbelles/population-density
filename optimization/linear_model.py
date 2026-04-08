@@ -184,7 +184,11 @@ def load_saved_graph_runs(
             graph_tag_base=str(payload["graph_tag_base"]).strip(),
             group_kinds=[str(x) for x in list(payload.get("group_kinds", []))],
         )
-        graph_params = split_param_mapping(params={str(k): v for k, v in dict(payload["best_trial"]["params"]).items()})
+        param_split = split_param_mapping(params={str(k): v for k, v in dict(payload["best_trial"]["params"]).items()})
+        graph_params = {
+            **dict(param_split["graph_params"]),
+            **{f"fusion_logit.{str(k)}": float(v) for k, v in dict(param_split["fusion_logits"]).items()},
+        }
         selected_mem_top_k = int(payload["best_trial"].get("user_attrs", {}).get("selected_mem_top_k", 0))
         if selected_mem_top_k <= 0:
             raise ValueError(f"{path}: missing positive selected_mem_top_k in best_trial.user_attrs")

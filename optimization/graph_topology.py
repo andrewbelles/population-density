@@ -52,6 +52,7 @@ from optimization.common import (
 
 LOGGER = logging.getLogger("optimization.graph_topology")
 DEAD_GRAPH_FIELDS = {"pool_mode", "attention_hidden_dim", "attention_dropout", "netvlad_clusters", "remote_gating"}
+FUSION_LOGIT_PREFIX = "fusion_logit."
 
 
 @dataclass(slots=True)
@@ -193,10 +194,18 @@ def load_tune_config(path: str | Path) -> GraphTuneConfig:
     bad_overrides = sorted(DEAD_GRAPH_FIELDS.intersection(graph_overrides))
     if bad_overrides:
         raise ValueError(f"graph topology tuner does not permit dead graph overrides: {bad_overrides}")
-    unknown_search = sorted(set(search_space) - graph_field_names)
+    unknown_search = sorted(
+        name
+        for name in set(search_space)
+        if (not str(name).startswith(FUSION_LOGIT_PREFIX)) and name not in graph_field_names
+    )
     if unknown_search:
         raise ValueError(f"graph topology tuner search space contains unknown graph fields: {unknown_search}")
-    unknown_overrides = sorted(set(graph_overrides) - graph_field_names)
+    unknown_overrides = sorted(
+        name
+        for name in set(graph_overrides)
+        if (not str(name).startswith(FUSION_LOGIT_PREFIX)) and name not in graph_field_names
+    )
     if unknown_overrides:
         raise ValueError(f"graph topology tuner overrides contain unknown graph fields: {unknown_overrides}")
     return GraphTuneConfig(
@@ -317,8 +326,14 @@ def apply_graph_params(base_graph: StageGraphConfig, *, overrides: dict[str, Any
         field: getattr(base_graph, field)
         for field in base_graph.__dataclass_fields__.keys()
     }
-    data.update({str(k): v for k, v in dict(overrides).items()})
-    data.update({str(k): v for k, v in dict(params).items()})
+    override_split = split_param_mapping(params=dict(overrides))
+    param_split = split_param_mapping(params=dict(params))
+    data.update({str(k): v for k, v in dict(override_split["graph_params"]).items()})
+    data.update({str(k): v for k, v in dict(param_split["graph_params"]).items()})
+    fusion_logits = {str(k): float(v) for k, v in dict(data.get("fusion_logits", getattr(base_graph, "fusion_logits", {}))).items()}
+    fusion_logits.update({str(k): float(v) for k, v in dict(override_split["fusion_logits"]).items()})
+    fusion_logits.update({str(k): float(v) for k, v in dict(param_split["fusion_logits"]).items()})
+    data["fusion_logits"] = fusion_logits
     data["graph_tag_base"] = str(graph_tag_base)
     return StageGraphConfig(**data)
 
@@ -343,26 +358,41 @@ def build_trial_topology_config(
 def split_param_mapping(
     *,
     params: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, dict[str, Any]]:
     graph_params: dict[str, Any] = {}
+    fusion_logits: dict[str, float] = {}
     for raw_name, value in dict(params).items():
         name = str(raw_name)
         if name in DEAD_GRAPH_FIELDS:
             continue
+        if str(name).startswith(FUSION_LOGIT_PREFIX):
+            component = str(name).split(".", 1)[1].strip().lower()
+            if component:
+                fusion_logits[str(component)] = float(value)
+            continue
         graph_params[name] = value
-    return graph_params
+    return {"graph_params": graph_params, "fusion_logits": fusion_logits}
 
 
 def split_trial_params(
     *,
     trial: optuna.trial.Trial,
     tune_cfg: GraphTuneConfig,
+    group: AblationGroup,
 ) -> dict[str, Any]:
     sampled: dict[str, Any] = {}
     for raw_name, spec in tune_cfg.search_space.items():
         name = str(raw_name)
+        if str(name).startswith(FUSION_LOGIT_PREFIX):
+            component = str(name).split(".", 1)[1].strip().lower()
+            if component != "consensus" and component not in set(group.modalities):
+                continue
         sampled[name] = suggest_from_space(trial, name, dict(spec))
-    return split_param_mapping(params=sampled)
+    split = split_param_mapping(params=sampled)
+    out = dict(split["graph_params"])
+    for component, value in dict(split["fusion_logits"]).items():
+        out[f"{FUSION_LOGIT_PREFIX}{component}"] = float(value)
+    return out
 
 
 def compute_topology_leakage_proxy_matrix(
@@ -757,7 +787,7 @@ def optimize_group(
     stopper = GL2StudyStopper(tune_cfg.gl2)
 
     def objective(trial: optuna.trial.Trial) -> float:
-        trial_params = split_trial_params(trial=trial, tune_cfg=tune_cfg)
+        trial_params = split_trial_params(trial=trial, tune_cfg=tune_cfg, group=group)
         graph_cfg = apply_graph_params(
             base_graph_cfg.graph,
             overrides=tune_cfg.graph_overrides,

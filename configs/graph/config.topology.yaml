@@ -16,6 +16,10 @@ paths:
 graph:
   graph_tag_base: gsl_meanmax_consensus_viirs_s5p
   graph_objective: barlow
+  fusion_logits:
+    consensus: 0.0
+    viirs: 0.0
+    s5p: 0.0
   mem_top_k: 11
   block_pca_dim: 0
   hidden_dim: 144
