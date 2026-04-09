@@ -35,12 +35,12 @@ Module-owned outputs live under the relevant module's `data/` folder. Most downs
 Each stage can be called as follows:
 
 ```bash
-python -m ingestion.ingest --config configs/ingestion/config.ingest.yaml
-python -m manifold.embeddings --config configs/manifold/config.embeddings.yaml
-python -m graph.topology --config configs/graph/config.topology.yaml
-python -m nowcast.censal --config configs/nowcast/config.nowcast.yaml
-python -m nowcast.postcensal --config configs/nowcast/config.nowcast.yaml
-python -m analysis.hypothesis --config configs/analysis/config.hypothesis.yaml
+python -m ingestion.ingest --config configs/ingestion/ingest.yaml
+python -m manifold.embeddings --config configs/manifold/embeddings.yaml
+python -m graph.topology --config configs/graph/topology.yaml
+python -m nowcast.censal --config configs/nowcast/nowcast.yaml
+python -m nowcast.postcensal --config configs/nowcast/nowcast.yaml
+python -m analysis.hypothesis --config configs/analysis/hypothesis.yaml
 ```
 
 ### Input Assumptions

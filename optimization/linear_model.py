@@ -389,7 +389,7 @@ def optimize_saved_run(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune downstream linear-model parameters on top of saved graph ablation runs.")
-    parser.add_argument("--config", type=Path, default=Path("configs/optimization/config.linear_model.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/optimization/linear_model.yaml"))
     parser.add_argument("--group", type=str, default="", help="optional single saved graph group name")
     parser.add_argument("--graph-tag", type=str, default="", help="optional single saved graph tag")
     parser.add_argument("--skip-existing", action=argparse.BooleanOptionalAction, default=True)

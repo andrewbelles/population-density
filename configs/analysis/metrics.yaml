@@ -1,5 +1,5 @@
 paths:
-  nowcast_config: configs/nowcast/config.nowcast.yaml
+  nowcast_config: configs/nowcast/nowcast.yaml
   output_root: analysis/artifacts/metrics
 
 comparison:

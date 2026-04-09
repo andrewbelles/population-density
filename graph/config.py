@@ -5,6 +5,7 @@
 # YAML contract loader for the graph topology stage.
 #
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -181,12 +182,64 @@ def _parse_graph(section: dict[str, Any]) -> GraphConfig:
     )
 
 
-def load_config(path: str | Path) -> TopologyConfig:
+def _read_yaml(path: str | Path) -> dict[str, Any]:
     config_path = _as_path(path)
     with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"config must be a mapping: {config_path}")
+    return dict(raw)
+
+
+def _apply_best_trial_overlay(raw: dict[str, Any], *, best_trial_json: str | Path) -> dict[str, Any]:
+    run_path = _as_path(best_trial_json)
+    with open(run_path, "r", encoding="utf-8") as f:
+        payload = json.load(f) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"optimization run JSON must be a mapping: {run_path}")
+    best_trial = dict(payload.get("best_trial") or {})
+    params = dict(best_trial.get("params") or {})
+    graph_overrides = dict(payload.get("graph_overrides") or {})
+    raw_out = dict(raw)
+
+    modalities = [str(x).strip().lower() for x in list(payload.get("modalities") or []) if str(x).strip()]
+    if modalities:
+        raw_out["modalities"] = modalities
+        missing = [m for m in modalities if m not in raw_out]
+        if missing:
+            raise KeyError(f"{run_path}: base graph config is missing modality section(s): {missing}")
+
+    graph_section = dict(raw_out.get("graph") or {})
+    if "graph_tag_base" in payload and str(payload["graph_tag_base"]).strip():
+        graph_section["graph_tag_base"] = str(payload["graph_tag_base"]).strip()
+
+    fusion_logits = {
+        str(k).strip().lower(): float(v)
+        for k, v in dict(graph_section.get("fusion_logits", {})).items()
+        if str(k).strip()
+    }
+
+    for source in (graph_overrides, params):
+        for raw_key, value in dict(source).items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            if key.startswith("fusion_logit."):
+                component = str(key).split(".", 1)[1].strip().lower()
+                if component:
+                    fusion_logits[component] = float(value)
+                continue
+            graph_section[key] = value
+
+    if fusion_logits:
+        graph_section["fusion_logits"] = fusion_logits
+    raw_out["graph"] = graph_section
+    return raw_out
+
+
+def _parse_topology(raw: dict[str, Any]) -> TopologyConfig:
+    if not isinstance(raw, dict):
+        raise ValueError("config must be a mapping")
 
     years_raw = dict(_require(raw, "years"))
     years = YearRange(start=int(_require(years_raw, "start")), end=int(_require(years_raw, "end")))
@@ -209,3 +262,10 @@ def load_config(path: str | Path) -> TopologyConfig:
         graph=_parse_graph(dict(_require(raw, "graph"))),
         blocks=blocks,
     )
+
+
+def load_config(path: str | Path, *, best_trial_json: str | Path | None = None) -> TopologyConfig:
+    raw = _read_yaml(path)
+    if best_trial_json is not None:
+        raw = _apply_best_trial_overlay(raw, best_trial_json=best_trial_json)
+    return _parse_topology(raw)

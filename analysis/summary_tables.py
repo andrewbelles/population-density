@@ -14,7 +14,7 @@ from analysis.shared import build_leakage_adjusted_summary_table, write_frame
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Write leakage-adjusted summary tables from nowcast runtime outputs.")
-    parser.add_argument("--config", type=Path, default=Path("configs/analysis/config.hypothesis.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/analysis/hypothesis.yaml"))
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
 

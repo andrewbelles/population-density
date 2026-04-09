@@ -157,7 +157,7 @@ def _repo_root(config_path: Path) -> Path:
     return config_path.resolve().parent.parent.parent
 
 
-def load_analysis_config(config_path: str | Path = "configs/analysis/config.hypothesis.yaml") -> HypothesisAnalysisConfig:
+def load_analysis_config(config_path: str | Path = "configs/analysis/hypothesis.yaml") -> HypothesisAnalysisConfig:
     cfg_path = Path(str(config_path)).expanduser()
     raw = _read_yaml(cfg_path)
     repo_root = _repo_root(cfg_path)
@@ -169,7 +169,7 @@ def load_analysis_config(config_path: str | Path = "configs/analysis/config.hypo
     safety_cfg = dict(raw.get("safety", {}))
     visualization_cfg = dict(raw.get("visualization", {}))
 
-    nowcast_cfg_path = _resolve_input(repo_root, paths_cfg.get("nowcast_config", "configs/nowcast/config.nowcast.yaml"))
+    nowcast_cfg_path = _resolve_input(repo_root, paths_cfg.get("nowcast_config", "configs/nowcast/nowcast.yaml"))
     nowcast_cfg = load_nowcast_config(nowcast_cfg_path)
     output_root = _resolve_input(repo_root, paths_cfg.get("output_root", "analysis/artifacts/hypothesis"))
     nowcast_root = _resolve_input(repo_root, paths_cfg.get("nowcast_root", nowcast_cfg.paths.outputs.root))
@@ -251,7 +251,7 @@ def load_analysis_config(config_path: str | Path = "configs/analysis/config.hypo
     )
 
 
-def load_analysis_bundle(config_path: str | Path = "configs/analysis/config.hypothesis.yaml") -> AnalysisBundle:
+def load_analysis_bundle(config_path: str | Path = "configs/analysis/hypothesis.yaml") -> AnalysisBundle:
     cfg = load_analysis_config(config_path)
     nowcast_cfg = load_nowcast_config(cfg.paths.nowcast_config)
     county_lookup = load_county_display_lookup(nowcast_cfg.paths.county_shapefile)

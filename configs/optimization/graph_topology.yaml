@@ -1,5 +1,5 @@
-graph_config_path: configs/graph/config.topology.yaml
-nowcast_config_path: configs/nowcast/config.nowcast.yaml
+graph_config_path: configs/graph/topology.yaml
+nowcast_config_path: configs/nowcast/nowcast.yaml
 output_root: optimization/runs
 
 slice:
@@ -9,7 +9,7 @@ slice:
 study:
   study_name: graph_topology_consensus_ablation
   direction: maximize
-  n_trials: 400 
+  n_trials: 200 
   timeout_sec: 0
   sampler_seed: 0
   n_startup_trials: 8
@@ -41,7 +41,7 @@ objective:
 groups:
   signal_modalities: [admin, viirs, s5p]
   admin_modality: admin
-  include_full_signal: true
+  include_full_signal: false  
   include_signal_only: true
   include_remove_one: true
   include_admin_only: false

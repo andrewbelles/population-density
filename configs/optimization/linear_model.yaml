@@ -1,12 +1,12 @@
-graph_config_path: configs/graph/config.topology.yaml
-nowcast_config_path: configs/nowcast/config.nowcast.yaml
+graph_config_path: configs/graph/topology.yaml
+nowcast_config_path: configs/nowcast/nowcast.yaml
 graph_runs_root: optimization/runs
 output_root: optimization/runs
 
 study:
   study_name: linear_model_ablation
   direction: maximize
-  n_trials: 30
+  n_trials: 300 
   timeout_sec: 0
   sampler_seed: 0
   n_startup_trials: 8

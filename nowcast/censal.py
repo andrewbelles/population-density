@@ -524,7 +524,7 @@ def log_strict_summary(result: StrictResult) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Strict 2020 censal evaluation against PEP using parquet-native artifacts.")
-    parser.add_argument("--config", type=Path, default=Path("configs/nowcast/config.nowcast.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/nowcast/nowcast.yaml"))
     parser.add_argument("--model-key", type=str, default="", help="override downstream.selected")
     parser.add_argument("--skip", action=argparse.BooleanOptionalAction, default=False, help="skip if summary parquet already exists")
     parser.add_argument("--log-level", type=str, default="INFO")

@@ -54,6 +54,12 @@ graph:
   seed: 0
   write_knn_reference: true
 
+admin:
+  enabled: true
+  kind: dense
+  input_parquet: manifold/data/admin_embeddings.parquet
+  family_tag_base: tabdae_vime8
+
 viirs:
   enabled: true
   kind: bag

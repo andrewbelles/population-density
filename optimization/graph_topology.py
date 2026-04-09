@@ -927,7 +927,7 @@ def optimize_group(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune graph topology ablations against strict admin+MEM downstream performance.")
-    parser.add_argument("--config", type=Path, default=Path("configs/optimization/config.graph_topology.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/optimization/graph_topology.yaml"))
     parser.add_argument("--group", type=str, default="", help="optional single ablation group name")
     parser.add_argument("--skip-existing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--log-level", type=str, default="INFO")

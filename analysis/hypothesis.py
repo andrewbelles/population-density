@@ -317,7 +317,7 @@ def run_hypothesis_tests(bundle: AnalysisBundle) -> tuple[pd.DataFrame, pd.DataF
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run meaningful-improvement and safety hypothesis tests on nowcast parquet outputs.")
-    parser.add_argument("--config", type=Path, default=Path("configs/analysis/config.hypothesis.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/analysis/hypothesis.yaml"))
     parser.add_argument("--skip", action=argparse.BooleanOptionalAction, default=False, help="skip if hypothesis result parquet already exists")
     parser.add_argument("--log-level", type=str, default="INFO")
     return parser.parse_args()

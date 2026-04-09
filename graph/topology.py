@@ -70,6 +70,9 @@ class TrainedGraphArtifact:
     evecs_knn: np.ndarray
     block_dims: dict[str, int]
     pool_stats: dict[str, float]
+    fusion_weights: dict[str, float]
+    component_embeddings: dict[str, np.ndarray]
+    component_pre_degree: dict[str, np.ndarray]
     graph_loss: float
 
 
@@ -1218,9 +1221,14 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         component_z_final = model.encode_graph_components(pack_torch)
         z_final = np.asarray(model.encode(pack_torch).detach().cpu(), dtype=np.float64)
     fusion_weights = current_fusion_weight_map(model)
+    component_embeddings = {
+        str(name): np.asarray(component_z_final[name].detach().cpu(), dtype=np.float64)
+        for name in model.component_order
+    }
+    component_pre_degree: dict[str, np.ndarray] = {}
     w_pre = None
     for name in model.component_order:
-        z_mod = np.asarray(component_z_final[name].detach().cpu(), dtype=np.float64)
+        z_mod = np.asarray(component_embeddings[name], dtype=np.float64)
         pre = build_soft_pre_adjacency_numpy(
             z_mod,
             support_mask=support_mask,
@@ -1229,6 +1237,7 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
             beta_geo=float(graph_cfg.beta_geo),
             geo_residual_graph=bool(graph_cfg.geo_residual_graph),
         )
+        component_pre_degree[str(name)] = np.asarray(np.sum(pre, axis=1), dtype=np.float64)
         weight = float(fusion_weights.get(str(name), 0.0))
         w_pre = weight * pre if w_pre is None else (w_pre + weight * pre)
     if w_pre is None:
@@ -1249,6 +1258,9 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         evecs_knn=np.asarray(evecs_knn, dtype=np.float64),
         block_dims=dict(pack.block_dims),
         pool_stats=dict(pool_stats),
+        fusion_weights=dict(fusion_weights),
+        component_embeddings={str(k): np.asarray(v, dtype=np.float64) for k, v in component_embeddings.items()},
+        component_pre_degree={str(k): np.asarray(v, dtype=np.float64) for k, v in component_pre_degree.items()},
         graph_loss=float(best_loss),
     )
 
@@ -1272,7 +1284,10 @@ def save_checkpoint(config: TopologyConfig, *, family_end_year: int, source_year
             "z": np.asarray(artifact.z, dtype=np.float32),
             "graph_loss": float(artifact.graph_loss),
             "pool_stats": dict(artifact.pool_stats),
+            "fusion_weights": dict(artifact.fusion_weights),
             "block_dims": dict(artifact.block_dims),
+            "component_embeddings": {str(k): np.asarray(v, dtype=np.float32) for k, v in artifact.component_embeddings.items()},
+            "component_pre_degree": {str(k): np.asarray(v, dtype=np.float32) for k, v in artifact.component_pre_degree.items()},
         },
         path,
     )
@@ -1412,6 +1427,7 @@ def run(config: TopologyConfig, *, skip_existing: bool = False, family_end_year:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Learn county graph topologies from manifold parquet embeddings.")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--best-trial-json", type=str, default=None)
     parser.add_argument("--family-end-year", type=int, default=None)
     parser.add_argument("--source-year", type=int, default=None)
     parser.add_argument("--skip", "--skip-existing", dest="skip_existing", action="store_true")
@@ -1422,7 +1438,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_logging(str(args.log_level))
-    config = load_config(args.config)
+    config = load_config(args.config, best_trial_json=args.best_trial_json)
     run(
         config,
         skip_existing=bool(args.skip_existing),

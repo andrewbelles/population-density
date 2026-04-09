@@ -1,0 +1,16 @@
+graph_config_path: configs/graph/topology.yaml
+county_shapefile: ingestion/metadata/geography/county_shapefile/tl_2020_us_county.shp
+output_dir: graph/images
+
+graph:
+  graph_tag_base: gsl_meanmax_consensus_viirs_s5p
+  family_end_year: 2020
+  source_year: 2020
+
+plots:
+  hypersphere_alignment: true
+  mem_clusters: true
+  dominant_modality: true
+
+mem_basis_top_k: 8
+mem_cluster_k: 8
