@@ -643,14 +643,6 @@ def row_normalize_torch(w: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
     return w / rs
 
 
-def rowwise_cosine_graph_agreement_loss(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
-    if a.shape != b.shape:
-        raise ValueError("rowwise_cosine_graph_agreement_loss expects matching shapes")
-    an = F.normalize(a, p=2.0, dim=1, eps=float(eps))
-    bn = F.normalize(b, p=2.0, dim=1, eps=float(eps))
-    return torch.mean(1.0 - torch.sum(an * bn, dim=1))
-
-
 def current_fusion_weight_map(model: nn.Module) -> dict[str, float]:
     if not isinstance(model, GraphEncoder):
         return {}
@@ -669,12 +661,14 @@ class GraphEncoder(nn.Module):
         consensus_dim: int,
         fusion_logits: dict[str, float] | None,
         dropout_p: float,
+        dense_noise_std: float,
         bag_keep_rates: dict[str, float],
         projector_hidden_dim: int,
         projector_dim: int,
     ) -> None:
         super().__init__()
         self.dropout_p = float(dropout_p)
+        self.dense_noise_std = float(max(dense_noise_std, 0.0))
         self.block_order = list(block_order)
         self.component_order = ["consensus", *self.block_order]
         self.block_specs = {str(k): dict(v) for k, v in block_specs.items()}
@@ -745,7 +739,10 @@ class GraphEncoder(nn.Module):
             if str(block["kind"]) == "bag":
                 blocks_out[name] = {"kind": "bag", "x": block["x"], "mask": self._subsample_mask(block["mask"], float(self.bag_keep_rates.get(name, self.bag_keep_rates.get("default", 1.0))))}
             else:
-                blocks_out[name] = {"kind": "dense", "x": block["x"]}
+                x = block["x"]
+                if self.training and float(self.dense_noise_std) > 0.0:
+                    x = x + float(self.dense_noise_std) * torch.randn_like(x)
+                blocks_out[name] = {"kind": "dense", "x": x}
         return {"blocks": blocks_out, "block_order": list(pack["block_order"]), "block_specs": dict(pack["block_specs"])}
 
     def pool_blocks(self, pack: dict[str, object]) -> dict[str, torch.Tensor]:
@@ -856,17 +853,6 @@ def build_soft_pre_adjacency_torch(z: torch.Tensor, *, support_mask: torch.Tenso
     z_norm = F.normalize(z, dim=1)
     sim = torch.clamp(torch.matmul(z_norm, z_norm.T), min=-1.0, max=1.0)
     dist_lat = 1.0 - sim
-    lat_aff = torch.exp(-(dist_lat / float(max(tau_graph, 1e-6))))
-    lat_aff = torch.where(support_mask, lat_aff, torch.zeros_like(lat_aff))
-    lat_aff.fill_diagonal_(0.0)
-    if bool(geo_residual_graph):
-        geo_score = -float(beta_geo) * geo_penalty
-        geo_score = torch.where(support_mask, geo_score, torch.full_like(geo_score, -1e9))
-        geo_score.fill_diagonal_(-1e9)
-        geo_w = torch.softmax(geo_score, dim=1)
-        geo_w = torch.where(torch.isfinite(geo_w), geo_w, torch.zeros_like(geo_w))
-        geo_w.fill_diagonal_(0.0)
-        return geo_w * (1.0 + lat_aff)
     score = -(dist_lat / float(max(tau_graph, 1e-6))) - float(beta_geo) * geo_penalty
     score = torch.where(support_mask, score, torch.full_like(score, -1e9))
     score.fill_diagonal_(-1e9)
@@ -929,29 +915,13 @@ def build_soft_pre_adjacency_numpy(
     z_norm = z_arr / denom
     sim = np.clip(np.matmul(z_norm, z_norm.T), -1.0, 1.0)
     dist_lat = 1.0 - sim
-    lat_aff = np.exp(-(dist_lat / float(max(tau_graph, 1e-6))))
-    lat_aff[~np.isfinite(lat_aff)] = 0.0
-    lat_aff[~support] = 0.0
-    np.fill_diagonal(lat_aff, 0.0)
-    if bool(geo_residual_graph):
-        geo_score = -float(beta_geo) * geo
-        geo_score[~support] = -np.inf
-        np.fill_diagonal(geo_score, -np.inf)
-        geo_row_max = np.max(np.where(np.isfinite(geo_score), geo_score, -1e9), axis=1, keepdims=True)
-        geo_w = np.exp(np.where(np.isfinite(geo_score), geo_score - geo_row_max, -1e9))
-        geo_w[~np.isfinite(geo_w)] = 0.0
-        np.fill_diagonal(geo_w, 0.0)
-        geo_rs = np.clip(geo_w.sum(axis=1, keepdims=True), 1e-9, None)
-        geo_w = geo_w / geo_rs
-        w = geo_w * (1.0 + lat_aff)
-    else:
-        score = -(dist_lat / float(max(tau_graph, 1e-6))) - float(beta_geo) * geo
-        score[~support] = -np.inf
-        np.fill_diagonal(score, -np.inf)
-        row_max = np.max(np.where(np.isfinite(score), score, -1e9), axis=1, keepdims=True)
-        w = np.exp(np.where(np.isfinite(score), score - row_max, -1e9))
-        w[~np.isfinite(w)] = 0.0
-        np.fill_diagonal(w, 0.0)
+    score = -(dist_lat / float(max(tau_graph, 1e-6))) - float(beta_geo) * geo
+    score[~support] = -np.inf
+    np.fill_diagonal(score, -np.inf)
+    row_max = np.max(np.where(np.isfinite(score), score, -1e9), axis=1, keepdims=True)
+    w = np.exp(np.where(np.isfinite(score), score - row_max, -1e9))
+    w[~np.isfinite(w)] = 0.0
+    np.fill_diagonal(w, 0.0)
     return np.asarray(w, dtype=np.float64)
 
 
@@ -1159,6 +1129,7 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         consensus_dim=int(graph_cfg.consensus_dim),
         fusion_logits=dict(graph_cfg.fusion_logits),
         dropout_p=float(graph_cfg.dropout),
+        dense_noise_std=float(graph_cfg.dense_noise_std),
         bag_keep_rates=resolve_bag_keep_rate_map(config),
         projector_hidden_dim=int(graph_cfg.projector_hidden_dim),
         projector_dim=int(graph_cfg.projector_dim),
@@ -1201,7 +1172,7 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
         loss_align = torch.mean(torch.stack(align_terms, dim=0))
         loss_ortho = torch.mean(torch.stack(ortho_terms, dim=0))
         graph_components = {"consensus": model_out["consensus_z"], **model_out["comp_z"]}
-        fused_pre_w, pre_pieces = fuse_soft_pre_adjacency_torch(
+        fused_pre_w, _pre_pieces = fuse_soft_pre_adjacency_torch(
             graph_components,
             fusion_weights=model.fusion_weights(),
             block_order=list(model.component_order),
@@ -1211,19 +1182,12 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
             beta_geo=float(graph_cfg.beta_geo),
             geo_residual_graph=bool(graph_cfg.geo_residual_graph),
         )
-        consensus_pre = row_normalize_torch(pre_pieces["consensus"])
-        graph_consensus_terms = [
-            rowwise_cosine_graph_agreement_loss(row_normalize_torch(pre_pieces[name]), consensus_pre)
-            for name in model.block_order
-        ]
-        loss_graph_consensus = torch.mean(torch.stack(graph_consensus_terms, dim=0))
         loss_deg = degree_penalty_from_pre_adjacency(fused_pre_w) if bool(graph_cfg.degree_penalty) else torch.zeros((), dtype=loss_ssl.dtype, device=loss_ssl.device)
         loss = (
             loss_ssl
             + float(graph_cfg.consensus_ssl_weight) * loss_consensus_ssl
             + float(graph_cfg.consensus_alignment_weight) * loss_align
             + float(graph_cfg.complementary_orthogonality_weight) * loss_ortho
-            + float(graph_cfg.graph_consensus_weight) * loss_graph_consensus
             + float(graph_cfg.w_pull) * loss_pull
             + float(graph_cfg.degree_penalty_weight) * loss_deg
         )
@@ -1234,7 +1198,7 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
             best_loss = float(loss_val)
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         LOGGER.debug(
-            "[graph epoch %03d] family=%d source=%d loss=%.6f comp_ssl=%.6f cons_ssl=%.6f align=%.6f ortho=%.6f graph_cons=%.6f pull=%.6f deg=%.6f",
+            "[graph epoch %03d] family=%d source=%d loss=%.6f comp_ssl=%.6f cons_ssl=%.6f align=%.6f ortho=%.6f pull=%.6f deg=%.6f",
             epoch,
             int(family_end_year),
             int(source_year),
@@ -1243,7 +1207,6 @@ def train_graph_slice(config: TopologyConfig, *, family_end_year: int, source_ye
             float(loss_consensus_ssl.detach().cpu()),
             float(loss_align.detach().cpu()),
             float(loss_ortho.detach().cpu()),
-            float(loss_graph_consensus.detach().cpu()),
             float(loss_pull.detach().cpu()),
             float(loss_deg.detach().cpu()),
         )

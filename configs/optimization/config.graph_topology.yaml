@@ -137,8 +137,6 @@ search_space:
     low: 0.001
     high: 0.020
     log: true
-  geo_residual_graph:
-    type: bool
   mutual_knn:
     type: bool
   fusion_logit.consensus:

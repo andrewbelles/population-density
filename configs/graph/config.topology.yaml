@@ -44,9 +44,9 @@ graph:
   consensus_ssl_weight: 1.0
   consensus_alignment_weight: 0.10
   complementary_orthogonality_weight: 0.05
-  graph_consensus_weight: 0.10
+  dense_noise_std: 0.05
   spatial_negative_mining: false
-  geo_residual_graph: true
+  geo_residual_graph: false
   mutual_knn: false
   degree_penalty: false
   degree_penalty_weight: 0.05

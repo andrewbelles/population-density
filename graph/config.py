@@ -75,7 +75,7 @@ class GraphConfig:
     consensus_ssl_weight: float
     consensus_alignment_weight: float
     complementary_orthogonality_weight: float
-    graph_consensus_weight: float
+    dense_noise_std: float
     spatial_negative_mining: bool
     geo_residual_graph: bool
     mutual_knn: bool
@@ -169,9 +169,9 @@ def _parse_graph(section: dict[str, Any]) -> GraphConfig:
         consensus_ssl_weight=float(section.get("consensus_ssl_weight", 1.0)),
         consensus_alignment_weight=float(section.get("consensus_alignment_weight", 0.10)),
         complementary_orthogonality_weight=float(section.get("complementary_orthogonality_weight", 0.05)),
-        graph_consensus_weight=float(section.get("graph_consensus_weight", 0.10)),
+        dense_noise_std=float(section.get("dense_noise_std", 0.05)),
         spatial_negative_mining=bool(section.get("spatial_negative_mining", False)),
-        geo_residual_graph=bool(section.get("geo_residual_graph", True)),
+        geo_residual_graph=bool(section.get("geo_residual_graph", False)),
         mutual_knn=bool(section.get("mutual_knn", False)),
         degree_penalty=bool(section.get("degree_penalty", False)),
         degree_penalty_weight=float(section.get("degree_penalty_weight", 0.05)),
