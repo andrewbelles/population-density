@@ -140,6 +140,8 @@ def build_censal_metrics_table(bundle: AnalysisBundle) -> pd.DataFrame:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Write compact censal metrics tables from canonical nowcast outputs.")
     parser.add_argument("--config", type=Path, default=Path("configs/analysis/metrics.yaml"))
+    parser.add_argument("--graph-best-trial-json", type=Path, default=None)
+    parser.add_argument("--linear-best-trial-json", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--log-level", type=str, default="INFO")
     return parser.parse_args()
@@ -148,7 +150,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_logging(args.log_level)
-    bundle = load_analysis_bundle(args.config)
+    bundle = load_analysis_bundle(
+        args.config,
+        graph_best_trial_json=args.graph_best_trial_json,
+        linear_best_trial_json=args.linear_best_trial_json,
+    )
     table = build_censal_metrics_table(bundle)
     output = args.output if args.output is not None else (bundle.config.paths.output_root / "censal_metrics.parquet")
     write_frame(table, output)

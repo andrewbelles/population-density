@@ -1,0 +1,27 @@
+analysis_config_path: configs/analysis/hypothesis.yaml
+nowcast_config_path: configs/nowcast/nowcast.yaml
+graph_config_path: configs/graph/topology.yaml
+output_root: analysis/artifacts/final_compare
+
+baseline_model: pep
+treatment_model: embeddings_mem
+materialize_graphs: true
+
+postcensal:
+  enabled: false
+
+runs:
+  - key: admin
+    label: Admin
+    graph_best_trial_json: optimization/runs/gsl_meanmax_consensus_admin_y2020_nowcast_source_2020.json
+    linear_best_trial_json: optimization/runs/linear_model__gsl_meanmax_consensus_admin_y2020_nowcast_source_2020.json
+
+  - key: remote
+    label: VIIRS + S5P
+    graph_best_trial_json: optimization/runs/gsl_meanmax_consensus_viirs_s5p_y2020_nowcast_source_2020.json
+    linear_best_trial_json: optimization/runs/linear_model__gsl_meanmax_consensus_viirs_s5p_y2020_nowcast_source_2020.json
+
+  - key: full
+    label: Admin + VIIRS + S5P
+    graph_best_trial_json: optimization/runs/gsl_meanmax_consensus_admin_viirs_s5p_y2020_nowcast_source_2020.json
+    linear_best_trial_json: optimization/runs/linear_model__gsl_meanmax_consensus_admin_viirs_s5p_y2020_nowcast_source_2020.json

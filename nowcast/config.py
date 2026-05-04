@@ -5,6 +5,7 @@
 # YAML contract loader for parquet-native censal and postcensal nowcast runs.
 #
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -261,12 +262,81 @@ def _parse_analysis(section: dict[str, Any], *, outputs: OutputPaths) -> Analysi
     )
 
 
-def load_config(path: str | Path) -> NowcastConfig:
+def _read_yaml(path: str | Path) -> dict[str, Any]:
     config_path = _as_path(path)
     with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"config must be a mapping: {config_path}")
+    return dict(raw)
+
+
+def _read_json(path: str | Path) -> dict[str, Any]:
+    json_path = _as_path(path)
+    with open(json_path, "r", encoding="utf-8") as f:
+        raw = json.load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"optimizer JSON must be a mapping: {json_path}")
+    return dict(raw)
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _apply_graph_best_overlay(raw: dict[str, Any], *, graph_best_trial_json: str | Path) -> dict[str, Any]:
+    payload = _read_json(graph_best_trial_json)
+    out = dict(raw)
+    graph_section = dict(out.get("graph") or {})
+    if str(payload.get("graph_tag_base", "")).strip():
+        graph_section["graph_tag_base"] = str(payload["graph_tag_base"]).strip()
+    best_trial = dict(payload.get("best_trial") or {})
+    user_attrs = dict(best_trial.get("user_attrs") or {})
+    params = dict(best_trial.get("params") or {})
+    mem_top_k = (
+        _positive_int_or_none(user_attrs.get("selected_mem_top_k"))
+        or _positive_int_or_none(params.get("mem_top_k"))
+        or _positive_int_or_none(payload.get("selected_mem_top_k"))
+    )
+    if mem_top_k is not None:
+        graph_section["mem_top_k"] = int(mem_top_k)
+    out["graph"] = graph_section
+    return out
+
+
+def _apply_linear_best_overlay(raw: dict[str, Any], *, linear_best_trial_json: str | Path) -> dict[str, Any]:
+    payload = _read_json(linear_best_trial_json)
+    out = dict(raw)
+
+    graph_section = dict(out.get("graph") or {})
+    if str(payload.get("graph_tag_base", "")).strip():
+        graph_section["graph_tag_base"] = str(payload["graph_tag_base"]).strip()
+    mem_top_k = _positive_int_or_none(payload.get("fixed_mem_top_k"))
+    if mem_top_k is not None:
+        graph_section["mem_top_k"] = int(mem_top_k)
+    out["graph"] = graph_section
+
+    downstream = dict(out.get("downstream") or {})
+    objective = dict(payload.get("objective") or {})
+    model_key = str(objective.get("model_key", downstream.get("selected", "huber"))).strip().lower()
+    if model_key:
+        downstream["selected"] = model_key
+        model_section = dict(downstream.get(model_key) or {})
+        params = dict(dict(payload.get("best_trial") or {}).get("params") or {})
+        for key, value in params.items():
+            model_section[str(key)] = value
+        downstream[model_key] = model_section
+    out["downstream"] = downstream
+    return out
+
+
+def _parse_nowcast(raw: dict[str, Any]) -> NowcastConfig:
+    if not isinstance(raw, dict):
+        raise ValueError("config must be a mapping")
 
     years_raw = dict(_require(raw, "years"))
     years = YearRange(start=int(_require(years_raw, "start")), end=int(_require(years_raw, "end")))
@@ -298,3 +368,17 @@ def load_config(path: str | Path) -> NowcastConfig:
         analysis=analysis,
         blocks=blocks,
     )
+
+
+def load_config(
+    path: str | Path,
+    *,
+    graph_best_trial_json: str | Path | None = None,
+    linear_best_trial_json: str | Path | None = None,
+) -> NowcastConfig:
+    raw = _read_yaml(path)
+    if graph_best_trial_json is not None:
+        raw = _apply_graph_best_overlay(raw, graph_best_trial_json=graph_best_trial_json)
+    if linear_best_trial_json is not None:
+        raw = _apply_linear_best_overlay(raw, linear_best_trial_json=linear_best_trial_json)
+    return _parse_nowcast(raw)

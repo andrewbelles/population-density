@@ -41,7 +41,7 @@ objective:
 groups:
   signal_modalities: [admin, viirs, s5p]
   admin_modality: admin
-  include_full_signal: false  
+  include_full_signal: true  
   include_signal_only: true
   include_remove_one: true
   include_admin_only: false

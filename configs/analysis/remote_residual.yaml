@@ -1,0 +1,19 @@
+nowcast_config_path: configs/nowcast/nowcast.yaml
+graph_config_path: configs/graph/topology.yaml
+output_root: analysis/artifacts/remote_residual
+
+linear_best_trial_json:
+materialize_graphs: true
+
+strict_year: 2020
+direct_modality: admin
+model_key: huber
+hard_case_quantile: 0.90
+
+graphs:
+  admin:
+    graph_best_trial_json: optimization/runs/gsl_meanmax_consensus_admin_y2020_nowcast_source_2020.json
+  remote:
+    graph_best_trial_json: optimization/runs/gsl_meanmax_consensus_viirs_s5p_y2020_nowcast_source_2020.json
+  full:
+    graph_best_trial_json: optimization/runs/gsl_meanmax_consensus_admin_viirs_s5p_y2020_nowcast_source_2020.json

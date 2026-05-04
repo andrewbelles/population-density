@@ -157,7 +157,12 @@ def _repo_root(config_path: Path) -> Path:
     return config_path.resolve().parent.parent.parent
 
 
-def load_analysis_config(config_path: str | Path = "configs/analysis/hypothesis.yaml") -> HypothesisAnalysisConfig:
+def load_analysis_config(
+    config_path: str | Path = "configs/analysis/hypothesis.yaml",
+    *,
+    graph_best_trial_json: str | Path | None = None,
+    linear_best_trial_json: str | Path | None = None,
+) -> HypothesisAnalysisConfig:
     cfg_path = Path(str(config_path)).expanduser()
     raw = _read_yaml(cfg_path)
     repo_root = _repo_root(cfg_path)
@@ -170,7 +175,11 @@ def load_analysis_config(config_path: str | Path = "configs/analysis/hypothesis.
     visualization_cfg = dict(raw.get("visualization", {}))
 
     nowcast_cfg_path = _resolve_input(repo_root, paths_cfg.get("nowcast_config", "configs/nowcast/nowcast.yaml"))
-    nowcast_cfg = load_nowcast_config(nowcast_cfg_path)
+    nowcast_cfg = load_nowcast_config(
+        nowcast_cfg_path,
+        graph_best_trial_json=graph_best_trial_json,
+        linear_best_trial_json=linear_best_trial_json,
+    )
     output_root = _resolve_input(repo_root, paths_cfg.get("output_root", "analysis/artifacts/hypothesis"))
     nowcast_root = _resolve_input(repo_root, paths_cfg.get("nowcast_root", nowcast_cfg.paths.outputs.root))
     default_treatment = str(comparison_cfg.get("treatment_model", nowcast_cfg.downstream.selected)).strip().lower()
@@ -251,9 +260,22 @@ def load_analysis_config(config_path: str | Path = "configs/analysis/hypothesis.
     )
 
 
-def load_analysis_bundle(config_path: str | Path = "configs/analysis/hypothesis.yaml") -> AnalysisBundle:
-    cfg = load_analysis_config(config_path)
-    nowcast_cfg = load_nowcast_config(cfg.paths.nowcast_config)
+def load_analysis_bundle(
+    config_path: str | Path = "configs/analysis/hypothesis.yaml",
+    *,
+    graph_best_trial_json: str | Path | None = None,
+    linear_best_trial_json: str | Path | None = None,
+) -> AnalysisBundle:
+    cfg = load_analysis_config(
+        config_path,
+        graph_best_trial_json=graph_best_trial_json,
+        linear_best_trial_json=linear_best_trial_json,
+    )
+    nowcast_cfg = load_nowcast_config(
+        cfg.paths.nowcast_config,
+        graph_best_trial_json=graph_best_trial_json,
+        linear_best_trial_json=linear_best_trial_json,
+    )
     county_lookup = load_county_display_lookup(nowcast_cfg.paths.county_shapefile)
     return AnalysisBundle(
         config=cfg,
