@@ -1,0 +1,73 @@
+paths:
+  output_dir: synthetic/artifacts/rare_instance
+  image_dir: synthetic/images/rare_instance
+
+run:
+  seed: 7
+  n_trials: 1
+  trial_seed_stride: 100000
+  log_level: INFO
+
+data:
+  n_bags: 1000
+  instance_dim: 32
+  latent_dim: 2
+  bag_poisson_lambda: 32.0
+  bag_size_offset: 16
+  min_bag_size: 16
+  max_bag_size: 72
+
+latent:
+  residual_direction: [1.0, -1.0]
+  baseline_direction: [2.0, 1.0]
+  sine_amplitude: 0.25
+  sine_frequency: 2.0
+  gamma_residual: 0.35
+  residual_noise: 0.20
+  baseline_noise: 0.25
+
+instances:
+  p_min: 0.02
+  p_max: 0.08
+  p_distractor: 0.05
+  gamma_instance: 1.0
+  background_state_scale: 0.25
+  instance_noise_scale: 1.0
+
+pooling:
+  pool_strategies: [mean, max, meanmax, top_frac, oracle_signal]
+  top_frac: 0.10
+
+graph:
+  knn_k: 12
+  mem_k: 16
+  learned_graph_enabled: true
+  learned_graph_pool: meanmax
+  learned_graph_hidden_dim: 64
+  learned_graph_latent_dim: 12
+  learned_graph_projector_hidden_dim: 64
+  learned_graph_projector_dim: 32
+  learned_graph_keep_rate: 0.75
+  learned_graph_epochs: 350
+  learned_graph_lr: 0.001
+  learned_graph_weight_decay: 0.0001
+  learned_graph_activation: gelu
+  learned_graph_barlow_lambda: 0.005
+  learned_graph_device: auto
+
+evaluation:
+  splitter: kfold
+  n_folds: 5
+  n_repeats: 5
+  train_frac: 0.70
+  alpha_min_log10: -4.0
+  alpha_max_log10: 4.0
+  alpha_count: 17
+
+plots:
+  edge_plot_graphs: [oracle_latent, meanmax_knn, learned_gsl, random]
+  edge_plot_max_edges: 900
+  error_plot_top_n: 12
+  mem_graph_plot_top_n: 12
+  print_top_n: 16
+  no_plots: false
