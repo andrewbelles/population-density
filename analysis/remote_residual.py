@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from analysis.shared import write_frame
+from analysis.common import write_frame
 from graph.config import load_config as load_graph_config
 from graph.topology import run as run_graph_topology
 from nowcast.common import (

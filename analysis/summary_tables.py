@@ -9,7 +9,7 @@ import argparse
 from pathlib import Path
 
 from analysis.loaders import load_analysis_bundle
-from analysis.shared import build_leakage_adjusted_summary_table, write_frame
+from analysis.common import build_leakage_adjusted_summary_table, write_frame
 
 
 def parse_args() -> argparse.Namespace:

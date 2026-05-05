@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.loaders import AnalysisBundle, load_analysis_bundle
-from analysis.shared import write_frame
+from analysis.common import write_frame
 
 
 LOGGER = logging.getLogger("analysis.metrics")

@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.loaders import AnalysisBundle, load_analysis_bundle
-from analysis.shared import (
+from analysis.common import (
     attach_spatial_blocks,
     build_county_pair_frame,
     build_nowcast_safety_rows,

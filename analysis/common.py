@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# shared.py  Andrew Belles  Mar 27th, 2026
+# common.py  Andrew Belles  Mar 27th, 2026
 #
 # Shared transforms and statistics for hypothesis testing, tables, and future figures.
 #

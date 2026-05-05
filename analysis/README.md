@@ -9,7 +9,7 @@ staging subtree.
 
 Current parent-level modules:
 - `analysis/loaders.py`: config parsing and canonical readers over `nowcast/` parquet outputs.
-- `analysis/shared.py`: shared county/state/year transforms plus grouped bootstrap and majority-test helpers reused by hypothesis tests, tables, and later visualizations.
+- `analysis/common.py`: shared county/state/year transforms plus grouped bootstrap and majority-test helpers reused by hypothesis tests, tables, and later visualizations.
 - `analysis/hypothesis.py`: config-driven meaningful-improvement and safety hypothesis testing.
 - `analysis/summary_tables.py`: leakage-adjusted summary-table writer over strict and postcensal outputs.
 

@@ -21,7 +21,7 @@ from graph.config import load_config as load_graph_config
 from graph.topology import run as run_graph_topology
 from analysis.hypothesis import run_hypothesis_tests
 from analysis.loaders import AnalysisBundle, load_analysis_config
-from analysis.shared import write_frame
+from analysis.common import write_frame
 from nowcast.censal import StrictResult, evaluate_strict
 from nowcast.common import load_county_display_lookup
 from nowcast.config import NowcastConfig, load_config as load_nowcast_config
